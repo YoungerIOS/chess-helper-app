@@ -1,5 +1,15 @@
 import numpy as np
+import os
+import sys
 
+# 管理开发环境与打包环境下的路径
+def resource_path(relative_path):  
+    """ 获取资源文件的绝对路径 """  
+    if hasattr(sys, '_MEIPASS'):  
+        # 如果是打包后的应用，则使用 sys._MEIPASS  
+        return os.path.join(sys._MEIPASS, relative_path)  
+    return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path)
+ 
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  
     xMin = float('inf')  # 使用正无穷大作为x坐标最小值的初始值  

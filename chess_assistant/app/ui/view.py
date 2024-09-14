@@ -1,9 +1,9 @@
 import tkinter as tk
-from tkinter import ttk
-from tkinter.font import Font
 import queue
 import threading
 import json
+import os
+import sys
 from chess.screenshot import capture_region, get_position, update_params
 from chess import engine
 
@@ -113,7 +113,7 @@ class SimpleGUIApp:
         # 给检查队列的定时器设置id,便于管理定时器
         self.check_queue_id = None
 
-        self.root.after(500, lambda: print(f"按钮的尺寸：宽度={self.button_4.winfo_width()}, 高度={self.button_4.winfo_height()}"))
+        # self.root.after(500, lambda: print(f"按钮的尺寸：宽度={self.button_4.winfo_width()}, 高度={self.button_4.winfo_height()}"))
 
     # 按钮: 棋盘原点/棋盘定位
     def on_button_click_1(self):  
@@ -294,11 +294,14 @@ class SimpleGUIApp:
         canvas.create_oval(0, 0, 10, 10, fill='red')  # 绘制一个红色的圆点 
 
     def read_coordinate(self):
+        print(f"工作路径:{os.getcwd()}")
         x = 400
         y = 200
         try:  
             # 读取存在本地的坐标 
-            with open('./chess_assistant/app/json/coordinates.json', 'r') as file:
+            file_path = self.resource_path("json/coordinates.json")
+            print(f"当前路径:{file_path}")
+            with open(file_path, 'r') as file:
                 data = json.load(file)
                 board_region = data['region1']
                 x = board_region['left']
@@ -306,7 +309,14 @@ class SimpleGUIApp:
         except FileNotFoundError:  
             print("未找到coordinates.json文件") 
         return x, y
-  
+    
+    def resource_path(self, relative_path):  
+        """ 获取资源文件的绝对路径 """  
+        if hasattr(sys, '_MEIPASS'):  
+            # 如果是打包后的应用，则使用 sys._MEIPASS  
+            return os.path.join(sys._MEIPASS, relative_path)  
+        return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path) 
+    
 # 创建并显示GUI  
 def main():  
     root = tk.Tk()  

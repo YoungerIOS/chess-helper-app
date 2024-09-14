@@ -1,4 +1,4 @@
-from chess import engine, screenshot, recognition
+from chess import engine, recognition
 from tools import utils
 
 last_position = None

@@ -1,5 +1,6 @@
 import time
-import json
+import os
+import sys
 import subprocess
 import threading
 
@@ -19,7 +20,8 @@ def init_engine():
         # 如果 pikafish 不存在或者已经停止，则重新启动
         elif pikafish is None or pikafish.poll() is not None:
             # 开辟一个子进程, 运行引擎
-            pikafish_command = './chess_assistant/app/Pikafish/src/pikafish'
+            # 读取存在本地的坐标 
+            pikafish_command = resource_path("Pikafish/src/pikafish")
             try:  
                 pikafish = subprocess.Popen(pikafish_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) 
                 print("Pikafish 引擎已启动。")  
@@ -47,6 +49,13 @@ def terminate_engine():
             finally:  
                 pikafish = None
                 print("Pikafish 引擎已关闭。")
+
+def resource_path(relative_path):  
+    """ 获取资源文件的绝对路径 """  
+    if hasattr(sys, '_MEIPASS'):  
+        # 如果是打包后的应用，则使用 sys._MEIPASS  
+        return os.path.join(sys._MEIPASS, relative_path)  
+    return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path) 
     
 def get_best_move(fen, side, parameter):
     fen_string = fen + ' ' + ('w' if side else 'b')

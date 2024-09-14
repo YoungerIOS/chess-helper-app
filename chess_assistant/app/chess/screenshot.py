@@ -2,16 +2,24 @@ import pyautogui
 import mss
 import json
 import time
-import os
 import cv2
 import subprocess
 import queue
+import os
+import sys
 import threading
 import numpy as np
 from chess import process, engine
 
 engine_param_lock = threading.Lock()
 engine_param = None
+
+def resource_path(relative_path):  
+        """ 获取资源文件的绝对路径 """  
+        if hasattr(sys, '_MEIPASS'):  
+            # 如果是打包后的应用，则使用 sys._MEIPASS  
+            return os.path.join(sys._MEIPASS, relative_path)  
+        return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path) 
 
 def check_color(region, ranges, threshold):  
     # 截取屏幕区域  
@@ -100,7 +108,8 @@ def capture_region(result_queue, stop_event):
     engine.init_engine()
 
     # 读取存在本地的坐标 
-    with open('./chess_assistant/app/json/coordinates.json', 'r') as file:
+    file_path = resource_path("json/coordinates.json")
+    with open(file_path, 'r') as file:
         data = json.load(file)
         board_region = data['region1']
         timer_region = data['region2']
@@ -131,8 +140,6 @@ def capture_region(result_queue, stop_event):
         time.sleep(0.5)
 
 def get_position():  
-    print(f"工作路径:{os.getcwd()}") # 如果相对路径出问题,就看看cwd的打印,以这里为基点配置相对路径
-    
     # 等待用户将鼠标移动到截图区域的左上角位置  
     # print("等待中...") 
 
@@ -145,7 +152,7 @@ def get_position():
     region2 = {'left': (click_pos[0]+305), 'top': (click_pos[1]+430), 'width': 70, 'height': 70} 
 
     # 保存本地
-    save_path = './chess_assistant/app/json/coordinates.json'  
+    save_path = resource_path("json/coordinates.json")  
     data = {
         'region1': region1,
         'region2': region2

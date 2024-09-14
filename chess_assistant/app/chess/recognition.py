@@ -36,7 +36,7 @@ def get_board_data():
     error = ''
     try:
         # 尝试读取 JSON 文件
-        with open('./chess_assistant/app/json/board.json', 'r') as file:
+        with open(utils.resource_path("json/board.json"), 'r') as file:
             data = json.load(file)
 
         # 提取横坐标和纵坐标
@@ -46,7 +46,7 @@ def get_board_data():
         # print("读取的横坐标：", x_array)
         # print("读取的纵坐标：", y_array)
     except FileNotFoundError:
-        error = '文件未找到'
+        error = 'board.json文件未找到'
         print(error)
     return x_array, y_array, error
 # 识别棋盘
@@ -106,7 +106,7 @@ def board_recognition(img, gray):
     }
 
     # 写入 JSON 文件
-    with open('./chess_assistant/app/json/board.json', 'w') as file:
+    with open(utils.resource_path("json/board.json"), 'w') as file:
         json.dump(data, file)
 
     return x_array, y_array
@@ -156,9 +156,9 @@ def pieces_recognition(img, gray, param):
             platform = param['platform']
             path_str = ''
             if platform == 'JJ':
-                path_str = './chess_assistant/app/images/jj'
+                path_str = utils.resource_path("images/jj")
             else:
-                path_str = './chess_assistant/app/images/tiantian'
+                path_str = utils.resource_path("images/tiantian")
             best_match, best_score = find_best_match(img[y1:y2+1,x1:x2+1], path_str)  
             pieces.append((x, y, r, utils.cut_substring(best_match)))
             # print(f"棋子圆心与半径:({x},{y}), {r},Best match: {utils.cut_substring(best_match)} score {best_score}")
