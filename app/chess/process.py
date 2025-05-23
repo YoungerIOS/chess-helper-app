@@ -32,12 +32,15 @@ def main_process(img_origin, param):
 
     # 向引擎发送命令
     move, fen = engine.get_best_move(fen_str, is_red, param)
-    # print(f'{fen}\n{move}')
+    print(f"Debug - Move : {move}, FEN: {fen}")  # 添加调试信息
 
-    # 发送通知
-    info = utils.convert_move_to_chinese(move, board_array, is_red)
-
-    return info
+    try:
+        # 发送通知
+        info = utils.convert_move_to_chinese(move, board_array, is_red)
+        return info
+    except Exception as e:
+        print(f"Error in convert_move_to_chinese: move={move}, error={str(e)}")  # 添加错误信息
+        return "识别错误，请重试"
 
 
     

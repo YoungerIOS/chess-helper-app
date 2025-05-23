@@ -15,11 +15,11 @@ engine_param_lock = threading.Lock()
 engine_param = None
 
 def resource_path(relative_path):  
-        """ 获取资源文件的绝对路径 """  
-        if hasattr(sys, '_MEIPASS'):  
-            # 如果是打包后的应用，则使用 sys._MEIPASS  
-            return os.path.join(sys._MEIPASS, relative_path)  
-        return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path) 
+    """ 获取资源文件的绝对路径 """  
+    if hasattr(sys, '_MEIPASS'):  
+        # 如果是打包后的应用，则使用 sys._MEIPASS  
+        return os.path.join(sys._MEIPASS, relative_path)  
+    return os.path.join(os.path.abspath("./app/"), relative_path) 
 
 def check_color(region, ranges, threshold):  
     # 截取屏幕区域  
@@ -139,17 +139,12 @@ def capture_region(result_queue, stop_event):
             got_move = False
         time.sleep(0.5)
 
-def get_position():  
-    # 等待用户将鼠标移动到截图区域的左上角位置  
-    # print("等待中...") 
-
-    # 捕获当前鼠标位置
-    click_pos = pyautogui.position() 
+def get_position(x, y):  
+    # 确定截图区域  
     width = 375  
     height = 415  
-    # 确定截图区域  
-    region1 = {'left': click_pos[0], 'top': click_pos[1], 'width': width, 'height': height}  
-    region2 = {'left': (click_pos[0]+305), 'top': (click_pos[1]+430), 'width': 70, 'height': 70} 
+    region1 = {'left': x, 'top': y, 'width': width, 'height': height}  
+    region2 = {'left': (x+305), 'top': (y+480), 'width': 70, 'height': 70} 
 
     # 保存本地
     save_path = resource_path("json/coordinates.json")  
@@ -160,8 +155,19 @@ def get_position():
     with open(save_path, 'w') as file:
         json.dump(data, file)
 
-    # 通知
-    # display_notification("棋盘定位完毕!", "切勿移动游戏界面!", "请开始你的游戏...")
+    # 截取两个区域的图片
+    with mss.mss() as sct:
+        # 截取棋盘区域
+        board_screenshot = sct.grab(region1)
+        board_img = np.frombuffer(board_screenshot.bgra, np.uint8).reshape(board_screenshot.height, board_screenshot.width, 4)
+        board_img = board_img[:, :, :3]  # 去掉 alpha 通道
+        cv2.imwrite(resource_path('images/board/board.png'), board_img)
+
+        # 截取计时器区域
+        timer_screenshot = sct.grab(region2)
+        timer_img = np.frombuffer(timer_screenshot.bgra, np.uint8).reshape(timer_screenshot.height, timer_screenshot.width, 4)
+        timer_img = timer_img[:, :, :3]  # 去掉 alpha 通道
+        cv2.imwrite(resource_path('images/board/timer.png'), timer_img)
 
     return region1
     

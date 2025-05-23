@@ -55,7 +55,7 @@ def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):  
         # 如果是打包后的应用，则使用 sys._MEIPASS  
         return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path) 
+    return os.path.join(os.path.abspath("./app/"), relative_path)
     
 def get_best_move(fen, side, parameter):
     fen_string = fen + ' ' + ('w' if side else 'b')

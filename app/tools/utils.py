@@ -8,7 +8,7 @@ def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):  
         # 如果是打包后的应用，则使用 sys._MEIPASS  
         return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./chess_assistant/app/"), relative_path)
+    return os.path.join(os.path.abspath("./app/"), relative_path)
  
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  
@@ -224,11 +224,11 @@ def convert_move_to_chinese(move, board_array, is_red):
         action2 = "退" if is_red else "进"
         direction = action1 if start_row < end_row else action2
 
-        # 车、炮、卒、将帅 在描述“进” "退" 时，末尾数字是跨越的行数  
+        # 车、炮、卒、将帅 在描述"进" "退" 时，末尾数字是跨越的行数  
         if piece_type in ['r', 'R', 'c', 'C', 'p', 'P', 'k', 'K']:  
             desc = f"{name}{start_colunm}{direction}{crossed_row}"
         else:  
-            # 马、象、士在“进” "退" 时，末尾数字是终点所在列数
+            # 马、象、士在"进" "退" 时，末尾数字是终点所在列数
             desc = f"{name}{(start_colunm)}{direction}{end_colunm}" 
 
     return desc

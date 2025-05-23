@@ -105,7 +105,11 @@ def board_recognition(img, gray):
         "y": y_array
     }
 
-    # 写入 JSON 文件
+    # 确保json目录存在
+    json_dir = os.path.dirname(utils.resource_path("json/board.json"))
+    os.makedirs(json_dir, exist_ok=True)
+    
+    # 保存board.json
     with open(utils.resource_path("json/board.json"), 'w') as file:
         json.dump(data, file)
 
@@ -282,11 +286,11 @@ def calculate_pieces_position(x_array, y_array, circles):
         nearest_x_index = find_nearest_index(cx, x_array)  
         nearest_y_index = find_nearest_index(cy, y_array)  
           
-        # 可选：检查圆心是否“足够接近”某条竖线或横线（使用半径作为阈值）  
+        # 可选：检查圆心是否"足够接近"某条竖线或横线（使用半径作为阈值）  
         # 这里我们简单地标记最近的竖线和横线，不考虑阈值  
           
         # 在pieceArray中标记圆心位置  
-        # 注意：这里我们假设要在一个“单元格”中标记圆心，即一个特定的(x, y)索引  
+        # 注意：这里我们假设要在一个"单元格"中标记圆心，即一个特定的(x, y)索引  
         pieceArray[nearest_y_index][nearest_x_index] = name  # 或者使用其他标记方式  
           
         # 如果想要表示圆心的范围（例如，使用半径画圆），则需要更复杂的逻辑  
