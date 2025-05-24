@@ -19,45 +19,45 @@ def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):  
         # 如果是打包后的应用，则使用 sys._MEIPASS  
         return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./app/"), relative_path) 
+    return os.path.join(os.path.abspath("./app/"), relative_path)
 
 def check_color(region, ranges, threshold):  
     # 截取屏幕区域  
-        with mss.mss() as sct:  
-            # mss.grab()返回的是 BGRA 格式的原始数据 
-            screenshot = sct.grab(region) 
-            # 转成大小确定的图片对象
-            img_np = np.frombuffer(screenshot.bgra, np.uint8).reshape(screenshot.height, screenshot.width, 4)  
-            img_np = img_np[:, :, :3]  # 去掉 alpha 通道  
+    with mss.mss() as sct:  
+        # mss.grab()返回的是 BGRA 格式的原始数据 
+        screenshot = sct.grab(region) 
+        # 转成大小确定的图片对象
+        img_np = np.frombuffer(screenshot.bgra, np.uint8).reshape(screenshot.height, screenshot.width, 4)  
+        img_np = img_np[:, :, :3]  # 去掉 alpha 通道  
   
-            # 保存截图（可选）  
-            # cv2.imwrite('./chess_assistant/app/uploads/rect_region.png', img_np)  
+        # 保存截图（可选）  
+        # cv2.imwrite('./chess_assistant/app/uploads/rect_region.png', img_np)  
   
-            # 转换到 HSV 颜色空间  
-            hsv_img = cv2.cvtColor(img_np, cv2.COLOR_BGR2HSV)  
+        # 转换到 HSV 颜色空间  
+        hsv_img = cv2.cvtColor(img_np, cv2.COLOR_BGR2HSV)  
   
-            # 初始化黄色掩码  
-            color_mask = np.zeros_like(hsv_img[:, :, 0])  
+        # 初始化黄色掩码  
+        color_mask = np.zeros_like(hsv_img[:, :, 0])  
   
-            # 遍历每个黄色范围并更新掩码  
-            for lower, upper in ranges:  
-                lower = np.array(lower, dtype=np.uint8)  
-                upper = np.array(upper, dtype=np.uint8)  
-                color_mask_temp = cv2.inRange(hsv_img, lower, upper)  
-                color_mask = cv2.bitwise_or(color_mask, color_mask_temp)  
+        # 遍历每个黄色范围并更新掩码  
+        for lower, upper in ranges:  
+            lower = np.array(lower, dtype=np.uint8)  
+            upper = np.array(upper, dtype=np.uint8)  
+            color_mask_temp = cv2.inRange(hsv_img, lower, upper)  
+            color_mask = cv2.bitwise_or(color_mask, color_mask_temp)  
   
-            # 形态学操作去除噪点  
-            kernel = np.ones((5, 5), np.uint8)  
-            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)  
+        # 形态学操作去除噪点  
+        kernel = np.ones((5, 5), np.uint8)  
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)  
   
-            # 计算黄色区域的像素总数  
-            total = cv2.countNonZero(color_mask)  
-            # print(f"目标颜色面积为{total}")  
+        # 计算黄色区域的像素总数  
+        total = cv2.countNonZero(color_mask)  
+        # print(f"目标颜色面积为{total}")  
   
-            if total > threshold:  
-                return True
-            else:    
-                return False 
+        if total > threshold:  
+            return True
+        else:    
+            return False 
     
 def decide_side(rect_region):
     # 绿色、黄色和红色的 HSV 值范围
@@ -103,6 +103,7 @@ def update_params(new_value):
         engine_param = new_value
 
 def capture_region(result_queue, stop_event): 
+    """截图和分析函数"""
     # 启动象棋引擎
     global engine_param
     engine.init_engine()
@@ -127,7 +128,11 @@ def capture_region(result_queue, stop_event):
                     # 识别图片
                     with engine_param_lock:
                         print(f"Engine param is: {engine_param}")
-                        result = process.main_process(screenshot, engine_param)
+                        # 定义显示回调函数
+                        def display_callback(fen_str, is_red=True):
+                            result_queue.put(("分析局面...", fen_str, is_red))
+                            
+                        result = process.main_process(screenshot, engine_param, display_callback)
                         print(f"------>>{result}")
                         if len(result) == 4:
                             result_queue.put(result)

@@ -3,7 +3,7 @@ from tools import utils
 
 last_position = None
 
-def main_process(img_origin, param):  
+def main_process(img_origin, param, display_callback=None):  
     # 棋局图像  
     # img_path = './app/uploads/图像.jpeg' 
 
@@ -27,8 +27,10 @@ def main_process(img_origin, param):
 
     # 转成 FEN字符串
     fen_str, board_array = utils.switch_to_fen(position, is_red)
-    # for i, row in enumerate(board_array):  
-    #     print(row)
+    
+    # 立即显示当前局面
+    if display_callback:
+        display_callback(fen_str, is_red)
 
     # 向引擎发送命令
     move, fen = engine.get_best_move(fen_str, is_red, param)

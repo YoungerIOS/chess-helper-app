@@ -9,6 +9,7 @@ import threading
 import sys
 from chess.screenshot import capture_region, get_position, update_params
 from chess import engine
+from chess.board_display import BoardDisplay
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
         
         # 顶部文本显示区域
-        self.move_display = QLabel("等待引擎分析...")
+        self.move_display = QLabel('<span style="color: red;">等待引擎分析...</span>')
         self.move_display.setAlignment(Qt.AlignCenter)
         self.move_display.setFont(QFont("Arial", 20, QFont.Bold))
         self.move_display.setStyleSheet("""
@@ -55,16 +56,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.move_display)
         
         # 中间棋盘区域
-        self.board_frame = QFrame()
-        self.board_frame.setStyleSheet("""
-            QFrame {
-                background-color: #e8c887;
-                border: 2px solid #8b4513;
-                border-radius: 5px;
-            }
-        """)
-        self.board_frame.setMinimumHeight(500)  # 调整棋盘高度
-        main_layout.addWidget(self.board_frame)
+        self.board_display = BoardDisplay()
+        self.board_display.setMinimumHeight(500)  # 调整棋盘高度
+        main_layout.addWidget(self.board_display)
         
         # 底部控制区域
         control_layout = QHBoxLayout()
@@ -231,25 +225,28 @@ class MainWindow(QMainWindow):
     def check_queue(self):
         """检查结果队列"""
         if not self.result_queue.empty():
-            text = self.result_queue.get()
-            self.update_text(text)
+            result = self.result_queue.get()
+            if isinstance(result, tuple) and len(result) == 3:
+                text, fen_str, is_red = result
+                self.update_text(text)
+                self.board_display.update_board(fen_str, is_red)
+            else:
+                self.update_text(result)
     
     def update_text(self, text):
         """更新显示文本"""
         if len(text) == 4:
-            self.lines = ["", self.lines[2], text]
+            self.lines = ["", "", text]  # 只保留第一行和第三行
         else:
-            self.lines = [text, self.lines[1], self.lines[2]]
+            self.lines = [text, "", self.lines[2]]
         
         # 更新显示
         display_text = ""
         for i, line in enumerate(self.lines):
             if i == 0:
                 display_text += f'<span style="color: red; font-size: 18pt;">{line}</span><br>'
-            elif i == 1:
-                display_text += f'<span style="font-size: 26pt;">{line}</span><br>'
-            else:
-                display_text += f'<span style="color: white; font-size: 34pt;">{line}</span>'
+            elif i == 2:
+                display_text += f'<span style="color: black; font-size: 34pt;">{line}</span>'
         
         self.move_display.setText(display_text)
         
