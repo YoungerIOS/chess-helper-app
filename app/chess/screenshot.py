@@ -10,6 +10,7 @@ import sys
 import threading
 import numpy as np
 from chess import process, engine
+from chess.message import Message, MessageType
 
 engine_param_lock = threading.Lock()
 engine_param = None
@@ -130,22 +131,20 @@ def capture_region(result_queue, stop_event):
                 with mss.mss() as sct:  
                     # 截屏
                     screenshot = sct.grab(board_region) 
-                    result_queue.put("引擎正在计算...")
+                    result_queue.put(Message(MessageType.STATUS, "引擎正在计算..."))
                     # 识别图片
                     with engine_param_lock:
                         print(f"Engine param is: {engine_param}")
                         # 定义显示回调函数
-                        def display_callback(fen_str, is_red=True):
-                            result_queue.put(("分析局面...", fen_str, is_red))
+                        def display_callback(msg):
+                            result_queue.put(msg)
                             
-                        result = process.main_process(screenshot, engine_param, display_callback)
-                        print(f"------>>{result}")
-                        if len(result) == 4:
-                            result_queue.put(result)
-                            # display_notification(result, "", "")
-                            got_move = True
-                        else:
-                            got_move = False
+                        move_text_msg, move_code_msg = process.main_process(screenshot, engine_param, display_callback)
+                        print(f"------>>{move_text_msg.content}, {move_code_msg.content}")
+                        if move_code_msg.content:  # 如果有着法代码
+                            result_queue.put(move_code_msg)  # 先发送着法代码用于显示箭头
+                            result_queue.put(move_text_msg)  # 再发送中文着法用于显示文本
+                        got_move = True
         else:
             got_move = False
         time.sleep(0.5)

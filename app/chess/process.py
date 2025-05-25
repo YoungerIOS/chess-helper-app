@@ -1,5 +1,6 @@
 from chess import engine, recognition
 from tools import utils
+from chess.message import Message, MessageType
 
 last_position = None
 
@@ -30,7 +31,7 @@ def main_process(img_origin, param, display_callback=None):
     
     # 立即显示当前局面
     if display_callback:
-        display_callback(fen_str, is_red)
+        display_callback(Message(MessageType.BOARD_DISPLAY, "分析局面...", fen_str=fen_str, is_red=is_red))
 
     # 向引擎发送命令
     move, fen = engine.get_best_move(fen_str, is_red, param)
@@ -38,11 +39,11 @@ def main_process(img_origin, param, display_callback=None):
 
     try:
         # 发送通知
-        info = utils.convert_move_to_chinese(move, board_array, is_red)
-        return info
+        chinese_move = utils.convert_move_to_chinese(move, board_array, is_red)
+        return Message(MessageType.MOVE_TEXT, chinese_move), Message(MessageType.MOVE_CODE, move, fen_str=fen_str, is_red=is_red)
     except Exception as e:
         print(f"Error in convert_move_to_chinese: move={move}, error={str(e)}")  # 添加错误信息
-        return "识别错误，请重试"
+        return Message(MessageType.STATUS, "识别错误，请重试"), Message(MessageType.BOARD_DISPLAY, "", fen_str=fen_str, is_red=is_red)
 
 
     

@@ -1,7 +1,8 @@
 import os
 from PySide6.QtWidgets import QLabel
-from PySide6.QtGui import QPixmap, QPainter
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF
+from PySide6.QtCore import Qt, QRect, QPointF
+import math
 
 class BoardDisplay(QLabel):
     def __init__(self, parent=None):
@@ -12,6 +13,7 @@ class BoardDisplay(QLabel):
         self.cell_size = 0  # 格子大小，将在resizeEvent中计算
         self.margin = 20  # 棋盘边距
         self.is_black_bottom = True  # 黑方是否在下方
+        self.move_arrow = None  # 存储当前着法的箭头信息 (start_x, start_y, end_x, end_y)
         
         # 加载棋盘背景
         self.board_bg = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.jpeg'))
@@ -39,10 +41,23 @@ class BoardDisplay(QLabel):
     def resizeEvent(self, event):
         """处理窗口大小改变事件"""
         super().resizeEvent(event)
+        
+        # 计算棋盘图片的缩放大小
+        scaled_board = self.board_bg.scaled(
+            self.width(), self.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        
+        # 调整自身大小以匹配缩放后的棋盘图片
+        self.setFixedHeight(scaled_board.height())
+        
         # 计算格子大小
-        width = self.width() - 2 * self.margin
-        height = self.height() - 2 * self.margin
-        self.cell_size = min(width // self.board_size[0], height // self.board_size[1])
+        self.cell_size = min(
+            scaled_board.width() // self.board_size[0],
+            scaled_board.height() // self.board_size[1]
+        )
+        
         self.update()
     
     def paintEvent(self, event):
@@ -57,7 +72,7 @@ class BoardDisplay(QLabel):
             Qt.SmoothTransformation
         )
         x = (self.width() - scaled_board.width()) // 2
-        y = (self.height() - scaled_board.height()) // 2
+        y = 0  # 不再需要垂直居中，因为高度已经匹配
         painter.drawPixmap(x, y, scaled_board)
         
         # 计算实际的格子大小（基于缩放后的棋盘图片）
@@ -88,11 +103,48 @@ class BoardDisplay(QLabel):
                 piece_y -= scaled_piece.height() // 2
                 
                 painter.drawPixmap(piece_x, piece_y, scaled_piece)
+        
+        # 绘制箭头
+        if self.move_arrow:
+            start_x, start_y, end_x, end_y = self.move_arrow
+            # 计算箭头的实际坐标
+            arrow_start_x = x + start_x * cell_width + cell_width // 2 + offset_x
+            arrow_start_y = y + start_y * cell_height + cell_height // 2
+            arrow_end_x = x + end_x * cell_width + cell_width // 2 + offset_x
+            arrow_end_y = y + end_y * cell_height + cell_height // 2
+            
+            # 设置箭头样式
+            pen = QPen(QColor(255, 0, 0, 180))  # 半透明红色
+            pen.setWidth(3)
+            painter.setPen(pen)
+            
+            # 绘制箭头线
+            painter.drawLine(arrow_start_x, arrow_start_y, arrow_end_x, arrow_end_y)
+            
+            # 计算箭头头部
+            angle = math.atan2(arrow_end_y - arrow_start_y, arrow_end_x - arrow_start_x)
+            arrow_size = 15  # 箭头大小
+            
+            # 计算箭头头部的两个点
+            arrow_head1 = QPointF(
+                arrow_end_x - arrow_size * math.cos(angle - math.pi/6),
+                arrow_end_y - arrow_size * math.sin(angle - math.pi/6)
+            )
+            arrow_head2 = QPointF(
+                arrow_end_x - arrow_size * math.cos(angle + math.pi/6),
+                arrow_end_y - arrow_size * math.sin(angle + math.pi/6)
+            )
+            
+            # 绘制箭头头部
+            arrow_head = QPolygonF([QPointF(arrow_end_x, arrow_end_y), arrow_head1, arrow_head2])
+            painter.setBrush(QColor(255, 0, 0, 180))  # 半透明红色填充
+            painter.drawPolygon(arrow_head)
     
-    def update_board(self, fen_str, is_red=True):
+    def update_board(self, fen_str, is_red=True, move=None):
         """根据FEN字符串更新棋盘显示"""
-        print(f"Debug - update_board received is_red: {is_red}, fen_str: {fen_str}")  # 添加调试信息
+        print(f"Debug - update_board received is_red: {is_red}, fen_str: {fen_str}, move: {move}")
         self.pieces.clear()
+        self.move_arrow = None  # 清除之前的箭头
         
         if not fen_str:
             return
@@ -104,7 +156,7 @@ class BoardDisplay(QLabel):
         # 根据红方位置调整行顺序
         if not is_red:  # 如果红方不在下方，需要反转行顺序
             rows.reverse()
-            print("Debug - Reversing rows because is_red is False")  # 添加调试信息
+            print("Debug - Reversing rows because is_red is False")
         
         for y, row in enumerate(rows):
             x = 0
@@ -122,5 +174,26 @@ class BoardDisplay(QLabel):
                 else:
                     # 忽略其他字符
                     continue
+        
+        # 处理着法代码
+        if move and len(move) == 4:
+            # 解析着法代码
+            start_col = ord(move[0]) - ord('a')  # 将字母转换为0-8的数字
+            start_row = int(move[1])
+            end_col = ord(move[2]) - ord('a')
+            end_row = int(move[3])
+            
+            # 注意：引擎使用的坐标系是从上到下0-9，从左到右a-i
+            # 如果红方在上方，需要反转横坐标，以匹配棋子的显示
+            if not is_red:
+                start_col = 8 - start_col
+                end_col = 8 - end_col
+            else:
+                # 如果红方在下方，需要反转纵坐标，因为引擎的坐标系是从上到下0-9
+                start_row = 9 - start_row
+                end_row = 9 - end_row
+            
+            print(f"Debug - Arrow coordinates: start({start_col}, {start_row}) -> end({end_col}, {end_row})")
+            self.move_arrow = (start_col, start_row, end_col, end_row)
         
         self.update() 

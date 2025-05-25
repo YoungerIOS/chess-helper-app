@@ -11,6 +11,7 @@ from chess.screenshot import capture_region, get_position, update_params, trigge
 from chess import engine
 from chess.board_display import BoardDisplay
 from chess.template_maker import save_templates
+from chess.message import Message, MessageType
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -21,10 +22,27 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         screen_height = screen.size().height()
         
-        # 设置窗口高度为屏幕高度的 80%
-        height = int(screen_height * 0.8)
-        # 保持宽高比约为 0.56 (814/1448)
-        width = int(height * 0.56)
+        # 加载棋盘图片并计算其宽高比
+        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.jpeg'))
+        board_ratio = board_img.width() / board_img.height()
+        
+        # 使用屏幕高度 x 80% x 0.56 计算窗口宽度, 不为什么, 就是觉得协调,
+        nice_height = int(screen_height * 0.8)
+        width = int(nice_height * 0.56)
+        
+        # 计算棋盘图片在窗口中的实际高度
+        board_height = int(width / board_ratio)
+        
+        # 计算其他UI元素的总高度
+        other_heights = (
+            100 +  # 顶部文本显示区域
+            35 +   # 中间按钮行
+            35 +   # 底部控制区域
+            30     # 布局间距
+        )
+        
+        # 设置窗口高度为棋盘高度加上其他UI元素的高度
+        height = board_height + other_heights
         
         print(f"Screen height: {screen_height}")
         print(f"Window size: {width}x{height}")
@@ -159,7 +177,7 @@ class MainWindow(QMainWindow):
         
         # 中间棋盘区域
         self.board_display = BoardDisplay()
-        self.board_display.setMinimumHeight(450)  # 调整棋盘高度
+        # 移除固定高度设置，让棋盘自适应图片大小
         self.board_display.setStyleSheet("""
             QWidget {
                 background-color: #4F4F4F;
@@ -295,7 +313,7 @@ class MainWindow(QMainWindow):
         self.decrease_btn.clicked.connect(self.on_decrease_param)
         param_layout.addWidget(self.decrease_btn)
         
-        self.param_label = QLabel("20")
+        self.param_label = QLabel(self.engine_params[self.engine_params["goParam"]])
         self.param_label.setAlignment(Qt.AlignCenter)
         self.param_label.setFixedHeight(35)
         self.param_label.setStyleSheet("""
@@ -475,12 +493,31 @@ class MainWindow(QMainWindow):
         """检查结果队列"""
         if not self.result_queue.empty():
             result = self.result_queue.get()
-            if isinstance(result, tuple) and len(result) == 3:
-                text, fen_str, is_red = result
-                self.update_text(text)
-                self.board_display.update_board(fen_str, is_red)
+            if isinstance(result, Message):
+                if result.type == MessageType.BOARD_DISPLAY:
+                    # 显示棋局
+                    self.board_display.update_board(result.kwargs['fen_str'], result.kwargs['is_red'])
+                    self.update_text(result.content)
+                elif result.type == MessageType.MOVE_CODE:
+                    # 显示着法箭头
+                    self.board_display.update_board(result.kwargs['fen_str'], result.kwargs['is_red'], result.content)
+                elif result.type == MessageType.MOVE_TEXT:
+                    # 显示着法文本
+                    self.update_text(result.content)
+                elif result.type == MessageType.STATUS:
+                    # 显示状态消息
+                    self.update_text(result.content)
             else:
-                self.update_text(result)
+                # 兼容旧的消息格式
+                if isinstance(result, tuple) and len(result) == 3:
+                    text, fen_str, is_red = result
+                    if text == "分析局面...":
+                        self.board_display.update_board(fen_str, is_red)
+                        self.update_text(text)
+                    else:
+                        self.board_display.update_board(fen_str, is_red, text)
+                else:
+                    self.update_text(str(result))
     
     def update_text(self, text):
         """更新显示文本"""

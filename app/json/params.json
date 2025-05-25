@@ -1,6 +1,6 @@
 {
     "platform": "TT",
-    "movetime": "21000",
+    "movetime": "5000",
     "depth": "24",
     "goParam": "depth"
 }
