@@ -1,1 +1,6 @@
-{"current": "depth", "value": {"depth": "28", "movetime": "3000"}}
+{
+    "platform": "TT",
+    "movetime": "21000",
+    "depth": "24",
+    "goParam": "depth"
+}

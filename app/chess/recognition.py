@@ -49,6 +49,7 @@ def get_board_data():
         error = 'board.json文件未找到'
         print(error)
     return x_array, y_array, error
+
 # 识别棋盘
 def board_recognition(img, gray):
     x_arr, y_arr, error = get_board_data()
@@ -117,7 +118,6 @@ def board_recognition(img, gray):
 
 # 识别棋子
 def pieces_recognition(img, gray, param):
-
     # 模糊处理，不管是用mediaBlur还是GaussianBlur, 实际发现这不是必要的。用霍夫圆检测，直接使用灰度图也一样能找出来，可能棋子的圆相对规范的原因？
     #blur = cv2.medianBlur(gray, 5)
     #gaus = cv2.GaussianBlur(gray,(3,3),0)
@@ -135,7 +135,7 @@ def pieces_recognition(img, gray, param):
     if circles is not None:
         circles = np.round(circles[0, :]).astype("int")
         # print("Total circles", len(circles))
-        
+                
         for idx, (x, y, r) in enumerate(circles):  # index 用来后面存图片比对用的
             # 在图像上画圆
             # cv2.circle(img, (x, y), r, (0, 255, 0), 2)

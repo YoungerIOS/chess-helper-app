@@ -13,6 +13,7 @@ from chess import process, engine
 
 engine_param_lock = threading.Lock()
 engine_param = None
+manual_trigger = False  # 添加手动触发标志
 
 def resource_path(relative_path):  
     """ 获取资源文件的绝对路径 """  
@@ -60,6 +61,11 @@ def check_color(region, ranges, threshold):
             return False 
     
 def decide_side(rect_region):
+    global manual_trigger
+    if manual_trigger:
+        manual_trigger = False  # 使用后立即重置
+        return True
+        
     # 绿色、黄色和红色的 HSV 值范围
     green_ranges = [  
         ([35, 50, 50], [75, 255, 255]),  # 浅绿色  
@@ -175,5 +181,10 @@ def get_position(x, y):
         cv2.imwrite(resource_path('images/board/timer.png'), timer_img)
 
     return region1
+
+def trigger_manual_recognition():
+    """触发一次手动识别"""
+    global manual_trigger
+    manual_trigger = True
     
 
