@@ -1,5 +1,6 @@
-from chess import engine, recognition
+from chess import recognition
 from tools import utils
+from chess.engine import get_best_move
 from chess.message import Message, MessageType
 
 last_position = None
@@ -31,10 +32,10 @@ def main_process(img_origin, param, display_callback=None):
     
     # 立即显示当前局面
     if display_callback:
-        display_callback(Message(MessageType.BOARD_DISPLAY, "分析局面...", fen_str=fen_str, is_red=is_red))
+        display_callback(Message(MessageType.BOARD_DISPLAY, "已获取局面...", fen_str=fen_str, is_red=is_red))
 
     # 向引擎发送命令
-    move, fen = engine.get_best_move(fen_str, is_red, param)
+    move, fen = get_best_move(fen_str, is_red, param, display_callback)
     print(f"Debug - Move : {move}, FEN: {fen}")  # 添加调试信息
 
     try:

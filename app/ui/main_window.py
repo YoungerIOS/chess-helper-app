@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         self.load_params()
         
         # 顶部文本显示区域
-        self.move_display = QLabel('<span style="color: red;">等待引擎分析...</span>')
+        self.move_display = QLabel('<span style="color: red;">等待获取棋局...</span>')
         self.move_display.setAlignment(Qt.AlignCenter)
         self.move_display.setFont(QFont("Arial", 18, QFont.Bold))
         self.move_display.setFixedHeight(100)  # 设置固定高度
@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 padding: 3px;
+                line-height: 1.2;  /* 减小行间距 */
             }
         """)
         main_layout.addWidget(self.move_display)
@@ -290,7 +291,7 @@ class MainWindow(QMainWindow):
         param_layout.setSpacing(2)
         
         self.decrease_btn = QPushButton("-")
-        self.decrease_btn.setFixedSize(20, 35)  # 宽度是高度的一半
+        self.decrease_btn.setFixedSize(20, 35) 
         self.decrease_btn.setFont(QFont("Arial", 11))
         self.decrease_btn.setStyleSheet("""
             QPushButton {
@@ -329,7 +330,7 @@ class MainWindow(QMainWindow):
         param_layout.addWidget(self.param_label)
         
         self.increase_btn = QPushButton("+")
-        self.increase_btn.setFixedSize(20, 35)  # 宽度是高度的一半
+        self.increase_btn.setFixedSize(20, 35) 
         self.increase_btn.setFont(QFont("Arial", 11))
         self.increase_btn.setStyleSheet("""
             QPushButton {
@@ -507,17 +508,6 @@ class MainWindow(QMainWindow):
                 elif result.type == MessageType.STATUS:
                     # 显示状态消息
                     self.update_text(result.content)
-            else:
-                # 兼容旧的消息格式
-                if isinstance(result, tuple) and len(result) == 3:
-                    text, fen_str, is_red = result
-                    if text == "分析局面...":
-                        self.board_display.update_board(fen_str, is_red)
-                        self.update_text(text)
-                    else:
-                        self.board_display.update_board(fen_str, is_red, text)
-                else:
-                    self.update_text(str(result))
     
     def update_text(self, text):
         """更新显示文本"""
@@ -530,9 +520,9 @@ class MainWindow(QMainWindow):
         display_text = ""
         for i, line in enumerate(self.lines):
             if i == 0:
-                display_text += f'<span style="color: red; font-size: 18pt;">{line}</span><br>'
+                display_text += f'<span style="color: red; font-size: 18pt; line-height: 1;">{line}</span><br>'
             elif i == 2:
-                display_text += f'<span style="color: black; font-size: 34pt;">{line}</span>'
+                display_text += f'<span style="color: black; font-size: 45pt; line-height: 1;">{line}</span>'
         
         self.move_display.setText(display_text)
         
@@ -665,7 +655,7 @@ class MainWindow(QMainWindow):
             self.follow_cursor = False  # 显示原点时不跟随光标
             self.create_position_dot()
         else:
-            self.move_display.setText("将光标移到棋盘左上角,\n不要点击,\n然后按下S键~")
+            self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
             self.is_positioning = True
             self.follow_cursor = True  # 重新定位时跟随光标
             self.start_cursor_tracking()  # 开始跟踪
@@ -681,9 +671,6 @@ class MainWindow(QMainWindow):
             
             # 使用get_position保存坐标
             get_position(x, y)
-            
-            # 更新显示
-            self.move_display.setText("定位完成!")
             
             # 重置定位状态
             self.is_positioning = False
@@ -721,9 +708,9 @@ class MainWindow(QMainWindow):
             
             # 保存模板
             if save_templates():
-                self.move_display.setText("定位完成!\n模板已保存")
+                self.move_display.setText('<span style="color: green;">定位完成!\n模板已保存。</span>')
             else:
-                self.move_display.setText("定位完成!\n模板保存失败")
+                self.move_display.setText('<span style="color: red;">定位完成!\n模板保存失败。</span>')
     
     def stop_analysis(self):
         """停止分析线程"""

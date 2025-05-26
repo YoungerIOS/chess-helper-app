@@ -131,7 +131,7 @@ def capture_region(result_queue, stop_event):
                 with mss.mss() as sct:  
                     # 截屏
                     screenshot = sct.grab(board_region) 
-                    result_queue.put(Message(MessageType.STATUS, "引擎正在计算..."))
+                    result_queue.put(Message(MessageType.STATUS, "轮到我方走棋..."))
                     # 识别图片
                     with engine_param_lock:
                         print(f"Engine param is: {engine_param}")
@@ -144,6 +144,9 @@ def capture_region(result_queue, stop_event):
                         if move_code_msg.content:  # 如果有着法代码
                             result_queue.put(move_code_msg)  # 先发送着法代码用于显示箭头
                             result_queue.put(move_text_msg)  # 再发送中文着法用于显示文本
+                        else:  # 如果发生错误
+                            result_queue.put(move_text_msg)  # 发送错误消息
+                            result_queue.put(move_code_msg)  # 发送空的棋盘显示消息
                         got_move = True
         else:
             got_move = False
