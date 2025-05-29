@@ -15,11 +15,11 @@ def main_process(img_origin, param, display_callback=None):
     # 识别棋盘
     x_array, y_array = recognition.board_recognition(image, gray)
 
-    # 识别棋子 
-    pieces = recognition.pieces_recognition(image, gray, param)
+    # 识别棋子类型和坐标
+    piecesArray, is_red = recognition.pieces_recognition(image, gray, param, x_array, y_array)
 
     # 棋子位置
-    position, is_red = recognition.calculate_pieces_position(x_array, y_array, pieces) # 按原始位置排列的二维数组
+    # position, is_red = recognition.calculate_pieces_position(x_array, y_array, piecesArray) # 按原始位置排列的二维数组
 
     # 检查局面是否变化
     # global last_position
@@ -28,7 +28,7 @@ def main_process(img_origin, param, display_callback=None):
     # last_position = position
 
     # 转成 FEN字符串
-    fen_str, board_array = utils.switch_to_fen(position, is_red)
+    fen_str, board_array = utils.switch_to_fen(piecesArray, is_red)
     
     # 立即显示当前局面
     if display_callback:
@@ -36,6 +36,8 @@ def main_process(img_origin, param, display_callback=None):
 
     # 向引擎发送命令
     move, fen = get_best_move(fen_str, is_red, param, display_callback)
+    # move = 'h9g7'
+    # fen = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/RNBAKABNR w'
     print(f"Debug - Move : {move}, FEN: {fen}")  # 添加调试信息
 
     try:

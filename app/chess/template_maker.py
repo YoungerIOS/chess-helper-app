@@ -6,7 +6,7 @@ import mss
 from .recognition import (
     pre_processing_image,
     board_recognition,
-    check_chess_piece_color_v2,
+    recognize_piece_color,
     find_nearest_index
 )
 
@@ -109,7 +109,7 @@ def save_chess_pieces(img, gray, x_array, y_array, output_dir="chess_pieces"):
         piece_img = img[y1:y2, x1:x2]
         
         # 判断棋子颜色
-        color = check_chess_piece_color_v2(piece_img)
+        color = recognize_piece_color(piece_img)
         
         if color:
             # 获取棋子类型
