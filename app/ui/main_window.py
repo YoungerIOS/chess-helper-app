@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
         # 添加其他按钮
         other_buttons = [
             ("按钮2", lambda: None),
-            ("按钮3", lambda: None),
+            ("开始", self.on_start),  # 将开始/停止功能移到按钮3
         ]
         
         for text, callback in other_buttons:
@@ -195,8 +195,6 @@ class MainWindow(QMainWindow):
         
         # 创建控制按钮
         buttons = [
-            ("显示原点", self.on_position_board),
-            ("开始", self.on_start),
             ("分析", self.on_analyze),
             ("手动", self.on_manual_analyze),
         ]
@@ -225,6 +223,62 @@ class MainWindow(QMainWindow):
             """)
             btn.clicked.connect(callback)
             control_layout.addWidget(btn)
+        
+        # 创建棋盘设置按钮
+        self.board_btn = QPushButton("棋盘设置")
+        self.board_btn.setFixedSize(55, 35)
+        self.board_btn.setFont(QFont("Arial", 11))
+        self.board_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                text-align: center;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        self.board_btn.clicked.connect(self.show_board_menu)
+        control_layout.addWidget(self.board_btn)
+        
+        # 创建棋盘设置菜单
+        self.board_menu = QMenu(self)
+        self.board_menu.setStyleSheet("""
+            QMenu {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 2px;
+            }
+            QMenu::item {
+                padding: 5px 10px;
+                min-height: 20px;
+                color: black;
+            }
+            QMenu::item:selected {
+                background-color: #e0e0e0;
+            }
+            QMenu::item:checked {
+                background-color: #e0e0e0;
+            }
+        """)
+        self.show_dot_action = self.board_menu.addAction("显示原点")
+        self.reposition_action = self.board_menu.addAction("重新定位")
+        self.reset_template_action = self.board_menu.addAction("重置模板")
+        self.show_dot_action.setCheckable(True)
+        self.show_dot_action.setChecked(True)  # 设置默认选中
+        self.show_dot_action.triggered.connect(self.on_show_dot)
+        self.reposition_action.triggered.connect(self.on_reposition)
+        self.reset_template_action.triggered.connect(self.on_reset_template)
         
         # 创建参数选择按钮
         self.param_btn = QPushButton("参数")
@@ -362,6 +416,10 @@ class MainWindow(QMainWindow):
         self.is_show_dot = True
         self.follow_cursor = False  # 新增：是否跟随光标
         self.cursor_timer = None    # 新增：光标跟踪定时器
+        self.is_template_mode = False  # 新增：是否处于模版模式
+        
+        # 显示定位点
+        self.create_position_dot()
         
         update_params(self.engine_params)
         
@@ -647,18 +705,34 @@ class MainWindow(QMainWindow):
             window_y = cursor_pos.y() - height - 5  # 保持一致的偏移
             self.position_dot.move(window_x, window_y)
     
-    def on_position_board(self):
-        """处理定位棋盘按钮点击"""
-        if self.is_show_dot:
-            self.is_show_dot = False
-            self.sender().setText("重新定位")
-            self.follow_cursor = False  # 显示原点时不跟随光标
+    def show_board_menu(self):
+        """显示棋盘设置菜单"""
+        self.board_menu.exec_(self.board_btn.mapToGlobal(self.board_btn.rect().bottomLeft()))
+    
+    def on_show_dot(self):
+        """处理显示原点选项"""
+        if self.show_dot_action.isChecked():
             self.create_position_dot()
         else:
-            self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
-            self.is_positioning = True
-            self.follow_cursor = True  # 重新定位时跟随光标
-            self.start_cursor_tracking()  # 开始跟踪
+            if self.position_dot:
+                self.position_dot.close()
+                self.position_dot = None
+    
+    def on_reposition(self):
+        """处理重新定位选项"""
+        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
+        self.is_positioning = True
+        self.follow_cursor = True  # 重新定位时跟随光标
+        self.start_cursor_tracking()  # 开始跟踪
+        self.is_template_mode = False  # 设置非模版模式
+    
+    def on_reset_template(self):
+        """处理重置模板选项"""
+        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
+        self.is_positioning = True
+        self.follow_cursor = True  # 重新定位时跟随光标
+        self.start_cursor_tracking()  # 开始跟踪
+        self.is_template_mode = True  # 设置模版模式
     
     def keyPressEvent(self, event: QKeyEvent):
         """处理键盘事件"""
@@ -706,11 +780,18 @@ class MainWindow(QMainWindow):
             
             self.position_dot.show()
             
-            # 保存模板
-            if save_templates():
-                self.move_display.setText('<span style="color: green;">定位完成!\n模板已保存。</span>')
+            # 更新显示原点选项的选中状态
+            self.show_dot_action.setChecked(True)
+            
+            # 根据模式决定是否保存模版
+            if self.is_template_mode:
+                # 保存模板
+                if save_templates():
+                    self.move_display.setText('<span style="color: green;">定位完成!\n模版已保存。</span>')
+                else:
+                    self.move_display.setText('<span style="color: red;">定位完成!\n模版保存失败。</span>')
             else:
-                self.move_display.setText('<span style="color: red;">定位完成!\n模板保存失败。</span>')
+                self.move_display.setText('<span style="color: green;">定位完成!</span>')
     
     def stop_analysis(self):
         """停止分析线程"""
