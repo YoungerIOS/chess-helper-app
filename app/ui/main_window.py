@@ -9,9 +9,10 @@ import threading
 import sys
 from chess.screenshot import capture_region, get_position, update_params, trigger_manual_recognition
 from chess import engine
-from chess.board_display import BoardDisplay
+from ui.board_display import BoardDisplay
 from chess.template_maker import save_templates
 from chess.message import Message, MessageType
+from chess.context import context
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -61,6 +62,9 @@ class MainWindow(QMainWindow):
         
         # 初始化引擎参数
         self.load_params()
+        
+        # 初始化上下文中的平台设置
+        context.set_platform(self.engine_params["platform"])
         
         # 顶部文本显示区域
         self.move_display = QLabel('<span style="color: red;">等待获取棋局...</span>')
@@ -457,7 +461,7 @@ class MainWindow(QMainWindow):
                 json.dump(self.engine_params, f, indent=4)
         except Exception as e:
             print(f"Error saving params: {e}")
-
+    
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
         self.engine_params["goParam"] = param
@@ -835,9 +839,15 @@ class MainWindow(QMainWindow):
         self.jj_action.setChecked(game == "JJ象棋")
         self.tt_action.setChecked(game == "天天象棋")
         
-        self.engine_params["platform"] = "JJ" if game == "JJ象棋" else "TT"
+        # 更新平台设置
+        platform = "JJ" if game == "JJ象棋" else "TT"
+        self.engine_params["platform"] = platform
         self.save_params()
         update_params(self.engine_params)
+        
+        # 更新上下文中的平台设置
+        context.set_platform(platform)
+        
         print(f"Selected game: {game}")
 
 def main():

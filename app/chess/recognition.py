@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import os
 from tools import utils
-import json
+from chess.context import context
 
 def show_image(name, image):
     # 显示结果  
@@ -31,61 +31,44 @@ def pre_processing_image(img_origin):
 
 # 获取本地棋盘数据
 def get_board_data():
-    x_array = []
-    y_array = []
-    error = ''
-    try:
-        # 尝试读取 JSON 文件
-        with open(utils.resource_path("json/board.json"), 'r') as file:
-            data = json.load(file)
-
-        # 提取横坐标和纵坐标
-        x_array = data["x"]
-        y_array = data["y"]
-
-        # print("读取的横坐标：", x_array)
-        # print("读取的纵坐标：", y_array)
-    except FileNotFoundError:
-        error = 'board.json文件未找到'
-        print(error)
+    """从上下文获取当前平台的棋盘坐标"""
+    # 获取当前平台的坐标
+    platform = context.get_platform(context.platform)
+    x_array = platform.board_coords["x"]
+    y_array = platform.board_coords["y"]
+    error = ""
+    
+    # 检查坐标数组是否为空
+    if not x_array or not y_array:
+        error = "No board coordinates found"
+    
     return x_array, y_array, error
 
 # 识别棋盘
 def board_recognition(img, gray):
+    """识别棋盘并保存坐标到上下文"""
     x_arr, y_arr, error = get_board_data()
-    if not error: return x_arr, y_arr
-
+    if not error: 
+        return x_arr, y_arr
+    
     # 高斯模糊  
     gaus = cv2.GaussianBlur(gray, (5, 5), 0)  
     # 边缘检测  
     edges = cv2.Canny(gaus, 20, 120, apertureSize=3)  
-    # show_image('Edges', edges)
     
-    # 膨胀操作以合并相邻线条  
-    # kernel = np.ones((3, 3), np.uint8)  # 定义膨胀核的大小，可以根据需要调整  
-    # dilated_edges = cv2.dilate(edges, kernel, iterations=1) 
-    
-    # 腐蚀操作以恢复线条宽度  
-    # eroded_edges = cv2.erode(dilated_edges, kernel, iterations=1) 
-    
-    # 可选：再次膨胀以调整线条宽度  
-    # final_edges = cv2.dilate(eroded_edges, kernel, iterations=1)
-    # show_image('Edges', final_edges)
-
     # 霍夫线变换  
     lines = cv2.HoughLinesP(edges, 0.5, np.pi/180, threshold=80, minLineLength=100, maxLineGap=5)  
     
-    # 创建一张新图
-    # black_img = np.zeros((img.shape[0], img.shape[1], 3), np.uint8)
-    # black_img.fill(0) # 使用黑色填充图片区域
-
+    # 创建一张新图用于绘制检测到的线条
+    board_vis = img.copy()
+    
     # 过滤线段并在新图上绘制
     # 竖线 (x1 == x2)
     x_array = []
     vlines, yMin, yMax = utils.filter_vertical_lines(lines, img.shape[1])
     for line in vlines:  
         for x1, y1, x2, y2 in line:
-            # cv2.line(black_img, (x1, yMin), (x2, yMax), (0, 255, 0), 1)
+            cv2.line(board_vis, (x1, yMin), (x2, yMax), (0, 255, 0), 2)  # 绿色，加粗线条
             x_array.append(int(x1))
 
     # 横线 (y1 == y2)
@@ -93,29 +76,77 @@ def board_recognition(img, gray):
     hlines, xMin, xMax = utils.filter_horizontal_lines(lines, img.shape[1])
     for line in hlines:  
         for x1, y1, x2, y2 in line:  
-            # cv2.line(black_img, (xMin, y1), (xMax, y2), (0, 255, 0), 1)
+            cv2.line(board_vis, (xMin, y1), (xMax, y2), (0, 0, 255), 2)  # 红色，加粗线条
             y_array.append(int(y1))
     
+    # 对坐标进行排序
+    x_array.sort()
+    y_array.sort()
     
-    # 显示结果 
-    # show_image('Detected Lines', black_img) 
-    # print(f"横坐标:{x_array}\n 纵坐标:{y_array}")
-    # 将数组组合成一个字典
-    data = {
+    # 使用IQR方法修复缺失的线条
+    def fix_missing_lines(coords, expected_count):
+        if len(coords) >= expected_count:
+            return coords
+            
+        # 计算相邻坐标的间距
+        spacings = [coords[i+1] - coords[i] for i in range(len(coords)-1)]
+        
+        # 计算四分位数
+        Q1 = np.percentile(spacings, 25)
+        Q3 = np.percentile(spacings, 75)
+        IQR = Q3 - Q1
+        
+        # 计算上界
+        upper_bound = Q3 + 1.5 * IQR
+        
+        # 找出异常大的间距
+        missing_positions = []
+        for i, spacing in enumerate(spacings):
+            if spacing > upper_bound:
+                missing_positions.append(i)
+        
+        # 在缺失位置插入新的坐标
+        new_coords = coords.copy()
+        for pos in sorted(missing_positions, reverse=True):
+            # 计算缺失坐标的值（使用相邻坐标的平均值）
+            missing_value = int((new_coords[pos] + new_coords[pos+1]) / 2)
+            new_coords.insert(pos+1, missing_value)
+            
+        return new_coords
+    
+    # 修复竖线（应该有9条）
+    x_array = fix_missing_lines(x_array, 9)
+    
+    # 修复横线（应该有10条）
+    y_array = fix_missing_lines(y_array, 10)
+    
+    # 在可视化图像上绘制修复后的线条
+    # 绘制修复后的竖线（使用蓝色）
+    for x in x_array:
+        if x not in [int(line[0][0]) for line in vlines]:  # 只绘制新修复的线条
+            cv2.line(board_vis, (x, yMin), (x, yMax), (255, 0, 0), 2)  # 蓝色，加粗线条
+    
+    # 绘制修复后的横线（使用黄色）
+    for y in y_array:
+        if y not in [int(line[0][1]) for line in hlines]:  # 只绘制新修复的线条
+            cv2.line(board_vis, (xMin, y), (xMax, y), (0, 255, 255), 2)  # 黄色，加粗线条
+    
+    # 保存可视化结果
+    output_dir = os.path.dirname(utils.resource_path("images/board/board_visual.jpg"))
+    os.makedirs(output_dir, exist_ok=True)
+    cv2.imwrite(utils.resource_path("images/board/board_visual.jpg"), board_vis)
+
+    # 更新当前平台的棋盘坐标
+    platform = context.get_platform(context.platform)
+    platform.board_coords = {
         "x": x_array,
         "y": y_array
     }
-
-    # 确保json目录存在
-    json_dir = os.path.dirname(utils.resource_path("json/board.json"))
-    os.makedirs(json_dir, exist_ok=True)
     
-    # 保存board.json
-    with open(utils.resource_path("json/board.json"), 'w') as file:
-        json.dump(data, file)
-
+    # 保存到文件
+    context.save_board_coords()
+    
     return x_array, y_array
-
 
 # 识别棋子
 def pieces_recognition(img, gray, param, x_array, y_array):
@@ -192,12 +223,62 @@ def compare_feature(img1, img2):
     # 确保图片大小一致
     img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
     
+   # 预处理图片
+    def preprocess_piece_image(img):
+        # 1. 统一大小
+        img = cv2.resize(img, (100, 100))
+        
+        # 2. 转换为灰度图
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # 3. 使用自适应阈值处理，更好地处理不同位置的文字
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # 4. 找到文字区域
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # 找到最大的轮廓（应该是文字）
+            max_contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(max_contour)
+            
+            # 扩大一点边界，确保文字完整
+            padding = 5
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(img.shape[1] - x, w + 2*padding)
+            h = min(img.shape[0] - y, h + 2*padding)
+            
+            # 提取文字区域
+            text_region = img[y:y+h, x:x+w]
+            
+            # 将文字区域调整到统一大小
+            text_region = cv2.resize(text_region, (60, 60))
+            
+            # 5. 增强对比度
+            lab = cv2.cvtColor(text_region, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            lab = cv2.merge((l,a,b))
+            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            return enhanced
+        
+        return img  # 如果没找到文字区域，返回原图
+    
+    # 预处理两张图片
+    img1_processed = preprocess_piece_image(img1)
+    img2_processed = preprocess_piece_image(img2)
+    
     # 创建SIFT对象
     sift = cv2.SIFT_create()
     
     # 检测关键点和描述符
-    kp1, des1 = sift.detectAndCompute(img1, None)
-    kp2, des2 = sift.detectAndCompute(img2, None)
+    kp1, des1 = sift.detectAndCompute(img1_processed, None)
+    kp2, des2 = sift.detectAndCompute(img2_processed, None)
     
     if des1 is None or des2 is None or len(kp1) == 0 or len(kp2) == 0:
         return 0
@@ -238,7 +319,7 @@ def compare_feature(img1, img2):
         var_diff = np.linalg.norm(var1 - var2)
         
         # 根据图像大小动态调整阈值
-        img_size = max(img1.shape[0], img1.shape[1])
+        img_size = max(img1_processed.shape[0], img1_processed.shape[1])
         center_threshold = img_size * 0.1  # 质心距离阈值为图像尺寸的10%
         var_threshold = img_size * 0.05    # 方差差异阈值为图像尺寸的5%
         
@@ -279,14 +360,10 @@ def recognize_black_king(circles, img, x_array, y_array, template_path):
         template_path: 模板图片目录
     Returns:
         pieceArray: 9x10的二维数组,表示棋盘状态,已计算好所有棋子的坐标
+        is_red: 本方是否为红方
     """
     # 初始化棋盘数组
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-
-    # 黑将是否在上方九宫
-    black_king_in_upper_palace = False
-    best_score = 0
-    best_match = None
 
     # 计算所有棋子的棋盘坐标
     for x, y, r in circles:
@@ -294,7 +371,13 @@ def recognize_black_king(circles, img, x_array, y_array, template_path):
         # 存储棋子的原始信息到对应位置
         pieceArray[board_y][board_x] = (x, y, r)
 
-    # 在九宫格内寻找黑将
+    # 在上下两个九宫格内寻找黑将
+    upper_palace_score = 0  # 上方九宫格匹配得分
+    lower_palace_score = 0  # 下方九宫格匹配得分
+    upper_palace_pos = None  # 上方九宫格黑将位置
+    lower_palace_pos = None  # 下方九宫格黑将位置
+
+    # 检查上方九宫格
     for i in range(3):  # 上方九宫格是前3行
         for j in range(3, 6):  # 上方九宫格是中间3列
             if pieceArray[i][j] == '-':
@@ -314,15 +397,50 @@ def recognize_black_king(circles, img, x_array, y_array, template_path):
             if template_img is not None:
                 score = compare_feature(piece_img, template_img)
                 print(f"位置({j}, {i}) 黑将匹配得分: {score}")
-                if score > best_score:
-                    best_score = score
-                    best_match = (j, i)
+                if score > upper_palace_score:
+                    upper_palace_score = score
+                    upper_palace_pos = (j, i)
 
-    # 如果找到最佳匹配且相似度超过阈值，则标记为找到黑将
-    if best_match and best_score > 40:
-        black_king_in_upper_palace = True
+    # 检查下方九宫格
+    for i in range(7, 10):  # 下方九宫格是后3行
+        for j in range(3, 6):  # 下方九宫格是中间3列
+            if pieceArray[i][j] == '-':
+                continue
+            x, y, r = pieceArray[i][j]
+            x1, y1, x2, y2 = x - r, y - r, x + r, y + r
+            if x1 < 0: x1 = 0
+            if y1 < 0: y1 = 0
+            if x2 >= img.shape[1]: x2 = img.shape[1] - 1
+            if y2 >= img.shape[0]: y2 = img.shape[0] - 1
+            piece_img = img[y1:y2+1, x1:x2+1]
+            color = recognize_piece_color(piece_img)
+            if color is None or color != 'black':
+                continue
+            template_name = "black_k.jpg"
+            template_img = cv2.imread(os.path.join(template_path, template_name))
+            if template_img is not None:
+                score = compare_feature(piece_img, template_img)
+                print(f"位置({j}, {i}) 黑将匹配得分: {score}")
+                if score > lower_palace_score:
+                    lower_palace_score = score
+                    lower_palace_pos = (j, i)
 
-    return pieceArray, black_king_in_upper_palace
+    # 根据黑将位置判断红黑方
+    # 如果上方九宫格有黑将且得分超过阈值，说明黑方在上方，红方在下方
+    # 如果下方九宫格有黑将且得分超过阈值，说明黑方在下方，红方在上方
+    threshold = 20  # 设置一个合理的阈值
+    if upper_palace_score > threshold and (lower_palace_score <= threshold or upper_palace_score > lower_palace_score):
+        is_red = True  # 红方在下方
+        print(f"检测到黑将在上方九宫格，位置: {upper_palace_pos}，得分: {upper_palace_score}")
+    elif lower_palace_score > threshold and (upper_palace_score <= threshold or lower_palace_score > upper_palace_score):
+        is_red = False  # 红方在上方
+        print(f"检测到黑将在下方九宫格，位置: {lower_palace_pos}，得分: {lower_palace_score}")
+    else:
+        # 如果两个九宫格都没有找到明显的黑将，默认红方在下方
+        is_red = True
+        print("未检测到明显的黑将位置，默认红方在下方")
+
+    return pieceArray, is_red
 
 # 判断棋子红色与黑色 
 def recognize_piece_color(img):
@@ -396,6 +514,9 @@ def recognize_piece_type(piece_img, template_path, board_x, board_y, is_red):
     if color is None:
         return None, 0
     
+    print(f"\n位置({board_x}, {board_y}) 的棋子与各模板的匹配得分:")
+    print("-" * 50)
+    
     # 遍历模板图片
     for filename in os.listdir(template_path):
         if filename.endswith('.jpg'): 
@@ -414,36 +535,41 @@ def recognize_piece_type(piece_img, template_path, board_x, board_y, is_red):
                     # 计算相似度
                     score = compare_feature(piece_img, template_img)
                     
+                    # 打印每个模板的匹配得分
+                    print(f"模板: {filename:<15} 类型: {piece_type:<2} 得分: {score:>3}")
+                    
                     # 更新最佳匹配
                     if score > best_score:  
                         best_score = score  
                         best_match = piece_type
+    
+    print("-" * 50)
+    print(f"最佳匹配: {best_match} (得分: {best_score})")
+    print()
     
     # 如果找到匹配，返回棋子类型和得分
     return best_match, best_score
 
 def is_valid_position(piece_type, x, y, is_red):
     """
-    根据中国象棋规则验证棋子位置是否合法
+    根据中国象棋规则验证(x,y)是否为 "兵卒 象相 士仕 将帅" 的合法位置
     Args:
         piece_type: 棋子类型
         x: 棋盘横坐标
         y: 棋盘纵坐标
-        is_red: 是否为红方
+        is_red: 红方在棋盘下方
     Returns:
         bool: 位置是否合法
     """
-    # 注意：当红棋在下方时，is_red为True，这时坐标系是反的
-    # 红棋在上方时，黑方的棋子应该在下方九宫格
     
     # 士/仕的合法位置（九宫格内的5个位置）
     if piece_type in ['a', 'A']:  # 士/仕
-        if piece_type.isupper():  # 红方士
+        if piece_type.isupper():  # 红士
             if is_red:  # 红方在下方
                 return (x, y) in [(3, 7), (5, 7), (4, 8), (3, 9), (5, 9)]  # 红方在下方时，士在下方九宫格
             else:  # 红方在上方
                 return (x, y) in [(3, 0), (5, 0), (4, 1), (3, 2), (5, 2)]  # 红方在上方时，士在上方九宫格
-        else:  # 黑方仕
+        else:  # 黑仕
             if is_red:  # 红方在下方，黑方在上方
                 return (x, y) in [(3, 0), (5, 0), (4, 1), (3, 2), (5, 2)]  # 黑方在上方九宫格
             else:  # 红方在上方，黑方在下方
@@ -451,12 +577,12 @@ def is_valid_position(piece_type, x, y, is_red):
     
     # 相/象的合法位置（己方区域的7个位置）
     elif piece_type in ['b', 'B']:  # 相/象
-        if piece_type.isupper():  # 红方相
+        if piece_type.isupper():  # 红相
             if is_red:  # 红方在下方
                 return (x, y) in [(2, 5), (6, 5), (0, 7), (4, 7), (8, 7), (2, 9), (6, 9)]  # 红方在下方时，相在下方区域
             else:  # 红方在上方
                 return (x, y) in [(2, 0), (6, 0), (0, 2), (4, 2), (8, 2), (2, 4), (6, 4)]  # 红方在上方时，相在上方区域
-        else:  # 黑方象
+        else:  # 黑象
             if is_red:  # 红方在下方，黑方在上方
                 return (x, y) in [(2, 0), (6, 0), (0, 2), (4, 2), (8, 2), (2, 4), (6, 4)]  # 黑方在上方区域
             else:  # 红方在上方，黑方在下方
@@ -464,12 +590,12 @@ def is_valid_position(piece_type, x, y, is_red):
     
     # 将/帅的合法位置（九宫格内的9个位置）
     elif piece_type in ['k', 'K']:  # 将/帅
-        if piece_type.isupper():  # 红方帅
+        if piece_type.isupper():  # 红帅
             if is_red:  # 红方在下方
                 return (x, y) in [(3, 7), (4, 7), (5, 7), (3, 8), (4, 8), (5, 8), (3, 9), (4, 9), (5, 9)]  # 红方在下方时，帅在下方九宫格
             else:  # 红方在上方
                 return (x, y) in [(3, 0), (4, 0), (5, 0), (3, 1), (4, 1), (5, 1), (3, 2), (4, 2), (5, 2)]  # 红方在上方时，帅在上方九宫格
-        else:  # 黑方将
+        else:  # 黑将
             if is_red:  # 红方在下方，黑方在上方
                 return (x, y) in [(3, 0), (4, 0), (5, 0), (3, 1), (4, 1), (5, 1), (3, 2), (4, 2), (5, 2)]  # 黑方在上方九宫格
             else:  # 红方在上方，黑方在下方
@@ -477,16 +603,16 @@ def is_valid_position(piece_type, x, y, is_red):
     
     # 兵/卒的合法位置
     elif piece_type in ['p', 'P']:  # 兵/卒
-        if piece_type.isupper():  # 红方兵
+        if piece_type.isupper():  # 红兵
             if is_red:  # 红方在下方
                 if y >= 5:  # 在己方区域
-                    return (x, y) in [(0, 6), (2, 6), (4, 6), (6, 6), (8, 6), (0, 5), (2, 5), (4, 5), (6, 5), (8, 5)]  # 红方在下方时，兵在下方区域
+                    return (x, y) in [(0, 6), (2, 6), (4, 6), (6, 6), (8, 6), (0, 5), (2, 5), (4, 5), (6, 5), (8, 5)]  # 红方在下方时，兵在下方第5行和第6行
                 return True  # 过河后可以在任何位置
             else:  # 红方在上方
                 if y <= 4:  # 在己方区域
-                    return (x, y) in [(0, 3), (2, 3), (4, 3), (6, 3), (8, 3)]  # 红方在上方时，兵在上方区域，只允许在第3行
+                    return (x, y) in [(0, 3), (2, 3), (4, 3), (6, 3), (8, 3), (0, 4), (2, 4), (4, 4), (6, 4), (8, 4)]  # 红方在上方时，兵在上方第3行和第4行
                 return True  # 过河后可以在任何位置
-        else:  # 黑方卒
+        else:  # 黑卒
             if is_red:  # 红方在下方，黑方在上方
                 if y <= 4:  # 在己方区域
                     return (x, y) in [(0, 3), (2, 3), (4, 3), (6, 3), (8, 3), (0, 4), (2, 4), (4, 4), (6, 4), (8, 4)]  # 黑方在上方区域
