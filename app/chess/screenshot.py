@@ -17,8 +17,8 @@ engine_param_lock = threading.Lock()
 engine_param = None
 manual_trigger = False  # 添加手动触发标志
 
-# 全局变量，用于存储上一次检测到的最大轮廓信息（点集）
-last_max_contour = None
+# 全局变量，用于存储倒计时区域检测到的最大轮廓
+max_contour = None
 
 def resource_path(relative_path):  
     """ 获取资源文件的绝对路径 """  
@@ -95,10 +95,10 @@ def get_contour_overlap(contour1, contour2):
     overlap_ratio = overlap_pixels / total_pixels1 if total_pixels1 > 0 else 0
     
     # 打印调试信息
-    print(f"轮廓1总像素数: {total_pixels1}")
-    print(f"轮廓2总像素数: {total_pixels2}")
-    print(f"重叠像素数: {overlap_pixels}")
-    print(f"重叠像素比例: {overlap_ratio:.2%}")
+    # print(f"轮廓1总像素数: {total_pixels1}")
+    # print(f"轮廓2总像素数: {total_pixels2}")
+    # print(f"重叠像素数: {overlap_pixels}")
+    # print(f"重叠像素比例: {overlap_ratio:.2%}")
     
     return overlap_ratio
 
@@ -111,7 +111,7 @@ def detect_avatar_border_tt(img):
     Returns:
         bool: 是否检测到边框
     """
-    global last_max_contour
+    global max_contour
     
     # 转换为HSV颜色空间
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -123,7 +123,7 @@ def detect_avatar_border_tt(img):
         # 黄色范围
         (np.array([20, 100, 100]), np.array([40, 255, 255]), "黄色")
     ]
-    print("检测TT平台边框: 绿色->黄色")
+    # print("检测TT平台边框: 绿色->黄色")
     
     # 按顺序检测每个颜色
     for lower, upper, color_name in color_ranges:
@@ -136,7 +136,7 @@ def detect_avatar_border_tt(img):
         
         # 查找轮廓
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        print(f"检测{color_name}边框，找到 {len(contours)} 个轮廓")
+        # print(f"检测{color_name}边框，找到 {len(contours)} 个轮廓")
         
         # 遍历所有轮廓
         found_valid = False
@@ -146,7 +146,7 @@ def detect_avatar_border_tt(img):
         for i, contour in enumerate(contours):
             # 计算轮廓周长
             perimeter = cv2.arcLength(contour, True)
-            print(f"轮廓 {i+1} 周长: {perimeter}")
+            # print(f"轮廓 {i+1} 周长: {perimeter}")
             
             # 找出周长最大的轮廓
             if perimeter > max_perimeter:
@@ -159,33 +159,32 @@ def detect_avatar_border_tt(img):
         if found_valid:
             # 检查是否有周长大于150的轮廓
             if max_perimeter > 150:
-                print(f"找到{color_name}边框且周长大于150，判定为倒计时状态")
-                # 只在找到周长大于阈值的轮廓时更新last_max_contour
-                last_max_contour = contour_with_max_perimeter
+                # print(f"找到{color_name}边框且周长大于150，判定为倒计时状态")
+                # 只在找到周长大于阈值的轮廓时更新max_contour
+                max_contour = contour_with_max_perimeter
                 return True
             else:
                 # 检查当前最大轮廓是否在上一帧的轮廓内部
-                if last_max_contour is not None:
+                if max_contour is not None:
                     # 计算两个轮廓的重叠程度
-                    overlap_ratio = get_contour_overlap(contour_with_max_perimeter, last_max_contour)
-                    print(f"当前轮廓与最大轮廓的重叠程度: {overlap_ratio:.2%}")
+                    overlap_ratio = get_contour_overlap(contour_with_max_perimeter, max_contour)
+                    # print(f"当前轮廓与最大轮廓的重叠程度: {overlap_ratio:.2%}")
                     
                     if overlap_ratio > 0.95:  # 如果重叠程度大于95%
-                        print(f"当前{color_name}轮廓与最大轮廓重叠程度大于95%，判定为倒计时状态")
-                        last_max_contour = contour_with_max_perimeter
+                        # print(f"当前{color_name}轮廓与最大轮廓重叠程度大于95%，判定为倒计时状态")
                         return True
                     else:
-                        print(f"当前{color_name}轮廓与最大轮廓重叠程度不足，继续检测下一个颜色")
+                        # print(f"当前{color_name}轮廓与最大轮廓重叠程度不足，继续检测下一个颜色")
                         continue
                 else:
-                    print(f"没有最大轮廓信息，继续检测下一个颜色")
+                    # print(f"没有最大轮廓信息，继续检测下一个颜色")
                     continue
                     
         else:
-            print(f"未找到{color_name}边框，继续检测下一个颜色")
+            # print(f"未找到{color_name}边框，继续检测下一个颜色")
             continue
     
-    print("所有颜色都未检测到有效轮廓，判定为非倒计时状态")
+    # print("所有颜色都未检测到有效轮廓，判定为非倒计时状态")
     return False
 
 def detect_avatar_border_jj(img):
@@ -196,7 +195,7 @@ def detect_avatar_border_jj(img):
     Returns:
         bool: 是否检测到边框
     """
-    global last_max_contour
+    global max_contour
     
     # 转换为HSV颜色空间
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -209,7 +208,7 @@ def detect_avatar_border_jj(img):
         (np.array([0, 100, 100]), np.array([10, 255, 255]), "红色"),
         (np.array([170, 100, 100]), np.array([180, 255, 255]), "红色")
     ]
-    print("检测JJ平台边框: 黄色->红色")
+    # print("检测JJ平台边框: 黄色->红色")
     
     # 按顺序检测每个颜色
     for lower, upper, color_name in color_ranges:
@@ -222,7 +221,7 @@ def detect_avatar_border_jj(img):
         
         # 查找轮廓
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        print(f"检测{color_name}边框，找到 {len(contours)} 个轮廓")
+        # print(f"检测{color_name}边框，找到 {len(contours)} 个轮廓")
         
         # 遍历所有轮廓
         found_valid = False
@@ -232,7 +231,7 @@ def detect_avatar_border_jj(img):
         for i, contour in enumerate(contours):
             # 计算轮廓面积
             area = cv2.contourArea(contour)
-            print(f"轮廓 {i+1} 面积: {area}")
+            # print(f"轮廓 {i+1} 面积: {area}")
             
             # 找出面积最大的轮廓
             if area > max_area:
@@ -247,43 +246,41 @@ def detect_avatar_border_jj(img):
             if color_name == "黄色":
                 # 黄色使用原有的判断流程
                 if max_area > 250:
-                    print(f"找到{color_name}边框且面积大于250，判定为倒计时状态")
-                    print(f"轮廓面积: {max_area:.2f}")
-                    last_max_contour = contour_with_max_area
+                    # print(f"找到{color_name}边框且面积大于250，判定为倒计时状态")
+                    # print(f"轮廓面积: {max_area:.2f}")
+                    max_contour = contour_with_max_area
                     return True
                 else:
                     # 检查当前最大轮廓是否在上一帧的轮廓内部
-                    if last_max_contour is not None:
+                    if max_contour is not None:
                         # 计算两个轮廓的重叠程度
-                        overlap_ratio = get_contour_overlap(contour_with_max_area, last_max_contour)
-                        print(f"当前轮廓与最大轮廓的重叠程度: {overlap_ratio:.2%}")
+                        overlap_ratio = get_contour_overlap(contour_with_max_area, max_contour)
+                        # print(f"当前轮廓与最大轮廓的重叠程度: {overlap_ratio:.2%}")
                         
                         if overlap_ratio > 0.95:  # 如果重叠程度大于95%
-                            print(f"当前{color_name}轮廓与最大轮廓重叠程度大于95%，判定为倒计时状态")
-                            last_max_contour = contour_with_max_area
+                            # print(f"当前{color_name}轮廓与最大轮廓重叠程度大于95%，返回True")
                             return True
                         else:
-                            print(f"当前{color_name}轮廓与最大轮廓重叠程度不足，继续检测下一个颜色")
+                            # print(f"当前{color_name}轮廓与最大轮廓重叠程度不足，继续检测下一个颜色")
                             continue
                     else:
-                        print(f"没有最大轮廓信息，继续检测下一个颜色")
-                        continue
+                        # print(f"没有最大轮廓信息，返回False")
+                        return True
             else:  # 红色
                 # 红色只需要面积大于50
                 if max_area > 50:
-                    print(f"找到红色边框且面积大于50，返回True")
-                    print(f"轮廓面积: {max_area:.2f}")
-                    last_max_contour = contour_with_max_area
+                    # print(f"找到红色边框且面积大于50，返回True")
+                    # print(f"轮廓面积: {max_area:.2f}")
                     return True
                 else:
-                    print(f"红色轮廓面积不足50，返回False")
+                    # print(f"红色轮廓面积不足50，返回False")
                     continue
                     
         else:
-            print(f"未找到黄色边框，继续检测红色边框")
+            # print(f"未找到黄色边框，继续检测红色边框")
             continue
     
-    print("两个颜色都未检测到有效轮廓，返回False")
+    # print("两个颜色都未检测到有效轮廓，返回False")
     return False
 
 def display_notification(title, subtitle, message):  

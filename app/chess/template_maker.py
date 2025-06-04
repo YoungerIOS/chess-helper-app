@@ -80,11 +80,17 @@ def save_chess_pieces(img, gray, x_array, y_array, output_dir="chess_pieces"):
     :param y_array: 棋盘y坐标数组
     :param output_dir: 输出目录
     """
-    # 检测棋子圆形
-    width = img.shape[1]
-    maxRadius = int(width/9/2)  # 棋盘宽度除以9，再除2就是半径
-    minRadius = int(0.8 * width/9/2)
-    minDist = int(0.8 * width/9)  # 棋子与棋子间距
+    # 计算棋子半径
+    # 使用相邻x坐标的间距作为参考
+    x_distances = [x_array[i+1] - x_array[i] for i in range(len(x_array)-1)]
+    avg_x_distance = sum(x_distances) / len(x_distances)
+    
+    # 设置半径范围
+    maxRadius = int(avg_x_distance * 0.46)  # 使用间距的46%作为最大半径
+    minRadius = int(avg_x_distance * 0.36)  # 使用间距的36%作为最小半径
+    minDist = int(avg_x_distance * 0.8)     # 使用间距的80%作为最小距离
+    
+    print(f"计算得到的棋子半径范围: {minRadius} - {maxRadius}")
     
     # 使用霍夫圆检测
     circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, minDist, 
@@ -92,6 +98,7 @@ def save_chess_pieces(img, gray, x_array, y_array, output_dir="chess_pieces"):
                              minRadius=minRadius, maxRadius=maxRadius)
     
     if circles is None:
+        print("未检测到棋子")
         return False
         
     circles = np.round(circles[0, :]).astype("int")
@@ -101,9 +108,12 @@ def save_chess_pieces(img, gray, x_array, y_array, output_dir="chess_pieces"):
     
     # 遍历所有检测到的棋子
     for idx, (x, y, r) in enumerate(circles):
+        # 增加安全边距，确保不会切掉棋子
+        padding = int(r * 0.1)  # 增加10%的边距
+        
         # 计算切割区域
-        x1, y1 = max(0, x-r), max(0, y-r)
-        x2, y2 = min(img.shape[1]-1, x+r), min(img.shape[0]-1, y+r)
+        x1, y1 = max(0, x-r-padding), max(0, y-r-padding)
+        x2, y2 = min(img.shape[1]-1, x+r+padding), min(img.shape[0]-1, y+r+padding)
         
         # 切割棋子图片
         piece_img = img[y1:y2, x1:x2]
