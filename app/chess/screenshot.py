@@ -20,6 +20,10 @@ manual_trigger = False  # 添加手动触发标志
 # 全局变量，用于存储倒计时区域检测到的最大轮廓
 max_contour = None
 
+# 添加全局变量控制截图线程
+capture_avatar_thread = None
+stop_capture = threading.Event()
+
 def resource_path(relative_path):  
     """ 获取资源文件的绝对路径 """  
     if hasattr(sys, '_MEIPASS'):  
@@ -299,14 +303,12 @@ def capture_region(result_queue, stop_event):
     """截图和分析函数"""
     # 启动象棋引擎
     global engine_param
-    engine.init_engine()
+    engine.init_engine()    
 
-    # 读取存在本地的坐标 
-    file_path = resource_path("json/coordinates.json")
-    with open(file_path, 'r') as file:
-        data = json.load(file)
-        board_region = data['region1']
-        avatar_region = data['region2']
+    # 从上下文获取区域配置
+    platform = context.get_platform(context.platform)
+    board_region = platform.regions["board"]
+    avatar_region = platform.regions["avatar"]
 
     got_move = False
     while not stop_event.is_set():
@@ -344,36 +346,87 @@ def get_position(x, y):
     # 确定截图区域  
     width = 375  
     height = 415  
-    region1 = {'left': x, 'top': y, 'width': width, 'height': height}  
-    region2 = {'left': (x + width*0.75), 'top': y + height, 'width': width*0.25, 'height': height*0.3} 
+    board_region = {'left': x, 'top': y, 'width': width, 'height': height}  
+    avatar_region = {'left': (x + width*0.75), 'top': y + height, 'width': width*0.25, 'height': height*0.3} 
 
-    # 保存本地
-    save_path = resource_path("json/coordinates.json")  
-    data = {
-        'region1': region1,
-        'region2': region2
+    # 更新当前平台的区域配置
+    platform = context.get_platform(context.platform)
+    platform.regions = {
+        "board": board_region,
+        "avatar": avatar_region
     }
-    with open(save_path, 'w') as file:
-        json.dump(data, file)
+    
+    # 保存配置
+    context.save_config()
 
     # 截取两个区域的图片
     with mss.mss() as sct:
         # 截取棋盘区域
-        board_screenshot = sct.grab(region1)
+        board_screenshot = sct.grab(board_region)
         board_img = np.frombuffer(board_screenshot.bgra, np.uint8).reshape(board_screenshot.height, board_screenshot.width, 4)
         board_img = board_img[:, :, :3]  # 去掉 alpha 通道
         cv2.imwrite(resource_path('images/board/board.png'), board_img)
 
         # 截取头像区域
-        avatar_screenshot = sct.grab(region2)
+        avatar_screenshot = sct.grab(avatar_region)
         avatar_img = np.frombuffer(avatar_screenshot.bgra, np.uint8).reshape(avatar_screenshot.height, avatar_screenshot.width, 4)
         avatar_img = avatar_img[:, :, :3]  # 去掉 alpha 通道
         cv2.imwrite(resource_path('images/board/avatar.png'), avatar_img)
 
-    return region1
+    return board_region
 
 def trigger_manual_recognition():
     """触发一次手动识别"""
     global manual_trigger
     manual_trigger = True
+    
+
+def capture_avatar():
+    """捕获头像区域"""
+    global capture_avatar_thread, stop_capture
+    
+    # 如果线程已经在运行，则停止它
+    if capture_avatar_thread and capture_avatar_thread.is_alive():
+        stop_capture.set()
+        capture_avatar_thread.join()
+        stop_capture.clear()
+        print("停止截图")
+        return
+    
+    # 创建新线程执行截图
+    capture_avatar_thread = threading.Thread(target=_capture_avatar_loop)
+    capture_avatar_thread.start()
+    print("开始截图")
+
+def _capture_avatar_loop():
+    """截图循环"""
+    # 获取当前平台的区域配置
+    platform = context.get_platform(context.platform)
+    avatar_region = platform.regions["avatar"]
+    
+    # 创建样本目录
+    sample_dir = "app/images/jj_sample_timer"
+    if not os.path.exists(sample_dir):
+        os.makedirs(sample_dir)
+    
+    # 使用mss进行截图
+    with mss.mss() as sct:
+        while not stop_capture.is_set():
+            try:
+                avatar_screenshot = sct.grab(avatar_region)
+                
+                # 使用时间戳作为文件名
+                timestamp = int(time.time() * 1000)
+                filename = f"{sample_dir}/timer_{timestamp}.png"
+                
+                # 保存图片
+                mss.tools.to_png(avatar_screenshot.rgb, avatar_screenshot.size, output=filename)
+                print(f"保存倒计时截图: {filename}")
+                
+                # 等待0.5秒
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"截图出错: {e}")
+                break
+
     

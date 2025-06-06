@@ -3,6 +3,7 @@ import numpy as np
 import os
 from tools import utils
 from chess.context import context
+from .piece_recognizer import ChessPieceRecognizer
 
 def show_image(name, image):
     # 显示结果  
@@ -10,7 +11,7 @@ def show_image(name, image):
     cv2.waitKey(0)  
     cv2.destroyAllWindows()
 
-def pre_processing_image(img_origin):
+def preprocess_image(img_origin):
     # img = cv2.imread(img_path)  
     img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
     img_np = img_np[:, :, :3]  # 去掉 alpha 通道
@@ -45,8 +46,16 @@ def get_board_data():
     return x_array, y_array, error
 
 # 识别棋盘
-def board_recognition(img, gray):
-    """识别棋盘并保存坐标到上下文"""
+def recognize_board(img_origin):
+    """
+    识别棋盘并返回坐标数组
+    :param img_origin: 原始图像
+    :return: x_array, y_array (棋盘坐标数组)
+    """
+    # 内部调用预处理
+    img, gray = preprocess_image(img_origin)
+    
+    # 获取本地棋盘数据
     x_arr, y_arr, error = get_board_data()
     if not error: 
         return x_arr, y_arr
@@ -149,7 +158,7 @@ def board_recognition(img, gray):
     return x_array, y_array
 
 # 识别棋子
-def pieces_recognition(img, gray, param, x_array, y_array):
+def recognize_pieces(img, gray, param, x_array, y_array):
     """
     识别棋子并确定其位置和类型
     Args:
@@ -491,24 +500,21 @@ def recognize_piece_color(img):
     black_area = cv2.countNonZero(black_mask)  
   
     # 返回颜色判断结果  
-    return "red" if red_area > black_area else 'black' 
+    return "red" if red_area > black_area else 'black'
 
-def recognize_piece_type(piece_img, template_path, board_x, board_y, is_red):
+def recognize_piece_type_legacy(piece_img, template_path, board_x, board_y, is_red=True):
     """
-    识别棋子类型
-    Args:
-        piece_img: 棋子图像
-        template_path: 模板图片目录
-        board_x: 棋盘横坐标
-        board_y: 棋盘纵坐标
-        is_red: 本方是否为红方
-    Returns:
-        piece_type: 棋子类型，如果无法识别则返回None
-        score: 相似度得分
+    使用模板匹配识别棋子类型（旧版逻辑，完整保留原写法）
+    :param piece_img: 棋子图片
+    :param template_path: 模板路径
+    :param board_x: 棋盘x坐标
+    :param board_y: 棋盘y坐标
+    :param is_red: 是否红方在下
+    :return: (piece_type, confidence)
     """
     best_score = 0  
     best_match = None  
-      
+    
     # 判断棋子颜色
     color = recognize_piece_color(piece_img)
     if color is None:
@@ -519,36 +525,71 @@ def recognize_piece_type(piece_img, template_path, board_x, board_y, is_red):
     
     # 遍历模板图片
     for filename in os.listdir(template_path):
-        if filename.endswith('.jpg'): 
+        if filename.endswith('.jpg'):
             # 检查颜色匹配
-            if (color == 'red' and filename.startswith('red_')) or (color == 'black' and filename.startswith('black_')):  
+            if (color == 'red' and filename.startswith('red_')) or (color == 'black' and filename.startswith('black_')):
                 # 获取棋子类型，保持原有大小写
                 piece_type = utils.cut_substring(filename)
-                
                 # 先验证该类型的棋子是否可以出现在当前位置
                 if not is_valid_position(piece_type, board_x, board_y, is_red):
                     continue  # 如果位置不合法，直接跳过这个模板
-                
                 # 读取模板图片
                 template_img = cv2.imread(os.path.join(template_path, filename))
                 if template_img is not None:
                     # 计算相似度
                     score = compare_feature(piece_img, template_img)
-                    
                     # 打印每个模板的匹配得分
                     print(f"模板: {filename:<15} 类型: {piece_type:<2} 得分: {score:>3}")
-                    
                     # 更新最佳匹配
-                    if score > best_score:  
-                        best_score = score  
+                    if score > best_score:
+                        best_score = score
                         best_match = piece_type
-    
     print("-" * 50)
     print(f"最佳匹配: {best_match} (得分: {best_score})")
     print()
-    
     # 如果找到匹配，返回棋子类型和得分
+    if best_score < 10:
+        return None, best_score
     return best_match, best_score
+
+def recognize_piece_type(piece_img, template_path, board_x, board_y, is_red=True):
+    """
+    识别棋子类型
+    :param piece_img: 棋子图片
+    :param template_path: 模板路径
+    :param board_x: 棋盘x坐标
+    :param board_y: 棋盘y坐标
+    :param is_red: 是否红方在下
+    :return: (piece_type, confidence)
+    """
+    try:
+        # 从上下文中获取棋子识别器
+        piece_recognizer = context.piece_recognizer
+        if piece_recognizer is None:
+            # 如果识别器不存在，初始化并保存到上下文
+            piece_recognizer = ChessPieceRecognizer(
+                model_path="app/models/model.pth",
+                class_map_path="app/models/class_map.json"
+            )
+            context.piece_recognizer = piece_recognizer
+        
+        # 保存临时图片
+        temp_path = "temp_piece.jpg"
+        cv2.imwrite(temp_path, piece_img)
+        
+        # 使用模型识别
+        piece_type = piece_recognizer.recognize(temp_path)
+        
+        # 删除临时文件
+        os.remove(temp_path)
+        
+        if piece_type:
+            return piece_type, 1.0
+        return None, 0.0
+        
+    except Exception as e:
+        print(f"识别棋子类型时出错: {str(e)}")
+        return None, 0.0
 
 def is_valid_position(piece_type, x, y, is_red):
     """
@@ -630,87 +671,6 @@ def find_nearest_index(point, points):
     distances = [abs(point - p) for p in points]  # 计算点到所有竖线x坐标的绝对值差异  
     return distances.index(min(distances))  # 返回最接近的竖线的索引 
   
-def validate_piece_positions(pieceArray, is_red):
-    """
-    根据中国象棋规则验证棋子位置是否合法
-    pieceArray: 9x10的二维数组，表示棋盘状态
-    is_red: 是否为红方
-    """
-    # 士/仕的合法位置（九宫格内的5个位置）
-    advisor_positions = [(3, 0), (5, 0), (4, 1), (3, 2), (5, 2)]  # 黑方
-    if is_red:
-        advisor_positions = [(3, 7), (5, 7), (4, 8), (3, 9), (5, 9)]  # 红方
-
-    # 相/象的合法位置（己方区域的7个位置）
-    elephant_positions = [(2, 0), (6, 0), (0, 2), (4, 2), (8, 2), (2, 4), (6, 4)]  # 黑方
-    if is_red:
-        elephant_positions = [(2, 5), (6, 5), (0, 7), (4, 7), (8, 7), (2, 9), (6, 9)]  # 红方
-
-    # 将/帅的合法位置（九宫格内的9个位置）
-    king_positions = [
-        (3, 0), (4, 0), (5, 0),
-        (3, 1), (4, 1), (5, 1),
-        (3, 2), (4, 2), (5, 2)
-    ]  # 黑方
-    if is_red:
-        king_positions = [
-            (3, 7), (4, 7), (5, 7),
-            (3, 8), (4, 8), (5, 8),
-            (3, 9), (4, 9), (5, 9)
-        ]  # 红方
-
-    # 兵/卒的合法位置（己方区域的前三排）
-    pawn_positions = [
-        (0, 3), (2, 3), (4, 3), (6, 3), (8, 3),  # 第3行
-        (0, 4), (2, 4), (4, 4), (6, 4), (8, 4)   # 第4行
-    ]  # 黑方
-    if is_red:
-        pawn_positions = [
-            (0, 6), (2, 6), (4, 6), (6, 6), (8, 6),  # 第6行
-            (0, 5), (2, 5), (4, 5), (6, 5), (8, 5)   # 第5行
-        ]  # 红方
-
-    # 检查每个棋子的位置
-    for y in range(len(pieceArray)):
-        for x in range(len(pieceArray[0])):
-            piece = pieceArray[y][x]
-            if piece == '-':
-                continue
-
-            # 判断棋子颜色
-            piece_is_red = piece.isupper()
-            
-            # 根据棋子类型和颜色验证位置
-            if piece in ['a', 'A']:  # 士/仕
-                if piece.isupper():  # 红方士
-                    if (x, y) not in advisor_positions:
-                        print(f"警告: 红方士在非法位置 ({x}, {y})")
-                else:  # 黑方仕
-                    if (x, y) not in advisor_positions:
-                        print(f"警告: 黑方仕在非法位置 ({x}, {y})")
-            elif piece in ['b', 'B']:  # 相/象
-                if piece.isupper():  # 红方相
-                    if (x, y) not in elephant_positions:
-                        print(f"警告: 红方相在非法位置 ({x}, {y})")
-                else:  # 黑方象
-                    if (x, y) not in elephant_positions:
-                        print(f"警告: 黑方象在非法位置 ({x}, {y})")
-            elif piece in ['k', 'K']:  # 将/帅
-                if piece.isupper():  # 红方帅
-                    if (x, y) not in king_positions:
-                        print(f"警告: 红方帅在非法位置 ({x}, {y})")
-                else:  # 黑方将
-                    if (x, y) not in king_positions:
-                        print(f"警告: 黑方将在非法位置 ({x}, {y})")
-            elif piece in ['p', 'P']:  # 兵/卒
-                if piece.isupper():  # 红方兵
-                    if y >= 5:  # 在己方区域
-                        if (x, y) not in pawn_positions:
-                            print(f"警告: 红方兵在非法位置 ({x}, {y})")
-                else:  # 黑方卒
-                    if y <= 4:  # 在己方区域
-                        if (x, y) not in pawn_positions:
-                            print(f"警告: 黑方卒在非法位置 ({x}, {y})")
 
 def calculate_pieces_position(x_array, y_array, circles):  
     # 处理circles，计算每个圆心到最近的竖线和横线的索引，并更新pieceArray  

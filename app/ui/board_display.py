@@ -156,7 +156,6 @@ class BoardDisplay(QLabel):
         # 根据红方位置调整行顺序
         if not is_red:  # 如果红方不在下方，需要反转行顺序
             rows.reverse()
-            print("Debug - Reversing rows because is_red is False")
         
         for y, row in enumerate(rows):
             x = 0

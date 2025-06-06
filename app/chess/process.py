@@ -1,7 +1,8 @@
-from chess import recognition
+from chess import recognizer
 from tools import utils
 from chess.engine import get_best_move
 from chess.message import Message, MessageType
+from chess import template_maker 
 
 last_position = None
 
@@ -9,14 +10,29 @@ def main_process(img_origin, param, display_callback=None):
     # 棋局图像  
     # img_path = './app/uploads/图像.jpeg' 
 
-    # 预处理 : 把共同的图像处理操作抽出来,当前只有灰度化是共用的
-    image, gray = recognition.pre_processing_image(img_origin)
-
     # 识别棋盘
-    x_array, y_array = recognition.board_recognition(image, gray)
+    x_array, y_array = recognizer.recognize_board(img_origin)
 
     # 识别棋子类型和坐标
-    piecesArray, is_red = recognition.pieces_recognition(image, gray, param, x_array, y_array)
+    piecesArray, is_red = recognizer.recognize_pieces(img_origin, param, x_array, y_array)
+
+    # === 样本保存（可选，调试/训练用） ===
+    # 网格切割样本
+    # template_maker.save_chess_samples_by_grid(
+    #     img_origin, x_array, y_array,
+    #     output_dir="app/images/jj_sample_grid",
+    #     template_path="app/images/jj",
+    #     is_red=is_red
+    # )
+    # # 霍夫圆切割样本
+    # template_maker.save_chess_samples(
+    #     img_origin, None, x_array, y_array,
+    #     method='hough',
+    #     output_dir="app/images/jj_sample_hough",
+    #     is_red=is_red,
+    #     template_path="app/images/jj"
+    # )
+    # === 结束 ===
 
     # 棋子位置
     # position, is_red = recognition.calculate_pieces_position(x_array, y_array, piecesArray) # 按原始位置排列的二维数组

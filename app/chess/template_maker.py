@@ -4,12 +4,13 @@ import cv2
 import numpy as np
 import mss
 from .recognition import (
-    pre_processing_image,
-    board_recognition,
+    preprocess_image,
+    recognize_board,
+    recognize_pieces,
     recognize_piece_color,
+    recognize_piece_type,
     find_nearest_index
 )
-from . import recognition
 from .context import context
 
 
@@ -43,10 +44,10 @@ def iter_pieces_by_grid(img, x_array, y_array, template_path=None, is_red=True):
             x2 = min(img.shape[1]-1, center_x + cut_radius)
             y2 = min(img.shape[0]-1, center_y + cut_radius - vertical_offset)
             piece_img = img[y1:y2, x1:x2]
-            color = recognition.recognize_piece_color(piece_img)
+            color = recognize_piece_color(piece_img)
             piece_type = None
             if color:
-                piece_type, _ = recognition.recognize_piece_type(piece_img, template_path, j, i, is_red)
+                piece_type, _ = recognize_piece_type(piece_img, template_path, j, i, is_red)
             yield piece_img, piece_type, color, (center_x, center_y)
 
 def iter_pieces_by_hough(img, gray, x_array, y_array, template_path=None, is_red=True):
@@ -71,12 +72,12 @@ def iter_pieces_by_hough(img, gray, x_array, y_array, template_path=None, is_red
         x1, y1 = max(0, x-r-padding), max(0, y-r-padding)
         x2, y2 = min(img.shape[1]-1, x+r+padding), min(img.shape[0]-1, y+r+padding)
         piece_img = img[y1:y2, x1:x2]
-        color = recognition.recognize_piece_color(piece_img)
+        color = recognize_piece_color(piece_img)
         piece_type = None
         if color:
             board_x = min(range(len(x_array)), key=lambda j: abs(x_array[j] - x))
             board_y = min(range(len(y_array)), key=lambda i: abs(y_array[i] - y))
-            piece_type, _ = recognition.recognize_piece_type(piece_img, template_path, board_x, board_y, is_red)
+            piece_type, _ = recognize_piece_type(piece_img, template_path, board_x, board_y, is_red)
         yield piece_img, piece_type, color, (x, y)
 
 def save_chess_samples(img, gray, x_array, y_array, method='grid', output_dir='app/images/jj_sample', is_red=True, template_path=None):
@@ -189,10 +190,10 @@ def save_chess_samples_by_grid(img, x_array, y_array, output_dir="app/images/jj_
             piece_img = img[y1:y2, x1:x2]
             # 等比例缩放为80x80
             piece_img = cv2.resize(piece_img, (80, 80), interpolation=cv2.INTER_AREA)
-            color = recognition.recognize_piece_color(piece_img)
+            color = recognize_piece_color(piece_img)
             piece_type = None
             if color:
-                piece_type, _ = recognition.recognize_piece_type(piece_img, template_path, j, i, is_red)
+                piece_type, _ = recognize_piece_type(piece_img, template_path, j, i, is_red)
             # 如果是空格，跳过不保存
             if not piece_type:
                 continue
@@ -248,12 +249,12 @@ def save_templates(use_grid_cut=True):
             return False
         
         # 预处理图像
-        image, gray = pre_processing_image(board_img)
+        image, gray = preprocess_image(board_img)
         if image is None or gray is None:
             return False
         
         # 识别棋盘并生成坐标
-        x_array, y_array = board_recognition(image, gray)
+        x_array, y_array = recognize_board(image, gray)
         if not x_array or not y_array:
             print("棋盘识别失败")
             return False

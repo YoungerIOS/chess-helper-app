@@ -7,12 +7,13 @@ import os
 import queue
 import threading
 import sys
-from chess.screenshot import capture_region, get_position, update_params, trigger_manual_recognition
+from chess.screenshot import capture_region, get_position, update_params, trigger_manual_recognition, capture_avatar
 from chess import engine
 from ui.board_display import BoardDisplay
 from chess.template_maker import save_templates
 from chess.message import Message, MessageType
 from chess.context import context
+from chess.piece_recognizer import ChessPieceRecognizer
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -60,11 +61,9 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(10)  # 减小整体间距
         main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 初始化引擎参数
-        self.load_params()
-        
-        # 初始化上下文中的平台设置
-        context.set_platform(self.engine_params["platform"])
+        # 初始化上下文
+        context.load_config()
+        self.engine_params = context.engine_params
         
         # 顶部文本显示区域
         self.move_display = QLabel('<span style="color: red;">等待获取棋局...</span>')
@@ -142,14 +141,14 @@ class MainWindow(QMainWindow):
         self.tt_action.triggered.connect(lambda: self.on_game_selected("天天象棋"))
         
         # 设置初始选中状态
-        if self.engine_params["platform"] == "JJ":
+        if context.platform == "JJ":
             self.jj_action.setChecked(True)
         else:
             self.tt_action.setChecked(True)
         
         # 添加其他按钮
         other_buttons = [
-            ("按钮2", lambda: None),
+            ("按钮2", lambda: capture_avatar()),
             ("开始", self.on_start),  # 将开始/停止功能移到按钮3
         ]
         
@@ -437,36 +436,13 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.lines = ["", "", ""]
     
-    def load_params(self):
-        """从文件加载参数"""
-        try:
-            with open('app/json/params.json', 'r') as f:
-                params = json.load(f)
-                self.engine_params = params
-        except (FileNotFoundError, json.JSONDecodeError):
-            # 如果文件不存在或格式错误，使用默认值
-            self.engine_params = {
-                "platform": "TT",
-                "movetime": "3000",
-                "depth": "20",
-                "goParam": "depth"
-            }
-            # 保存默认值到文件
-            self.save_params()
-
-    def save_params(self):
-        """保存参数到文件"""
-        try:
-            with open('app/json/params.json', 'w') as f:
-                json.dump(self.engine_params, f, indent=4)
-        except Exception as e:
-            print(f"Error saving params: {e}")
     
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
         self.engine_params["goParam"] = param
         self.param_label.setText(self.engine_params[param])
-        self.save_params()
+        context.engine_params = self.engine_params
+        context.save_config()
         update_params(self.engine_params)
     
     def on_increase_param(self):
@@ -481,7 +457,8 @@ class MainWindow(QMainWindow):
             
         self.engine_params[key] = str(param_value)
         self.param_label.setText(str(param_value))
-        self.save_params()
+        context.engine_params = self.engine_params
+        context.save_config()
         update_params(self.engine_params)
     
     def on_decrease_param(self):
@@ -496,7 +473,8 @@ class MainWindow(QMainWindow):
             
         self.engine_params[key] = str(param_value)
         self.param_label.setText(str(param_value))
-        self.save_params()
+        context.engine_params = self.engine_params
+        context.save_config()
         update_params(self.engine_params)
     
     def on_start(self):
@@ -504,14 +482,24 @@ class MainWindow(QMainWindow):
         if not self.is_running:
             self.is_running = True
             self.sender().setText("停止")
+            # 初始化棋子识别器
+            context.piece_recognizer = ChessPieceRecognizer(
+                model_path="app/models/model.pth",
+                class_map_path="app/models/class_map.json"
+            )
             self.create_queue()
         else:
             self.is_running = False
             self.sender().setText("开始")
             # 设置事件，通知capture_region线程停止
             self.stop_event.set() 
+            # 等待线程结束
+            if self.capture_thread and self.capture_thread.is_alive():
+                self.capture_thread.join()
             # 关闭引擎进程
             engine.terminate_engine()
+            # 清理棋子识别器
+            context.piece_recognizer = None
     
     def on_stop(self):
         """停止分析"""
@@ -645,11 +633,11 @@ class MainWindow(QMainWindow):
             self.position_dot.close()
             self.position_dot = None
             
-        # 创建新的定位点
-        with open('app/json/coordinates.json', 'r') as f:
-            data = json.load(f)
-            x = data['region1']['left']
-            y = data['region1']['top']
+        # 从上下文获取区域配置
+        platform = context.get_platform(context.platform)
+        board_region = platform.regions["board"]
+        x = board_region['left']
+        y = board_region['top']
             
         self.position_dot = QLabel(None)  # 创建为独立窗口
         # 设置窗口标志：无边框、置顶、不可交互
@@ -826,7 +814,8 @@ class MainWindow(QMainWindow):
         
         self.engine_params["goParam"] = param
         self.param_label.setText(self.engine_params[param])
-        self.save_params()
+        context.engine_params = self.engine_params
+        context.save_config()
         update_params(self.engine_params)
 
     def show_game_menu(self):
@@ -834,21 +823,17 @@ class MainWindow(QMainWindow):
         self.game_menu.exec_(self.game_btn.mapToGlobal(self.game_btn.rect().bottomLeft()))
     
     def on_game_selected(self, game):
-        """处理游戏选择"""
+        """游戏选择回调"""
         # 更新选中状态
         self.jj_action.setChecked(game == "JJ象棋")
         self.tt_action.setChecked(game == "天天象棋")
         
-        # 更新平台设置
+        # 更新平台
         platform = "JJ" if game == "JJ象棋" else "TT"
-        self.engine_params["platform"] = platform
-        self.save_params()
-        update_params(self.engine_params)
-        
-        # 更新上下文中的平台设置
         context.set_platform(platform)
         
-        print(f"Selected game: {game}")
+        # 更新定位点
+        self.create_position_dot()
 
 def main():
     app = QApplication(sys.argv)
