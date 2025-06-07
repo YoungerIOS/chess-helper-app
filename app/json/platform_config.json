@@ -27,14 +27,14 @@
         },
         "regions": {
             "board": {
-                "left": 0,
-                "top": 0,
+                "left": 1001,
+                "top": 229,
                 "width": 375,
                 "height": 415
             },
             "avatar": {
-                "left": 0,
-                "top": 0,
+                "left": 1282.25,
+                "top": 644,
                 "width": 93.75,
                 "height": 124.5
             }
@@ -68,22 +68,22 @@
         },
         "regions": {
             "board": {
-                "left": 1015,
-                "top": 233,
+                "left": 677,
+                "top": 236,
                 "width": 375,
                 "height": 415
             },
             "avatar": {
-                "left": 1296.25,
-                "top": 648,
+                "left": 958.25,
+                "top": 651,
                 "width": 93.75,
                 "height": 124.5
             }
         }
     },
-    "platform": "JJ",
+    "platform": "TT",
     "engine_params": {
-        "movetime": "5000",
+        "movetime": "7000",
         "depth": "22",
         "goParam": "depth"
     }

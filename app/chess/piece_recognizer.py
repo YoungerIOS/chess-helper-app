@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
+from torchvision.models import MobileNet_V2_Weights
 from PIL import Image
 import json
 import os
@@ -29,8 +30,11 @@ class ChessPieceRecognizer:
             self.class_map = json.load(f)
         
         # 加载模型
-        self.model = models.mobilenet_v2(pretrained=False)
+        weights = MobileNet_V2_Weights.DEFAULT
+        self.model = models.mobilenet_v2(weights=weights)
+        # 分类数量
         self.model.classifier[1] = nn.Linear(self.model.last_channel, len(self.class_map))
+        # 加载训练好的权重
         self.model.load_state_dict(torch.load(model_path))
         self.model = self.model.to(self.device)
         self.model.eval()  # 设置为评估模式

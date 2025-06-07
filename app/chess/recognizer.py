@@ -3,6 +3,7 @@ import numpy as np
 import os
 from tools import utils
 from chess.context import context
+from chess.message import Message, MessageType
 from .piece_recognizer import ChessPieceRecognizer
 
 def show_image(name, image):
@@ -153,14 +154,14 @@ def recognize_board(img):
     return x_array, y_array
 
 # 识别棋子
-def recognize_pieces(img, param, x_array, y_array):
+def recognize_pieces(img, x_array, y_array, display_callback=None):
     """
     识别棋子并确定其位置和类型
     Args:
         img: 原始图像
-        param: 引擎参数配置
         x_array: 棋盘横线坐标数组
         y_array: 棋盘纵线坐标数组
+        display_callback: 回调函数，用于发送消息
     Returns:
         pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
         is_red: 是否为红方
@@ -181,7 +182,7 @@ def recognize_pieces(img, param, x_array, y_array):
         circles = np.round(circles[0, :]).astype("int")
         
         # 识别黑将并获取计算好坐标的棋盘数组
-        pieceArray, is_red = recognize_black_king(circles, resized_img, x_array, y_array)
+        pieceArray, is_red = recognize_black_king(circles, resized_img, x_array, y_array, display_callback)
         print(f"\n当前方为{'红方' if is_red else '黑方'}")
         
         # 识别所有棋子
@@ -241,22 +242,28 @@ def get_piece_image(img, x, y, r):
     return img[y1:y2+1, x1:x2+1]
 
 # 计算棋子9x10坐标,单独识别将
-def recognize_black_king(circles, img, x_array, y_array):
+def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
     """
     识别九宫格内的黑将'k',并计算所有棋子的9x10棋盘坐标
+    Args:
+        circles: 检测到的圆形
+        img: 原始图像
+        x_array: 棋盘横线坐标数组
+        y_array: 棋盘纵线坐标数组
+        display_callback: 回调函数，用于发送消息
     Returns:
         pieceArray: 9x10的二维数组,表示棋盘状态,已计算好所有棋子的坐标
         is_red: 是否红方在下方
     """
     # 初始化棋盘数组
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-
+    
     # 计算所有棋子的棋盘坐标
     for x, y, r in circles:
         board_x, board_y = get_piece_position((x, y), x_array, y_array)
         # 存储棋子的原始信息到对应位置
         pieceArray[board_y][board_x] = (x, y, r)
-
+    
     # 在上下两个九宫格内寻找黑将
     upper_palace_king = None  # 上方九宫格黑将位置
     lower_palace_king = None  # 下方九宫格黑将位置
@@ -285,7 +292,7 @@ def recognize_black_king(circles, img, x_array, y_array):
                 break
         if upper_palace_king:
             break
-
+    
     # 检查下方九宫格
     for i in range(7, 10):  # 下方九宫格是后3行
         for j in range(3, 6):  # 下方九宫格是中间3列
@@ -310,7 +317,7 @@ def recognize_black_king(circles, img, x_array, y_array):
                 break
         if lower_palace_king:
             break
-
+    
     # 根据黑将位置判断红黑方
     # 如果上方九宫格有黑将，说明红方在下方
     # 如果下方九宫格有黑将，说明红方在上方
@@ -321,10 +328,10 @@ def recognize_black_king(circles, img, x_array, y_array):
         is_red = False  # 红方在上方
         print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
     else:
-        # 如果两个九宫格都没有找到黑将，默认红方在下方
-        is_red = True
-        print("未检测到黑将位置，默认红方在下方")
-
+        # 如果两个九宫格都没有找到黑将，通过回调通知
+        if display_callback:
+            display_callback(Message(MessageType.STATUS, "未检测到黑将位置"))
+    
     return pieceArray, is_red
 
 
@@ -430,63 +437,3 @@ def is_valid_position(piece_type, x, y, is_red):
     
     # 车、马、炮可以在任何位置
     return True
-
-# 计算棋子坐标
-def find_nearest_index(point, points):  
-    distances = [abs(point - p) for p in points]  # 计算点到所有竖线x坐标的绝对值差异  
-    return distances.index(min(distances))  # 返回最接近的竖线的索引 
-  
-
-def calculate_pieces_position(x_array, y_array, circles):  
-    # 处理circles，计算每个圆心到最近的竖线和横线的索引，并更新pieceArray  
-    
-    # 初始化pieceArray  
-    pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]  
-      
-    for cx, cy, radius, name in circles:  
-        # 找到最接近的竖线和横线的索引  
-        nearest_x_index = find_nearest_index(cx, x_array)  
-        nearest_y_index = find_nearest_index(cy, y_array)  
-          
-        # 可选：检查圆心是否"足够接近"某条竖线或横线（使用半径作为阈值）  
-        # 这里我们简单地标记最近的竖线和横线，不考虑阈值  
-          
-        # 在pieceArray中标记圆心位置  
-        # 注意：这里我们假设要在一个"单元格"中标记圆心，即一个特定的(x, y)索引  
-        pieceArray[nearest_y_index][nearest_x_index] = name  # 或者使用其他标记方式  
-          
-        # 如果想要表示圆心的范围（例如，使用半径画圆），则需要更复杂的逻辑  
-        # 这通常涉及到在pieceArray中设置多个单元格，可能还需要额外的数据结构或算法  
-    
-    # 判断本方是红棋还是黑棋
-    # 寻找 "K" 的位置以判断是红方还是黑方
-    is_red = False
-    for row in pieceArray[:3]: # 老将只会在9宫,所以只看前3行
-        for cell in row:
-            if 'k' in cell:
-                is_red = True
-                break
-        if is_red:
-            break
-
-    return pieceArray, is_red   
-  
-# 测试棋子的HVS范围并打印
-# def measure_color_range(roi):  
- 
-#     # 转换到HSV颜色空间  
-#     hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)  
-        
-#     # 计算并显示颜色范围（这里只是简单地显示所有HSV值）  
-#     # 在实际应用中，你可能需要分析这些值来确定合适的范围  
-#     hsv_values = hsv_roi.reshape((-1, 3))  # 将图像转换为一维数组，每三个元素为一个HSV值  
-        
-#     # 打印或分析HSV值  
-#     # 例如，你可以找到H、S、V通道的最小值和最大值  
-#     h_min, h_max = np.min(hsv_values[:, 0]), np.max(hsv_values[:, 0])  
-#     s_min, s_max = np.min(hsv_values[:, 1]), np.max(hsv_values[:, 1])  
-#     v_min, v_max = np.min(hsv_values[:, 2]), np.max(hsv_values[:, 2])  
-        
-#     print(f"H range: {h_min} to {h_max}")  
-#     print(f"S range: {s_min} to {s_max}")  
-#     print(f"V range: {v_min} to {v_max}")  

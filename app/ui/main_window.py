@@ -7,13 +7,16 @@ import os
 import queue
 import threading
 import sys
-from chess.screenshot import capture_region, get_position, update_params, trigger_manual_recognition, capture_avatar
+from chess.screenshot import capture_region, get_position, trigger_manual_recognition, capture_avatar
 from chess import engine
 from ui.board_display import BoardDisplay
 from chess.template_maker import save_templates
 from chess.message import Message, MessageType
 from chess.context import context
 from chess.piece_recognizer import ChessPieceRecognizer
+from chess.countdown import CountdownPredictor
+from chess.template_maker import save_templates
+from ui.board_display import BoardDisplay
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -63,7 +66,7 @@ class MainWindow(QMainWindow):
         
         # 初始化上下文
         context.load_config()
-        self.engine_params = context.engine_params
+        self.engine_params = context.get_engine_params()
         
         # 顶部文本显示区域
         self.move_display = QLabel('<span style="color: red;">等待获取棋局...</span>')
@@ -424,82 +427,97 @@ class MainWindow(QMainWindow):
         # 显示定位点
         self.create_position_dot()
         
-        update_params(self.engine_params)
-        
         # 初始化线程和队列
         self.stop_event = threading.Event()
         self.result_queue = queue.Queue()
         self.capture_thread = None
         self.check_timer = None
+
+        # 初始化棋子和倒计时识别模型
+        self.init_models()
         
         # 初始化状态
         self.is_running = False
         self.lines = ["", "", ""]
     
     
+    def init_models(self):
+        """初始化所有模型"""
+        # 初始化棋子识别器
+        if context.piece_recognizer is None:
+            context.piece_recognizer = ChessPieceRecognizer(
+                model_path="app/models/model.pth",
+                class_map_path="app/models/class_map.json"
+            )
+        
+        # 初始化倒计时预测器
+        if context.countdown_predictor is None:
+            context.countdown_predictor = CountdownPredictor(
+                model_path="app/models/countdown_model.pth"
+            )
+        
+        print("模型初始化完成")
+    
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
         self.engine_params["goParam"] = param
         self.param_label.setText(self.engine_params[param])
-        context.engine_params = self.engine_params
-        context.save_config()
-        update_params(self.engine_params)
-    
+        context.update_engine_params(self.engine_params)
+
     def on_increase_param(self):
         """增加参数值"""
-        key = self.engine_params["goParam"]
-        param_value = int(self.engine_params[key])
+        # 获取当前参数
+        engine_params = context.get_engine_params()
+        key = engine_params["goParam"]
+        param_value = int(engine_params[key])
         
         if key == "depth" and param_value < 200:
             param_value += 1
         elif key == "movetime" and param_value < 20000:
             param_value += 2000
-            
-        self.engine_params[key] = str(param_value)
+        
+        # 更新参数
+        engine_params[key] = str(param_value)
+        context.update_engine_params(engine_params)
+        
+        # 更新显示
         self.param_label.setText(str(param_value))
-        context.engine_params = self.engine_params
-        context.save_config()
-        update_params(self.engine_params)
-    
+
     def on_decrease_param(self):
         """减少参数值"""
-        key = self.engine_params["goParam"]
-        param_value = int(self.engine_params[key])
+        # 获取当前参数
+        engine_params = context.get_engine_params()
+        key = engine_params["goParam"]
+        param_value = int(engine_params[key])
         
         if key == "depth" and param_value > 1:
             param_value -= 1
         elif key == "movetime" and param_value > 2000:
             param_value -= 2000
-            
-        self.engine_params[key] = str(param_value)
+        
+        # 更新参数
+        engine_params[key] = str(param_value)
+        context.update_engine_params(engine_params)
+        
+        # 更新显示
         self.param_label.setText(str(param_value))
-        context.engine_params = self.engine_params
-        context.save_config()
-        update_params(self.engine_params)
-    
+
     def on_start(self):
-        """开始分析"""
+        """开始/停止按钮事件"""
         if not self.is_running:
             self.is_running = True
             self.sender().setText("停止")
-            # 初始化棋子识别器
-            context.piece_recognizer = ChessPieceRecognizer(
-                model_path="app/models/model.pth",
-                class_map_path="app/models/class_map.json"
-            )
             self.create_queue()
         else:
             self.is_running = False
             self.sender().setText("开始")
             # 设置事件，通知capture_region线程停止
-            self.stop_event.set() 
+            self.stop_event.set()
             # 等待线程结束
             if self.capture_thread and self.capture_thread.is_alive():
                 self.capture_thread.join()
             # 关闭引擎进程
             engine.terminate_engine()
-            # 清理棋子识别器
-            context.piece_recognizer = None
     
     def on_stop(self):
         """停止分析"""
@@ -814,9 +832,7 @@ class MainWindow(QMainWindow):
         
         self.engine_params["goParam"] = param
         self.param_label.setText(self.engine_params[param])
-        context.engine_params = self.engine_params
-        context.save_config()
-        update_params(self.engine_params)
+        context.update_engine_params(self.engine_params)
 
     def show_game_menu(self):
         """显示游戏选择菜单"""

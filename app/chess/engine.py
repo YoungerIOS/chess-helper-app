@@ -4,6 +4,7 @@ import sys
 import subprocess
 import threading
 from chess.message import Message, MessageType
+from chess.context import context
 
 #使用线程锁,可以确保任何时刻只有一个线程可以访问pikafish变量
 #在这里用处可能不大,但感觉日后如果要面对大量用户同时使用,可能用得上
@@ -58,11 +59,13 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)  
     return os.path.join(os.path.abspath("./app/"), relative_path)
     
-def get_best_move(fen, side, parameter, display_callback=None):
+def get_best_move(fen, side, display_callback=None):
     fen_string = fen + ' ' + ('w' if side else 'b')
 
-    param = parameter['goParam']
-    value = parameter[param]
+    # 从上下文获取引擎参数
+    engine_params = context.get_engine_params()
+    param = engine_params['goParam']
+    value = engine_params[param]
     if param is None or param == '' or value is None or value == '':
         param = 'depth'
         value = '20'

@@ -3,10 +3,11 @@ from tools import utils
 from chess.engine import get_best_move
 from chess.message import Message, MessageType
 from chess import template_maker 
+from chess.context import context
 
 last_position = None
 
-def main_process(img_origin, param, display_callback=None):  
+def main_process(img_origin, display_callback=None):  
     # 棋局图像  
     # img_path = './app/uploads/图像.jpeg' 
 
@@ -14,7 +15,7 @@ def main_process(img_origin, param, display_callback=None):
     x_array, y_array = recognizer.recognize_board(img_origin)
 
     # 识别棋子类型和坐标
-    piecesArray, is_red = recognizer.recognize_pieces(img_origin, param, x_array, y_array)
+    piecesArray, is_red = recognizer.recognize_pieces(img_origin, x_array, y_array, display_callback)
 
     # === 样本保存（可选，调试/训练用） ===
     # 网格切割样本
@@ -51,7 +52,7 @@ def main_process(img_origin, param, display_callback=None):
         display_callback(Message(MessageType.BOARD_DISPLAY, "已获取局面...", fen_str=fen_str, is_red=is_red))
 
     # 向引擎发送命令
-    move, fen = get_best_move(fen_str, is_red, param, display_callback)
+    move, fen = get_best_move(fen_str, is_red, display_callback)
     # move = 'h9g7'
     # fen = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/RNBAKABNR w'
     print(f"Debug - Move : {move}, FEN: {fen}")  # 添加调试信息

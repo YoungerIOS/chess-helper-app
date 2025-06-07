@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, List
 from tools import utils
 import json
+from threading import Lock
 
 @dataclass
 class Platform:
@@ -23,15 +24,30 @@ class ChessContext:
     """象棋助手上下文对象，包含所有共享状态"""
     platform: str                    # 当前平台
     template_path: str              # 模板路径
-    engine_params: Dict = field(default_factory=dict)  # 引擎参数
+    _engine_params: Dict = field(default_factory=dict)  # 引擎参数
+    _engine_params_lock: Lock = field(default_factory=Lock)  # 引擎参数锁
     is_red: bool = False           # 是否红方
     is_running: bool = False       # 是否正在运行
     piece_recognizer: Optional[object] = None  # 添加棋子识别器属性
+    countdown_predictor: Optional[object] = None  # 添加预测器属性
     
     def __post_init__(self):
         """初始化时加载配置"""
         self.load_config()
     
+    def get_engine_params(self) -> Dict:
+        """线程安全地获取引擎参数"""
+        with self._engine_params_lock:
+            return self._engine_params.copy()  # 返回副本避免外部修改
+
+    def update_engine_params(self, new_params: Dict) -> None:
+        """线程安全地更新引擎参数"""
+        with self._engine_params_lock:
+            self._engine_params = new_params.copy()  # 存储副本避免外部修改
+        
+        # 在锁外保存配置
+        self.save_config()
+
     def load_config(self):
         """从配置文件加载所有设置"""
         try:
@@ -50,11 +66,12 @@ class ChessContext:
                     )
             
             # 加载引擎参数
-            self.engine_params = config.get('engine_params', {
-                "movetime": "3000",
-                "depth": "20",
-                "goParam": "depth"
-            })
+            with self._engine_params_lock:
+                self._engine_params = config.get('engine_params', {
+                    "movetime": "3000",
+                    "depth": "20",
+                    "goParam": "depth"
+                }).copy()
             
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
@@ -67,11 +84,12 @@ class ChessContext:
                 'TT': Platform(name='TT', template_path=utils.resource_path("images/tiantian")),
                 'JJ': Platform(name='JJ', template_path=utils.resource_path("images/jj"))
             }
-            self.engine_params = {
-                "movetime": "3000",
-                "depth": "20",
-                "goParam": "depth"
-            }
+            with self._engine_params_lock:
+                self._engine_params = {
+                    "movetime": "3000",
+                    "depth": "20",
+                    "goParam": "depth"
+                }.copy()
             self.platform = "TT"
             self.template_path = self._platforms["TT"].template_path
     
@@ -88,7 +106,10 @@ class ChessContext:
             }
             # 添加其他配置
             config['platform'] = self.platform
-            config['engine_params'] = self.engine_params
+            
+            # 获取引擎参数的副本
+            with self._engine_params_lock:
+                config['engine_params'] = self._engine_params.copy()
             
             with open(utils.resource_path("json/platform_config.json"), "w") as f:
                 json.dump(config, f, indent=4)
@@ -143,5 +164,5 @@ class ChessContext:
 context = ChessContext(
     platform="TT",
     template_path="",
-    engine_params={}
+    _engine_params={}
 ) 
