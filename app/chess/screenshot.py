@@ -1,26 +1,17 @@
 import mss
 import time
 import cv2
-import os
-import sys
-import threading
 import numpy as np
 from chess import process, engine
 from chess.message import Message, MessageType
 from chess.context import context
+from tools.utils import resource_path
 
 manual_trigger = False  # 添加手动触发标志
 
 # 全局变量，用于存储倒计时区域检测到的最大轮廓
 max_contour = None
 
-
-def resource_path(relative_path):  
-    """ 获取资源文件的绝对路径 """  
-    if hasattr(sys, '_MEIPASS'):  
-        # 如果是打包后的应用，则使用 sys._MEIPASS  
-        return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./app/"), relative_path)
 
 def detect_avatar_border(img, platform):
     """
@@ -101,10 +92,10 @@ def check_turn_order(avatar_region):
         temp_path = "app/images/board/temp_avatar.png"
         cv2.imwrite(temp_path, avatar_img)
         
-        # 使用模型预测
+        # 其他平台使用模型预测
         try:
-            result = context.countdown_predictor.predict(temp_path)
-            # print(f"倒计时预测结果: {result}")  
+            result = context.timer_recognizer.predict(temp_path)
+            # print(f"预测结果: {result['class_name']}, 置信度: {result['confidence']:.2f}")
             return result['class_name'] == 'countdown' and result['confidence'] > 0.9
         except Exception as e:
             print(f"预测出错: {e}, 使用颜色检测")
@@ -126,7 +117,8 @@ def capture_region(result_queue, stop_event):
         if check_turn_order(avatar_region): # 我方进入计时状态
             # 还没有获得着法
             if not got_move:
-                time.sleep(0.3) # 倒计时出现时,吃子,将军等动画还未完全结束,所以等片刻
+                # 等待动画结束
+                time.sleep(context.animation_delay)  # 倒计时出现时,吃子,将军等动画还未完全结束,所以等片刻
                 with mss.mss() as sct:  
                     # 截屏
                     screenshot = sct.grab(board_region) 
@@ -241,58 +233,5 @@ def get_contour_overlap(contour1, contour2):
     # print(f"重叠像素比例: {overlap_ratio:.2%}")
     
     return overlap_ratio
-
-
-#================= 头像截图 , 用于训练模型 =================
-capture_avatar_thread = None
-stop_capture = threading.Event()
-
-def capture_avatar():
-    """捕获头像区域"""
-    global capture_avatar_thread, stop_capture
-    
-    # 如果线程已经在运行，则停止它
-    if capture_avatar_thread and capture_avatar_thread.is_alive():
-        stop_capture.set()
-        capture_avatar_thread.join()
-        stop_capture.clear()
-        print("停止截图")
-        return
-    
-    # 创建新线程执行截图
-    capture_avatar_thread = threading.Thread(target=_capture_avatar_loop)
-    capture_avatar_thread.start()
-    print("开始截图")
-
-def _capture_avatar_loop():
-    """截图循环"""
-    # 获取当前平台的区域配置
-    platform = context.get_platform(context.platform)
-    avatar_region = platform.regions["avatar"]
-    
-    # 创建样本目录
-    sample_dir = "app/images/jj_sample_timer"
-    if not os.path.exists(sample_dir):
-        os.makedirs(sample_dir)
-    
-    # 使用mss进行截图
-    with mss.mss() as sct:
-        while not stop_capture.is_set():
-            try:
-                avatar_screenshot = sct.grab(avatar_region)
-                
-                # 使用时间戳作为文件名
-                timestamp = int(time.time() * 1000)
-                filename = f"{sample_dir}/timer_{timestamp}.png"
-                
-                # 保存图片
-                mss.tools.to_png(avatar_screenshot.rgb, avatar_screenshot.size, output=filename)
-                print(f"保存倒计时截图: {filename}")
-                
-                # 等待0.5秒
-                time.sleep(0.5)
-            except Exception as e:
-                print(f"截图出错: {e}")
-                break
 
     

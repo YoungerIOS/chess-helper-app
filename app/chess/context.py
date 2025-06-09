@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List
-from tools import utils
+from tools.utils import resource_path
 import json
 from threading import Lock
 
@@ -8,28 +8,43 @@ from threading import Lock
 class Platform:
     """平台配置类，包含平台相关的所有信息"""
     name: str                    # 平台名称，如 'TT'、'JJ'
-    template_path: str           # 模板图片目录
     board_coords: Dict[str, List[int]] = field(default_factory=lambda: {"x": [], "y": []})  # 棋盘坐标
     regions: Dict = field(default_factory=lambda: {
         "board": {"left": 0, "top": 0, "width": 375, "height": 415},
         "avatar": {"left": 0, "top": 0, "width": 93.75, "height": 124.5}
     })  # 区域配置
+    _piece_recognizer: Optional[object] = None  # 棋子识别器
+    _timer_recognizer: Optional[object] = None  # 倒计时识别器
+    animation_delay: float = 0.3  # 动画等待时长（秒）
     
     def __post_init__(self):
-        """初始化时设置模板路径"""
-        self.template_path = utils.resource_path(f"images/{self.name.lower()}")
+        """初始化时设置动画等待时长"""
+        # 根据平台设置不同的动画等待时长
+        self.animation_delay = 1.2 if self.name == 'TT' else 0.3
+    
+    @property
+    def piece_recognizer(self) -> object:
+        """获取棋子识别器"""
+        if self._piece_recognizer is None:
+            from chess.piece_recognizer import ChessPieceRecognizer
+            self._piece_recognizer = ChessPieceRecognizer(platform=self.name)
+        return self._piece_recognizer
+    
+    @property
+    def timer_recognizer(self) -> object:
+        """获取倒计时识别器"""
+        if self._timer_recognizer is None:
+            from chess.timer_recognizer import CountdownPredictor
+            self._timer_recognizer = CountdownPredictor(platform=self.name)
+        return self._timer_recognizer
 
 @dataclass
 class ChessContext:
     """象棋助手上下文对象，包含所有共享状态"""
     platform: str                    # 当前平台
-    template_path: str              # 模板路径
     _engine_params: Dict = field(default_factory=dict)  # 引擎参数
     _engine_params_lock: Lock = field(default_factory=Lock)  # 引擎参数锁
-    is_red: bool = False           # 是否红方
-    is_running: bool = False       # 是否正在运行
-    piece_recognizer: Optional[object] = None  # 添加棋子识别器属性
-    countdown_predictor: Optional[object] = None  # 添加预测器属性
+    _platforms: Dict[str, Platform] = field(default_factory=dict)  # 平台字典
     
     def __post_init__(self):
         """初始化时加载配置"""
@@ -51,7 +66,7 @@ class ChessContext:
     def load_config(self):
         """从配置文件加载所有设置"""
         try:
-            with open(utils.resource_path("json/platform_config.json"), "r") as f:
+            with open(resource_path("json/platform_config.json"), "r") as f:
                 config = json.load(f)
                 
             # 初始化平台
@@ -60,7 +75,6 @@ class ChessContext:
                 if platform_name in ['TT', 'JJ']:
                     self._platforms[platform_name] = Platform(
                         name=platform_name,
-                        template_path=utils.resource_path(f"images/{platform_name.lower()}"),
                         board_coords=platform_config['board_coords'],
                         regions=platform_config['regions']
                     )
@@ -75,14 +89,18 @@ class ChessContext:
             
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
-            self.template_path = self._platforms[self.platform].template_path
+            
+            # 预加载当前平台的模型
+            _ = self.piece_recognizer
+            _ = self.timer_recognizer
+            print("模型初始化完成")
             
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"Error loading config: {e}")
             # 使用默认值初始化
             self._platforms = {
-                'TT': Platform(name='TT', template_path=utils.resource_path("images/tiantian")),
-                'JJ': Platform(name='JJ', template_path=utils.resource_path("images/jj"))
+                'TT': Platform(name='TT'),
+                'JJ': Platform(name='JJ')
             }
             with self._engine_params_lock:
                 self._engine_params = {
@@ -91,7 +109,11 @@ class ChessContext:
                     "goParam": "depth"
                 }.copy()
             self.platform = "TT"
-            self.template_path = self._platforms["TT"].template_path
+            
+            # 预加载默认平台的模型
+            _ = self.piece_recognizer
+            _ = self.timer_recognizer
+            print("模型初始化完成")
     
     def save_config(self):
         """保存所有配置到文件"""
@@ -111,7 +133,7 @@ class ChessContext:
             with self._engine_params_lock:
                 config['engine_params'] = self._engine_params.copy()
             
-            with open(utils.resource_path("json/platform_config.json"), "w") as f:
+            with open(resource_path("json/platform_config.json"), "w") as f:
                 json.dump(config, f, indent=4)
         except Exception as e:
             print(f"Error saving config: {e}")
@@ -126,7 +148,6 @@ class ChessContext:
         
         # 更新当前平台信息
         self.platform = platform_name
-        self.template_path = platform.template_path
         
         # 保存配置
         self.save_config()
@@ -160,9 +181,23 @@ class ChessContext:
         self._platforms[self.platform].regions = regions
         self.save_config()
 
+    @property
+    def piece_recognizer(self) -> object:
+        """获取当前平台的棋子识别器"""
+        return self._platforms[self.platform].piece_recognizer
+    
+    @property
+    def timer_recognizer(self) -> object:
+        """获取当前平台的倒计时识别器"""
+        return self._platforms[self.platform].timer_recognizer
+
+    @property
+    def animation_delay(self) -> float:
+        """获取当前平台的动画等待时长"""
+        return self._platforms[self.platform].animation_delay
+
 # 创建全局上下文实例
 context = ChessContext(
     platform="TT",
-    template_path="",
     _engine_params={}
 ) 

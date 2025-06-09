@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import os
-from tools import utils
+from tools.utils import filter_vertical_lines, filter_horizontal_lines, resource_path
 from chess.context import context
 from chess.message import Message, MessageType
 from .piece_recognizer import ChessPieceRecognizer
@@ -70,7 +70,7 @@ def recognize_board(img):
     # 过滤线段并在新图上绘制
     # 竖线 (x1 == x2)
     x_array = []
-    vlines, yMin, yMax = utils.filter_vertical_lines(lines, resized_img.shape[1])
+    vlines, yMin, yMax = filter_vertical_lines(lines, resized_img.shape[1])
     for line in vlines:  
         for x1, y1, x2, y2 in line:
             cv2.line(board_vis, (x1, yMin), (x2, yMax), (0, 255, 0), 2)  # 绿色，加粗线条
@@ -78,7 +78,7 @@ def recognize_board(img):
 
     # 横线 (y1 == y2)
     y_array = []
-    hlines, xMin, xMax = utils.filter_horizontal_lines(lines, resized_img.shape[1])
+    hlines, xMin, xMax = filter_horizontal_lines(lines, resized_img.shape[1])
     for line in hlines:  
         for x1, y1, x2, y2 in line:  
             cv2.line(board_vis, (xMin, y1), (xMax, y2), (0, 0, 255), 2)  # 红色，加粗线条
@@ -137,9 +137,9 @@ def recognize_board(img):
             cv2.line(board_vis, (xMin, y), (xMax, y), (0, 255, 255), 2)  # 黄色，加粗线条
     
     # 保存可视化结果
-    output_dir = os.path.dirname(utils.resource_path("images/board/board_visual.jpg"))
+    output_dir = os.path.dirname(resource_path("images/board/board_visual.jpg"))
     os.makedirs(output_dir, exist_ok=True)
-    cv2.imwrite(utils.resource_path("images/board/board_visual.jpg"), board_vis)
+    cv2.imwrite(resource_path("images/board/board_visual.jpg"), board_vis)
 
     # 更新当前平台的棋盘坐标
     platform = context.get_platform(context.platform)
@@ -255,8 +255,9 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
         pieceArray: 9x10的二维数组,表示棋盘状态,已计算好所有棋子的坐标
         is_red: 是否红方在下方
     """
-    # 初始化棋盘数组
+    # 初始化棋盘数组和is_red
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+    is_red = False  # 默认值设为False
     
     # 计算所有棋子的棋盘坐标
     for x, y, r in circles:
@@ -281,7 +282,14 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
             cv2.imwrite(temp_path, piece_img)
             
             # 使用模型识别
-            piece_type = context.piece_recognizer.recognize(temp_path)
+            result = context.piece_recognizer.recognize(temp_path)
+            if result is None:
+                print(f"无法识别棋子: {temp_path}")
+                continue
+                
+            # 使用识别结果
+            piece_type = result['class_name']
+            print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
             
             # 删除临时文件
             os.remove(temp_path)
@@ -306,7 +314,14 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
             cv2.imwrite(temp_path, piece_img)
             
             # 使用模型识别
-            piece_type = context.piece_recognizer.recognize(temp_path)
+            result = context.piece_recognizer.recognize(temp_path)
+            if result is None:
+                print(f"无法识别棋子: {temp_path}")
+                continue
+                
+            # 使用识别结果
+            piece_type = result['class_name']
+            print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
             
             # 删除临时文件
             os.remove(temp_path)
@@ -331,6 +346,7 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
         # 如果两个九宫格都没有找到黑将，通过回调通知
         if display_callback:
             display_callback(Message(MessageType.STATUS, "未检测到黑将位置"))
+        is_red = False  # 设置默认值
     
     return pieceArray, is_red
 
@@ -341,22 +357,19 @@ def recognize_piece_type(piece_img):
     :param piece_img: 棋子图片
     :return: 棋子类型或None
     """
-    # 从上下文中获取棋子识别器
-    piece_recognizer = context.piece_recognizer
-    if piece_recognizer is None:
-        # 如果识别器不存在，初始化并保存到上下文
-        piece_recognizer = ChessPieceRecognizer(
-            model_path="app/models/model.pth",
-            class_map_path="app/models/class_map.json"
-        )
-        context.piece_recognizer = piece_recognizer
-    
     # 保存临时图片
     temp_path = "temp_piece.jpg"
     cv2.imwrite(temp_path, piece_img)
     
     # 使用模型识别
-    piece_type = piece_recognizer.recognize(temp_path)
+    result = context.piece_recognizer.recognize(temp_path)
+    if result is None:
+        print(f"无法识别棋子: {temp_path}")
+        return None
+    
+    # 使用识别结果
+    piece_type = result['class_name']
+    print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
     
     # 删除临时文件
     os.remove(temp_path)
