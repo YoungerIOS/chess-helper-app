@@ -1,22 +1,49 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QComboBox, QFrame, QApplication, QMenu)
-from PySide6.QtCore import Qt, QSize, QPoint, QTimer
-from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap
-import json
+                             QLabel, QPushButton, QApplication, QMenu)
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent
+from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 import os
 import queue
 import threading
 import sys
-from chess.screenshot import capture_region, get_position, trigger_manual_recognition, capture_avatar
+from chess.screenshot import capture_region, get_position, trigger_manual_recognition
 from chess import engine
 from ui.board_display import BoardDisplay
-from chess.template_maker import save_templates
 from chess.message import Message, MessageType
 from chess.context import context
-from chess.piece_recognizer import ChessPieceRecognizer
-from chess.countdown import CountdownPredictor
-from chess.template_maker import save_templates
 from ui.board_display import BoardDisplay
+from pynput import mouse
+
+# 定义一个自定义覆盖层类，直接处理鼠标事件
+class OverlayWidget(QWidget):
+    def __init__(self, parent=None, callback=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # 背景透明
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool |
+            Qt.X11BypassWindowManagerHint  # 绕过窗口管理器
+        )
+        self.callback = callback
+        self.setCursor(Qt.CrossCursor)  # 设置十字光标，让用户知道这是可点击区域
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.callback:
+            self.callback(QCursor.pos())
+        super().mousePressEvent(event)
+    
+    def showEvent(self, event):
+        """窗口显示时调用，确保窗口在最前方"""
+        super().showEvent(event)
+        self.raise_()  # 保持在最前方
+        self.activateWindow()  # 激活窗口
+        
+    def focusOutEvent(self, event):
+        """处理失去焦点的情况，保持窗口在最前方"""
+        super().focusOutEvent(event)
+        self.raise_()  # 保持在最前方
+        self.activateWindow()  # 重新激活窗口
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -91,8 +118,12 @@ class MainWindow(QMainWindow):
         
         # 创建游戏选择按钮
         self.game_btn = QPushButton("游戏平台")
-        self.game_btn.setFixedSize(55, 35)
+        self.game_btn.setFixedSize(75, 35) 
         self.game_btn.setFont(QFont("Arial", 11))
+        # 加载并设置箭头图标
+        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        self.game_btn.setIcon(arrow_icon)
+        self.game_btn.setIconSize(QSize(12, 12))
         self.game_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1874CD;
@@ -100,7 +131,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #1874CD;
                 border-radius: 5px;
                 text-align: center;
-                padding: 0px;
+                padding: 0px 8px;  /* 左右padding设为8px */
                 margin: 0px;
             }
             QPushButton:hover {
@@ -149,9 +180,35 @@ class MainWindow(QMainWindow):
         else:
             self.tt_action.setChecked(True)
         
+        # 创建棋盘定位按钮 - 改为普通按钮直接调用重新定位功能
+        self.board_btn = QPushButton("棋盘定位")
+        self.board_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
+        self.board_btn.setFont(QFont("Arial", 11))
+        self.board_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                text-align: center;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        # 直接连接到重新定位功能
+        self.board_btn.clicked.connect(self.on_reposition)
+        middle_buttons_layout.addWidget(self.board_btn)
+        
         # 添加其他按钮
         other_buttons = [
-            ("按钮2", lambda: capture_avatar()),
             ("开始", self.on_start),  # 将开始/停止功能移到按钮3
         ]
         
@@ -177,7 +234,8 @@ class MainWindow(QMainWindow):
                     border: 1px solid #0d47a1;
                 }
             """)
-            btn.clicked.connect(callback)
+            if callback:  # 只有当callback不为None时才连接点击事件
+                btn.clicked.connect(callback)
             middle_buttons_layout.addWidget(btn)
         
         main_layout.addLayout(middle_buttons_layout)
@@ -230,17 +288,16 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(callback)
             control_layout.addWidget(btn)
         
-        # 创建棋盘设置按钮
-        self.board_btn = QPushButton("棋盘设置")
-        self.board_btn.setFixedSize(55, 35)
-        self.board_btn.setFont(QFont("Arial", 11))
-        self.board_btn.setStyleSheet("""
+        # 创建"按钮2" - 修改为"显示/隐藏原点"按钮
+        self.show_dot_btn = QPushButton("隐藏原点") # 初始时原点显示，所以按钮文本是"隐藏原点"
+        self.show_dot_btn.setMinimumHeight(35)
+        self.show_dot_btn.setFont(QFont("Arial", 11))
+        self.show_dot_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1874CD;
                 color: white;
                 border: 1px solid #1874CD;
                 border-radius: 5px;
-                text-align: center;
                 padding: 0px;
                 margin: 0px;
             }
@@ -253,43 +310,19 @@ class MainWindow(QMainWindow):
                 border: 1px solid #0d47a1;
             }
         """)
-        self.board_btn.clicked.connect(self.show_board_menu)
-        control_layout.addWidget(self.board_btn)
-        
-        # 创建棋盘设置菜单
-        self.board_menu = QMenu(self)
-        self.board_menu.setStyleSheet("""
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 5px 10px;
-                min-height: 20px;
-                color: black;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu::item:checked {
-                background-color: #e0e0e0;
-            }
-        """)
-        self.show_dot_action = self.board_menu.addAction("显示原点")
-        self.reposition_action = self.board_menu.addAction("重新定位")
-        self.reset_template_action = self.board_menu.addAction("重置模板")
-        self.show_dot_action.setCheckable(True)
-        self.show_dot_action.setChecked(True)  # 设置默认选中
-        self.show_dot_action.triggered.connect(self.on_show_dot)
-        self.reposition_action.triggered.connect(self.on_reposition)
-        self.reset_template_action.triggered.connect(self.on_reset_template)
+        # 不再使用checkable属性
+        self.is_dot_visible = True # 添加一个状态变量来跟踪原点是否可见
+        self.show_dot_btn.clicked.connect(self.toggle_show_dot)
+        control_layout.addWidget(self.show_dot_btn)
         
         # 创建参数选择按钮
         self.param_btn = QPushButton("参数")
-        self.param_btn.setFixedSize(35, 35)
+        self.param_btn.setFixedSize(55, 35)  
         self.param_btn.setFont(QFont("Arial", 11))
+        # 加载并设置箭头图标
+        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        self.param_btn.setIcon(arrow_icon)
+        self.param_btn.setIconSize(QSize(12, 12))
         self.param_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1874CD;
@@ -297,7 +330,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #1874CD;
                 border-radius: 5px;
                 text-align: center;
-                padding: 0px;
+                padding: 0px 8px;  /* 左右padding设为8px */
                 margin: 0px;
             }
             QPushButton:hover {
@@ -422,7 +455,7 @@ class MainWindow(QMainWindow):
         self.is_show_dot = True
         self.follow_cursor = False  # 新增：是否跟随光标
         self.cursor_timer = None    # 新增：光标跟踪定时器
-        self.is_template_mode = False  # 新增：是否处于模版模式
+        self.mouse_listener = None  # 新增：鼠标事件监听器
         
         # 显示定位点
         self.create_position_dot()
@@ -433,30 +466,9 @@ class MainWindow(QMainWindow):
         self.capture_thread = None
         self.check_timer = None
 
-        # 初始化棋子和倒计时识别模型
-        self.init_models()
-        
         # 初始化状态
         self.is_running = False
         self.lines = ["", "", ""]
-    
-    
-    def init_models(self):
-        """初始化所有模型"""
-        # 初始化棋子识别器
-        if context.piece_recognizer is None:
-            context.piece_recognizer = ChessPieceRecognizer(
-                model_path="app/models/model.pth",
-                class_map_path="app/models/class_map.json"
-            )
-        
-        # 初始化倒计时预测器
-        if context.countdown_predictor is None:
-            context.countdown_predictor = CountdownPredictor(
-                model_path="app/models/countdown_model.pth"
-            )
-        
-        print("模型初始化完成")
     
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
@@ -687,6 +699,7 @@ class MainWindow(QMainWindow):
         self.position_dot.setPixmap(scaled_pixmap)
         
         self.position_dot.show()
+        self.position_dot.raise_()  # 确保显示在最上层
         
         # 如果处于跟随模式，启动定时器
         if self.follow_cursor:
@@ -715,93 +728,133 @@ class MainWindow(QMainWindow):
             window_y = cursor_pos.y() - height - 5  # 保持一致的偏移
             self.position_dot.move(window_x, window_y)
     
-    def show_board_menu(self):
-        """显示棋盘设置菜单"""
-        self.board_menu.exec_(self.board_btn.mapToGlobal(self.board_btn.rect().bottomLeft()))
-    
-    def on_show_dot(self):
-        """处理显示原点选项"""
-        if self.show_dot_action.isChecked():
-            self.create_position_dot()
-        else:
+    def toggle_show_dot(self):
+        """切换显示/隐藏原点"""
+        if self.is_dot_visible:
+            # 当前原点可见，点击后隐藏原点
             if self.position_dot:
                 self.position_dot.close()
                 self.position_dot = None
+            self.show_dot_btn.setText("显示原点")
+            self.is_dot_visible = False
+        else:
+            # 当前原点隐藏，点击后显示原点
+            self.create_position_dot()
+            self.show_dot_btn.setText("隐藏原点")
+            self.is_dot_visible = True
     
     def on_reposition(self):
         """处理重新定位选项"""
-        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
+        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角，<br>点击鼠标左键或按S键确认</span>')
         self.is_positioning = True
         self.follow_cursor = True  # 重新定位时跟随光标
         self.start_cursor_tracking()  # 开始跟踪
-        self.is_template_mode = False  # 设置非模版模式
+        
+        # 启动鼠标监听
+        self.start_mouse_listener()
     
-    def on_reset_template(self):
-        """处理重置模板选项"""
-        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角,\n不要点击,\n然后按下S键</span>')
-        self.is_positioning = True
-        self.follow_cursor = True  # 重新定位时跟随光标
-        self.start_cursor_tracking()  # 开始跟踪
-        self.is_template_mode = True  # 设置模版模式
+    def start_mouse_listener(self):
+        """启动全局鼠标监听"""
+        # 如果已经有一个监听器在运行，先停止它
+        if self.mouse_listener:
+            self.stop_mouse_listener()
+        
+        # 创建新的监听器
+        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
+        # 启动监听线程
+        self.mouse_listener.start()
+    
+    def stop_mouse_listener(self):
+        """停止全局鼠标监听"""
+        if self.mouse_listener and self.mouse_listener.is_alive():
+            self.mouse_listener.stop()
+            self.mouse_listener = None
+    
+    def on_mouse_click(self, x, y, button, pressed):
+        """处理全局鼠标点击事件"""
+        # 只响应鼠标左键按下事件，并且仅在定位模式时生效
+        if button == mouse.Button.left and pressed and self.is_positioning:
+            # 获取点击位置并调用确认方法
+            cursor_pos = QPoint(x, y)
+            # 将该操作切换到主线程执行
+            QApplication.instance().postEvent(self, QEvent(QEvent.User))
+            # 在事件处理函数中处理
+            self.cursor_pos_clicked = cursor_pos  # 保存点击位置
+            return False  # 停止监听
+        return True  # 继续监听
+    
+    def event(self, event):
+        """处理自定义事件"""
+        if event.type() == QEvent.User and hasattr(self, 'cursor_pos_clicked'):
+            # 从保存的属性获取光标位置
+            cursor_pos = self.cursor_pos_clicked
+            # 执行确认操作
+            self.confirm_position(cursor_pos)
+            # 删除临时属性
+            delattr(self, 'cursor_pos_clicked')
+            return True
+        return super().event(event)
+    
+    def confirm_position(self, cursor_pos):
+        """确认位置，处理共同逻辑"""
+        # 直接使用光标位置
+        x = cursor_pos.x()
+        y = cursor_pos.y()
+        
+        # 使用get_position保存坐标
+        get_position(x, y)
+        
+        # 重置定位状态
+        self.is_positioning = False
+        self.follow_cursor = False  # 禁用光标跟踪
+        self.stop_cursor_tracking()  # 停止跟踪
+        
+        # 停止鼠标监听
+        self.stop_mouse_listener()
+        
+        # 创建并显示定位点
+        if self.position_dot:
+            self.position_dot.close()
+            self.position_dot = None
+        
+        self.position_dot = QLabel(None)
+        self.position_dot.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool |
+            Qt.NoDropShadowWindowHint
+        )
+        self.position_dot.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
+        
+        width = 15
+        height = 25
+        window_x = cursor_pos.x() - width // 2
+        window_y = cursor_pos.y() - height - 5  # 在这里添加偏移
+        
+        self.position_dot.setGeometry(window_x, window_y, width, height)
+        self.position_dot.setStyleSheet("background: transparent;")
+        
+        pixmap = QPixmap('app/images/dingding.png')
+        scaled_pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.position_dot.setPixmap(scaled_pixmap)
+        
+        self.position_dot.show()
+        self.position_dot.raise_()  # 确保显示在最前方
+        
+        # 更新定位点状态和按钮文本
+        self.is_dot_visible = True
+        self.show_dot_btn.setText("隐藏原点")
+        
+        self.move_display.setText('<span style="color: green;">定位完成!</span>')
     
     def keyPressEvent(self, event: QKeyEvent):
         """处理键盘事件"""
         if self.is_positioning and event.key() == Qt.Key_S:
             # 获取当前光标位置
             cursor_pos = QCursor.pos()
-            # 直接使用光标位置，不添加偏移
-            x = cursor_pos.x()
-            y = cursor_pos.y()
-            
-            # 使用get_position保存坐标
-            get_position(x, y)
-            
-            # 重置定位状态
-            self.is_positioning = False
-            self.follow_cursor = False  # 禁用光标跟踪
-            self.stop_cursor_tracking()  # 停止跟踪
-            
-            # 创建并显示定位点，但不启动跟踪
-            if self.position_dot:
-                self.position_dot.close()
-                self.position_dot = None
-            
-            self.position_dot = QLabel(None)
-            self.position_dot.setWindowFlags(
-                Qt.FramelessWindowHint | 
-                Qt.WindowStaysOnTopHint | 
-                Qt.Tool |
-                Qt.NoDropShadowWindowHint
-            )
-            self.position_dot.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
-            
-            width = 15
-            height = 25
-            window_x = cursor_pos.x() - width // 2
-            window_y = cursor_pos.y() - height - 5  # 在这里添加偏移
-            
-            self.position_dot.setGeometry(window_x, window_y, width, height)
-            self.position_dot.setStyleSheet("background: transparent;")
-            
-            pixmap = QPixmap('app/images/dingding.png')
-            scaled_pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.position_dot.setPixmap(scaled_pixmap)
-            
-            self.position_dot.show()
-            
-            # 更新显示原点选项的选中状态
-            self.show_dot_action.setChecked(True)
-            
-            # 根据模式决定是否保存模版
-            if self.is_template_mode:
-                # 保存模板
-                if save_templates():
-                    self.move_display.setText('<span style="color: green;">定位完成!\n模版已保存。</span>')
-                else:
-                    self.move_display.setText('<span style="color: red;">定位完成!\n模版保存失败。</span>')
-            else:
-                self.move_display.setText('<span style="color: green;">定位完成!</span>')
+            # 使用共同确认逻辑
+            self.confirm_position(cursor_pos)
     
     def stop_analysis(self):
         """停止分析线程"""
@@ -850,6 +903,13 @@ class MainWindow(QMainWindow):
         
         # 更新定位点
         self.create_position_dot()
+
+    def closeEvent(self, event):
+        """窗口关闭时处理"""
+        # 停止所有线程和监听器
+        self.stop_mouse_listener()
+        self.stop_analysis()
+        super().closeEvent(event)
 
 def main():
     app = QApplication(sys.argv)
