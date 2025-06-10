@@ -140,7 +140,7 @@ def capture_region(result_queue, stop_event):
                     got_move = True
         else:
             got_move = False
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 def get_position(x, y):  
     # 确定截图区域  

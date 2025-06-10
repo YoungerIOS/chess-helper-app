@@ -68,14 +68,14 @@
         },
         "regions": {
             "board": {
-                "left": 1009,
-                "top": 222,
+                "left": 1024,
+                "top": 215,
                 "width": 375,
                 "height": 415
             },
             "avatar": {
-                "left": 1290.25,
-                "top": 637,
+                "left": 1305.25,
+                "top": 630,
                 "width": 93.75,
                 "height": 124.5
             }
