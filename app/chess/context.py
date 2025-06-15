@@ -8,11 +8,8 @@ from threading import Lock
 class Platform:
     """平台配置类，包含平台相关的所有信息"""
     name: str                    # 平台名称，如 'TT'、'JJ'
-    board_coords: Dict[str, List[int]] = field(default_factory=lambda: {"x": [], "y": []})  # 棋盘坐标
-    regions: Dict = field(default_factory=lambda: {
-        "board": {"left": 0, "top": 0, "width": 375, "height": 415},
-        "avatar": {"left": 0, "top": 0, "width": 93.75, "height": 124.5}
-    })  # 区域配置
+    board_coords: Dict[str, List[int]]  # 棋盘坐标
+    regions: Dict  # 区域配置
     _piece_recognizer: Optional[object] = None  # 棋子识别器
     _timer_recognizer: Optional[object] = None  # 倒计时识别器
     animation_delay: float = 0.3  # 动画等待时长（秒）
@@ -42,10 +39,12 @@ class Platform:
 class ChessContext:
     """象棋助手上下文对象，包含所有共享状态"""
     platform: str                    # 当前平台
-    _engine_params: Dict = field(default_factory=dict)  # 引擎参数
-    _engine_params_lock: Lock = field(default_factory=Lock)  # 引擎参数锁
-    _platforms: Dict[str, Platform] = field(default_factory=dict)  # 平台字典
-    
+    _engine_params: Dict[str, str] = field(default_factory=dict)
+    _engine_params_lock: Lock = field(default_factory=Lock)
+    _platforms: Dict[str, Platform] = field(default_factory=dict)
+    _analysis_mode: str = field(default="timer")  # 使用 field 确保默认值在实例化时设置
+    position_checker: Optional[object] = None  # 局面检查器
+
     def __post_init__(self):
         """初始化时加载配置"""
         self.load_config()
@@ -90,6 +89,9 @@ class ChessContext:
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
             
+            # 设置分析模式
+            self._analysis_mode = config.get('analysis_mode', 'timer')
+            
             # 预加载当前平台的模型
             _ = self.piece_recognizer
             _ = self.timer_recognizer
@@ -109,6 +111,7 @@ class ChessContext:
                     "goParam": "depth"
                 }.copy()
             self.platform = "TT"
+            self._analysis_mode = "timer"
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
@@ -128,6 +131,7 @@ class ChessContext:
             }
             # 添加其他配置
             config['platform'] = self.platform
+            config['analysis_mode'] = self._analysis_mode
             
             # 获取引擎参数的副本
             with self._engine_params_lock:
@@ -196,8 +200,23 @@ class ChessContext:
         """获取当前平台的动画等待时长"""
         return self._platforms[self.platform].animation_delay
 
+    @property
+    def analysis_mode(self) -> str:
+        return self._analysis_mode
+
+    @analysis_mode.setter
+    def analysis_mode(self, mode: str):
+        self._analysis_mode = mode
+        self.save_config()  # 保存配置
+
+    def init_position_checker(self):
+        """初始化局面检查器"""
+        from .checker import PositionChecker
+        self.position_checker = PositionChecker()
+
+    def clear_position_checker(self):
+        """清理局面检查器"""
+        self.position_checker = None
+
 # 创建全局上下文实例
-context = ChessContext(
-    platform="TT",
-    _engine_params={}
-) 
+context = ChessContext(platform="TT")  # 默认使用TT平台 

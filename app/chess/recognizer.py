@@ -3,8 +3,8 @@ import numpy as np
 import os
 from tools.utils import filter_vertical_lines, filter_horizontal_lines, resource_path
 from chess.context import context
-from chess.message import Message, MessageType
-from .piece_recognizer import ChessPieceRecognizer
+from chess.message import Message, MessageType, MessageContent
+
 
 def show_image(name, image):
     # 显示结果  
@@ -154,14 +154,14 @@ def recognize_board(img):
     return x_array, y_array
 
 # 识别棋子
-def recognize_pieces(img, x_array, y_array, display_callback=None):
+def recognize_piece_from_circle(img, x_array, y_array, callback=None):
     """
     识别棋子并确定其位置和类型
     Args:
         img: 原始图像
         x_array: 棋盘横线坐标数组
         y_array: 棋盘纵线坐标数组
-        display_callback: 回调函数，用于发送消息
+        callback: 回调函数，用于发送消息
     Returns:
         pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
         is_red: 是否为红方
@@ -182,7 +182,7 @@ def recognize_pieces(img, x_array, y_array, display_callback=None):
         circles = np.round(circles[0, :]).astype("int")
         
         # 识别黑将并获取计算好坐标的棋盘数组
-        pieceArray, is_red = recognize_black_king(circles, resized_img, x_array, y_array, display_callback)
+        pieceArray, is_red = recognize_black_king(circles, resized_img, x_array, y_array, callback)
         print(f"\n当前方为{'红方' if is_red else '黑方'}")
         
         # 识别所有棋子
@@ -193,8 +193,8 @@ def recognize_pieces(img, x_array, y_array, display_callback=None):
                 x, y, r = pieceArray[i][j]
                 piece_img = get_piece_image(resized_img, x, y, r)
 
-                piece_type = recognize_piece_type(piece_img)
-                print(f"位置({j}, {i}) 识别为 {piece_type}")
+                piece_type, confidence = recognize_piece_type(piece_img)
+                # print(f"位置({j}, {i}) 识别为 {piece_type}")
                 if piece_type:
                     pieceArray[i][j] = piece_type
                 else:
@@ -203,6 +203,73 @@ def recognize_pieces(img, x_array, y_array, display_callback=None):
     else:
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
         is_red = False
+    return pieceArray, is_red
+
+def recognize_piece_from_grid(img, x_array, y_array, callback=None):
+    """
+    切割棋盘格点识别棋子，返回9x10棋盘数组和红黑方
+    Args:
+        img: 原始图像
+        x_array: 棋盘横线坐标数组
+        y_array: 棋盘纵线坐标数组
+        callback: 回调函数，用于发送消息
+    Returns:
+        pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
+        is_red: 是否为红方
+    """
+    # 预处理
+    resized_img, _ = preprocess_image(img)
+    pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+    is_red = False  # 默认值设为False
+    
+    # 遍历棋盘格点，切割并识别棋子
+    covered_count = 0  # 添加被遮挡棋子计数
+    for i in range(len(y_array)):
+        for j in range(len(x_array)):
+            center_x = x_array[j]
+            center_y = y_array[i]
+            # 计算当前位置的切割半径
+            if j == 0:
+                x_radius = (x_array[j+1] - x_array[j]) // 2
+            elif j == len(x_array)-1:
+                x_radius = (x_array[j] - x_array[j-1]) // 2
+            else:
+                x_radius = min((x_array[j] - x_array[j-1]) // 2, (x_array[j+1] - x_array[j]) // 2)
+            if i == 0:
+                y_radius = (y_array[i+1] - y_array[i]) // 2
+            elif i == len(y_array)-1:
+                y_radius = (y_array[i] - y_array[i-1]) // 2
+            else:
+                y_radius = min((y_array[i] - y_array[i-1]) // 2, (y_array[i+1] - y_array[i]) // 2)
+            cut_radius = int(min(x_radius, y_radius) * 0.9)
+            vertical_offset = int(cut_radius * 0.06)
+            x1 = max(0, center_x - cut_radius)
+            y1 = max(0, center_y - cut_radius - vertical_offset)
+            x2 = min(resized_img.shape[1]-1, center_x + cut_radius)
+            y2 = min(resized_img.shape[0]-1, center_y + cut_radius - vertical_offset)
+            piece_img = resized_img[y1:y2, x1:x2]
+            
+            # 识别棋子类型
+            piece_type, confidence = recognize_piece_type(piece_img)
+            if piece_type and confidence > 0.9:
+                # 统计covered数量
+                if piece_type == 'covered':
+                    covered_count += 1
+                # 在上下两个九宫格内寻找黑将
+                if piece_type == 'k':  # 黑将
+                    # 判断是否在九宫格内
+                    if (3 <= j <= 5 and 0 <= i <= 2) or (3 <= j <= 5 and 7 <= i <= 9):
+                        # 根据黑将位置判断红黑方
+                        is_red = (i <= 2)  # 如果黑将在上半部分，则为红方
+                        # print(f"位置({j}, {i}) 检测到黑将")
+                pieceArray[i][j] = piece_type
+            else:
+                return None, is_red
+    
+    # 检查covered数量是否超过阈值
+    if covered_count > 0:
+        return None, is_red  
+    
     return pieceArray, is_red
 
 # 计算棋子坐标
@@ -242,19 +309,8 @@ def get_piece_image(img, x, y, r):
     return img[y1:y2+1, x1:x2+1]
 
 # 计算棋子9x10坐标,单独识别将
-def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
-    """
-    识别九宫格内的黑将'k',并计算所有棋子的9x10棋盘坐标
-    Args:
-        circles: 检测到的圆形
-        img: 原始图像
-        x_array: 棋盘横线坐标数组
-        y_array: 棋盘纵线坐标数组
-        display_callback: 回调函数，用于发送消息
-    Returns:
-        pieceArray: 9x10的二维数组,表示棋盘状态,已计算好所有棋子的坐标
-        is_red: 是否红方在下方
-    """
+def recognize_black_king(circles, img, x_array, y_array, callback=None):
+
     # 初始化棋盘数组和is_red
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
     is_red = False  # 默认值设为False
@@ -277,25 +333,13 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
             x, y, r = pieceArray[i][j]
             piece_img = get_piece_image(img, x, y, r)
             
-            # 保存临时图片
-            temp_path = "temp_piece.jpg"
-            cv2.imwrite(temp_path, piece_img)
-            
-            # 使用模型识别
-            result = context.piece_recognizer.recognize(temp_path)
-            if result is None:
-                print(f"无法识别棋子: {temp_path}")
+            # 使用recognize_piece_type识别棋子类型
+            piece_type = recognize_piece_type(piece_img)
+            if piece_type is None:
+                print(f"无法识别棋子: {piece_img}")
                 continue
-                
-            # 使用识别结果
-            piece_type = result['class_name']
-            print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
-            
-            # 删除临时文件
-            os.remove(temp_path)
             
             if piece_type == 'k':  # 如果是黑将
-                print(f"位置({j}, {i}) 识别为黑将")
                 upper_palace_king = (j, i)
                 break
         if upper_palace_king:
@@ -309,25 +353,13 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
             x, y, r = pieceArray[i][j]
             piece_img = get_piece_image(img, x, y, r)
             
-            # 保存临时图片
-            temp_path = "temp_piece.jpg"
-            cv2.imwrite(temp_path, piece_img)
-            
-            # 使用模型识别
-            result = context.piece_recognizer.recognize(temp_path)
-            if result is None:
-                print(f"无法识别棋子: {temp_path}")
+            # 使用recognize_piece_type识别棋子类型
+            piece_type = recognize_piece_type(piece_img)
+            if piece_type is None:
+                print(f"无法识别棋子: {piece_img}")
                 continue
-                
-            # 使用识别结果
-            piece_type = result['class_name']
-            print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
-            
-            # 删除临时文件
-            os.remove(temp_path)
             
             if piece_type == 'k':  # 如果是黑将
-                print(f"位置({j}, {i}) 识别为黑将")
                 lower_palace_king = (j, i)
                 break
         if lower_palace_king:
@@ -338,14 +370,14 @@ def recognize_black_king(circles, img, x_array, y_array, display_callback=None):
     # 如果下方九宫格有黑将，说明红方在上方
     if upper_palace_king:
         is_red = True  # 红方在下方
-        print(f"检测到黑将在上方九宫格，位置: {upper_palace_king}")
+        # print(f"检测到黑将在上方九宫格，位置: {upper_palace_king}")
     elif lower_palace_king:
         is_red = False  # 红方在上方
-        print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
+        # print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
     else:
         # 如果两个九宫格都没有找到黑将，通过回调通知
-        if display_callback:
-            display_callback(Message(MessageType.STATUS, "未检测到黑将位置"))
+        if callback:
+            callback(Message(MessageType.STATUS, "未检测到黑将位置"))
         is_red = False  # 设置默认值
     
     return pieceArray, is_red
@@ -355,7 +387,7 @@ def recognize_piece_type(piece_img):
     """
     识别棋子类型
     :param piece_img: 棋子图片
-    :return: 棋子类型或None
+    :return: 棋子类型, 置信度或None
     """
     # 保存临时图片
     temp_path = "temp_piece.jpg"
@@ -369,12 +401,13 @@ def recognize_piece_type(piece_img):
     
     # 使用识别结果
     piece_type = result['class_name']
-    print(f"识别结果: {piece_type}, 置信度: {result['confidence']:.2%}")
+    confidence = result['confidence']
+    print(f"识别结果: {piece_type}, 置信度: {confidence:.2%}")
     
     # 删除临时文件
     os.remove(temp_path)
     
-    return piece_type
+    return piece_type, confidence
 
 def is_valid_position(piece_type, x, y, is_red):
     """

@@ -3,7 +3,7 @@ import time
 import cv2
 import numpy as np
 from chess import process, engine
-from chess.message import Message, MessageType
+from chess.message import Message, MessageType, MessageContent
 from chess.context import context
 from tools.utils import resource_path
 
@@ -11,7 +11,6 @@ manual_trigger = False  # 添加手动触发标志
 
 # 全局变量，用于存储倒计时区域检测到的最大轮廓
 max_contour = None
-
 
 def detect_avatar_border(img, platform):
     """
@@ -95,7 +94,7 @@ def check_turn_order(avatar_region):
         # 其他平台使用模型预测
         try:
             result = context.timer_recognizer.predict(temp_path)
-            # print(f"预测结果: {result['class_name']}, 置信度: {result['confidence']:.2f}")
+            print(f"预测结果: {result['class_name']}, 置信度: {result['confidence']:.2f}")
             return result['class_name'] == 'countdown' and result['confidence'] > 0.9
         except Exception as e:
             print(f"预测出错: {e}, 使用颜色检测")
@@ -104,6 +103,10 @@ def check_turn_order(avatar_region):
 
 def capture_region(result_queue, stop_event): 
     """截图和分析函数"""
+    # 重新加载配置，确保工作线程读取到最新配置
+    context.load_config()
+    print(f"Debug - 工作线程加载配置后的分析模式: {context.analysis_mode}")
+    
     # 启动象棋引擎
     engine.init_engine()    
 
@@ -113,34 +116,58 @@ def capture_region(result_queue, stop_event):
     avatar_region = platform.regions["avatar"]
 
     got_move = False
+
     while not stop_event.is_set():
-        if check_turn_order(avatar_region): # 我方进入计时状态
-            # 还没有获得着法
-            if not got_move:
-                # 等待动画结束
-                time.sleep(context.animation_delay)  # 倒计时出现时,吃子,将军等动画还未完全结束,所以等片刻
-                with mss.mss() as sct:  
-                    # 截屏
-                    screenshot = sct.grab(board_region) 
-                    result_queue.put(Message(MessageType.STATUS, "轮到我方走棋..."))
-                    
-                    # 定义显示回调函数
-                    def display_callback(msg):
-                        result_queue.put(msg)
+        if context.analysis_mode == "continuous":  # 使用字符串值进行比较
+            print("Debug - 连续模式")
+            # 连续模式：直接截图识别
+            with mss.mss() as sct:
+                screenshot = sct.grab(board_region)
+                result_queue.put(Message(MessageType.STATUS, MessageContent.RECOGNIZING))
+                
+                def callback(msg):
+                    result_queue.put(msg)
+                
+                move_text_msg, move_code_msg = process.main_process(screenshot, callback)
+                # 如果识别成功，发送着法消息
+                if move_code_msg.content:
+                    result_queue.put(move_code_msg)
+                    result_queue.put(move_text_msg)
+                
+        elif context.analysis_mode == "timer":
+            print("Debug - 倒计时模式")
+            # 倒计时模式：根据计时器轮流截图识别
+            if check_turn_order(avatar_region): # 我方进入计时状态
+                # 还没有获得着法
+                if not got_move:
+                    # 等待动画结束
+                    time.sleep(context.animation_delay)  # 倒计时出现时,吃子,将军等动画还未完全结束,所以等片刻
+                    with mss.mss() as sct:  
+                        # 截屏
+                        screenshot = sct.grab(board_region) 
+                        result_queue.put(Message(MessageType.STATUS, MessageContent.MY_TURN))
                         
-                    move_text_msg, move_code_msg = process.main_process(screenshot, display_callback)
-                    print(f"------>>{move_text_msg.content}, {move_code_msg.content}")
-                    if move_code_msg.content:  # 如果有着法代码
-                        result_queue.put(move_code_msg)  # 先发送着法代码用于显示箭头
-                        result_queue.put(move_text_msg)  # 再发送中文着法用于显示文本
-                    else:  # 如果发生错误
-                        result_queue.put(move_text_msg)  # 发送错误消息
-                        result_queue.put(move_code_msg)  # 发送空的棋盘显示消息
+                        # 定义显示回调函数
+                        def callback(msg):
+                            result_queue.put(msg)
+                            
+                        move_text_msg, move_code_msg = process.main_process(screenshot, callback)
+                        if move_code_msg.content:  # 如果有着法代码
+                            result_queue.put(move_code_msg)  # 先发送着法代码用于显示箭头
+                            result_queue.put(move_text_msg)  # 再发送中文着法用于显示文本
+                            print(f"Debug - Move : {move_code_msg}, Text : {move_text_msg}") 
+                        else:  # 如果发生错误
+                            result_queue.put(move_text_msg)  # 发送错误消息
+                            result_queue.put(move_code_msg)  # 发送空的棋盘显示消息
 
                     got_move = True
+            else:
+                got_move = False
         else:
-            got_move = False
-        time.sleep(0.3)
+            print(f"Debug - 未知的分析模式: {context.analysis_mode}")
+            time.sleep(0.5)  
+        # 控制识别频率
+        time.sleep(0.2 if context.analysis_mode == "continuous" else 0.3)
 
 def get_position(x, y):  
     # 确定截图区域  

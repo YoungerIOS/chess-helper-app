@@ -21,7 +21,7 @@ class ChessPieceRecognizer:
         # 根据平台选择模型类型
         model_type = "tt" if platform == "TT" else "jj"
         self.model_path = resource_path(f"models/{model_type}_piece_model.pth")
-        self.class_map_path = resource_path("models/class_map.json")
+        self.class_map_path = resource_path(f"models/{model_type}_piece_map.json")
         
         # 图像预处理
         self.transform = transforms.Compose([

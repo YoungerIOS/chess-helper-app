@@ -27,14 +27,14 @@
         },
         "regions": {
             "board": {
-                "left": 993,
-                "top": 213,
+                "left": 1039,
+                "top": 215,
                 "width": 375,
                 "height": 415
             },
             "avatar": {
-                "left": 1274.25,
-                "top": 628,
+                "left": 1320.25,
+                "top": 630,
                 "width": 93.75,
                 "height": 124.5
             }
@@ -81,10 +81,11 @@
             }
         }
     },
-    "platform": "JJ",
+    "platform": "TT",
+    "analysis_mode": "continuous",
     "engine_params": {
-        "movetime": "7000",
-        "depth": "24",
+        "movetime": "3000",
+        "depth": "23",
         "goParam": "depth"
     }
 }

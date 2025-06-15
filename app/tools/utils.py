@@ -112,7 +112,7 @@ def check_repeat_position(array1, array2, is_red):
     return not letter_change
 
 # 棋子数组转为FEN棋局字符串(不含轮哪方走棋信息)
-def switch_to_fen(array, is_red):
+def convert_array_to_fen(array, is_red):
     # 本方是黑方就反向遍历
     if not is_red:
         array = [row[::-1] for row in array[::-1]] 

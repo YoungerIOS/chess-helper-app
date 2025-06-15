@@ -16,14 +16,21 @@ class BoardDisplay(QLabel):
         self.move_arrow = None  # 存储当前着法的箭头信息 (start_x, start_y, end_x, end_y)
         
         # 加载棋盘背景
-        self.board_bg = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.jpeg'))
+        self.board_bg = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.png'))
         
         # 加载棋子图片
         self.piece_images = {}
         self._load_piece_images()
         
         # 加载边框图片
-        self.border_image = QPixmap(os.path.join('app', 'images', 'media', 'white_border3.png'))
+        self.border_image = QPixmap(os.path.join('app', 'images', 'media', 'white_border.png'))
+        
+        # 加载变化标记图片
+        self.bullseye_image = QPixmap(os.path.join('app', 'images', 'media', 'bullseye.png'))
+        
+        # 存储变化信息
+        self.red_changes = []
+        self.black_changes = []
         
         # 添加旋转动画相关属性
         self.rotation_angle = 0
@@ -84,19 +91,52 @@ class BoardDisplay(QLabel):
         y = 0  # 不再需要垂直居中，因为高度已经匹配
         painter.drawPixmap(x, y, scaled_board)
         
-        # 计算实际的格子大小（基于缩放后的棋盘图片）
-        cell_width = scaled_board.width() // self.board_size[0]
-        cell_height = scaled_board.height() // self.board_size[1]
+        # 计算棋盘中心点
+        center_x = x + scaled_board.width() // 2
         
-        # 计算偏移量（格子宽度的十分之一）
-        offset_x = cell_width // 10
+        # 计算格子大小（使用8.8作为除数，让格子宽度略大一些）
+        cell_width = scaled_board.width() / 8.875
+        cell_height = scaled_board.height() // 10
+        
+        # 绘制变化标记
+        for change in self.red_changes + self.black_changes:
+            row, col, old_piece, new_piece = change
+            # 计算位置（从中心点向两侧计算）
+            offset_from_center = (col - 4) * cell_width  # 4是中心列的索引
+            pos_x = center_x + offset_from_center
+            pos_y = y + row * cell_height + cell_height // 2
+            
+            # 如果是起始位置（old_piece不是'-'），显示bullseye
+            if old_piece != '-':
+                scaled_bullseye = self.bullseye_image.scaled(
+                    int(cell_width * 0.5),
+                    int(cell_height * 0.5),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                bullseye_x = pos_x - scaled_bullseye.width() // 2
+                bullseye_y = pos_y - scaled_bullseye.height() // 2
+                painter.drawPixmap(bullseye_x, bullseye_y, scaled_bullseye)
+            
+            # 如果是终点位置（new_piece不是'-'），显示边框
+            if new_piece != '-':
+                scaled_border = self.border_image.scaled(
+                    int(cell_width * 1.1),
+                    int(cell_height * 1.1),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                border_x = pos_x - scaled_border.width() // 2
+                border_y = pos_y - scaled_border.height() // 2
+                painter.drawPixmap(border_x, border_y, scaled_border)
         
         # 绘制棋子
         for piece_type, pos_x, pos_y in self.pieces:
             if piece_type in self.piece_images:
                 piece_img = self.piece_images[piece_type]
-                # 计算棋子位置（放在格子正中间，并添加偏移量）
-                piece_x = x + pos_x * cell_width + cell_width // 2 + offset_x
+                # 计算棋子位置（从中心点向两侧计算）
+                offset_from_center = (pos_x - 4) * cell_width  # 4是中心列的索引
+                piece_x = center_x + offset_from_center
                 piece_y = y + pos_y * cell_height + cell_height // 2
                 
                 # 缩放棋子图片，使其略小于格子
@@ -112,14 +152,14 @@ class BoardDisplay(QLabel):
                 piece_y -= scaled_piece.height() // 2
                 
                 painter.drawPixmap(piece_x, piece_y, scaled_piece)
-    
-        # 绘制箭头和边框
+        
+        # 绘制箭头
         if self.move_arrow:
             start_x, start_y, end_x, end_y = self.move_arrow
-            # 计算箭头的实际坐标
-            arrow_start_x = x + start_x * cell_width + cell_width // 2 + offset_x
+            # 计算箭头的实际坐标（从中心点向两侧计算）
+            arrow_start_x = center_x + (start_x - 4) * cell_width
             arrow_start_y = y + start_y * cell_height + cell_height // 2
-            arrow_end_x = x + end_x * cell_width + cell_width // 2 + offset_x
+            arrow_end_x = center_x + (end_x - 4) * cell_width
             arrow_end_y = y + end_y * cell_height + cell_height // 2
             
             # 设置箭头样式
@@ -279,62 +319,140 @@ class BoardDisplay(QLabel):
             # 恢复painter状态
             painter.restore()
     
-    def update_board(self, fen_str, is_red=True, move=None):
-        """根据FEN字符串更新棋盘显示"""
-        print(f"Debug - update_board received is_red: {is_red}, fen_str: {fen_str}, move: {move}")
-        self.pieces.clear()
-        self.move_arrow = None  # 清除之前的箭头
-        
-        if not fen_str:
+    def update_move_arrow(self, move, is_red):
+        """更新着法箭头
+        Args:
+            move: 引擎返回的着法代码（如'e2e4'）
+            is_red: 红方是否在下方
+        """
+        self.move_arrow = None
+        if not move or len(move) != 4:
             return
             
-        # 解析FEN字符串
-        fen = fen_str.split()[0]
-        rows = fen.split('/')
+        # 解析着法代码
+        start_col = ord(move[0]) - ord('a')
+        start_row = int(move[1])
+        end_col = ord(move[2]) - ord('a')
+        end_row = int(move[3])
         
-        # 根据红方位置调整行顺序
-        if not is_red:  # 如果红方不在下方，需要反转行顺序
-            rows.reverse()
+        # 如果红方在上方，需要反转列坐标
+        if not is_red:
+            start_col = 8 - start_col
+            end_col = 8 - end_col
+        else:
+            # 无论红方在上方还是下方，都需要反转行坐标
+            start_row = 9 - start_row
+            end_row = 9 - end_row
         
-        for y, row in enumerate(rows):
-            x = 0
-            for char in row:
-                if char.isdigit():
-                    # 数字表示空格的个数
-                    x += int(char)
-                elif char.isalpha():
-                    # 字母表示棋子
-                    # 注意：FEN字符串中，大写字母表示红方，小写字母表示黑方
-                    # 如果红方不在下方，需要反转x坐标
-                    pos_x = 8 - x if not is_red else x
-                    self.pieces.append((char, pos_x, y))
-                    x += 1
-                else:
-                    # 忽略其他字符
-                    continue
+        self.move_arrow = (start_col, start_row, end_col, end_row)
+
+    def update_pieces(self, piecesArray):
+        """更新棋子位置
+        Args:
+            piecesArray: 与显示坐标完全相同的二维数组
+        """
+        # 清除箭头
+        self.move_arrow = None
         
-        # 处理着法代码
-        if move and len(move) == 4:
-            # 解析着法代码
-            start_col = ord(move[0]) - ord('a')  # 将字母转换为0-8的数字
-            start_row = int(move[1])
-            end_col = ord(move[2]) - ord('a')
-            end_row = int(move[3])
-            
-            # 注意：引擎使用的坐标系是从上到下0-9，从左到右a-i
-            # 如果红方在上方，需要反转横坐标，以匹配棋子的显示
-            if not is_red:
-                start_col = 8 - start_col
-                end_col = 8 - end_col
-            else:
-                # 如果红方在下方，需要反转纵坐标，因为引擎的坐标系是从上到下0-9
-                start_row = 9 - start_row
-                end_row = 9 - end_row
-            
-            print(f"Debug - Arrow coordinates: start({start_col}, {start_row}) -> end({end_col}, {end_row})")
-            self.move_arrow = (start_col, start_row, end_col, end_row)
+        self.pieces.clear()
+        for y in range(10):
+            for x in range(9):
+                piece = piecesArray[y][x]
+                if piece and piece != '-':
+                    self.pieces.append((piece, x, y))
+
+    def update_board_with_array(self, piecesArray, red_changes=None, black_changes=None):
+        """使用数组更新棋盘显示
+        Args:
+            piecesArray: 与显示坐标完全相同的二维数组
+            red_changes: 红方变化列表，使用显示坐标
+            black_changes: 黑方变化列表，使用显示坐标
+        """
+        # 更新棋子位置（直接使用piecesArray）
+        self.update_pieces(piecesArray)
         
+        # 只更新有变化的一方的标记
+        if red_changes is not None:
+            self.red_changes = red_changes
+        if black_changes is not None:
+            self.black_changes = black_changes
+        
+        # 触发重绘
         self.update()
+
+    # def update_board(self, fen_str, is_red=True, move=None, red_changes=None, black_changes=None):
+    #     """根据FEN字符串更新棋盘显示"""
+    #     print(f"Debug - update_board received is_red: {is_red}, fen_str: {fen_str}, move: {move}")
+    #     self.pieces.clear()
+    #     self.move_arrow = None  # 清除之前的箭头
+    #     self.red_changes = []  # 存储红方变化
+    #     self.black_changes = []  # 存储黑方变化
+        
+    #     # 处理变化标记的坐标转换
+    #     if red_changes:
+    #         for row, col, old_piece, new_piece in red_changes:
+    #             if not is_red:  # 如果红方在上方，需要反转坐标
+    #                 col = 8 - col
+    #                 row = 9 - row
+    #             self.red_changes.append((row, col, old_piece, new_piece))
+                
+    #     if black_changes:
+    #         for row, col, old_piece, new_piece in black_changes:
+    #             if not is_red:  # 如果红方在上方，需要反转坐标
+    #                 col = 8 - col
+    #                 row = 9 - row
+    #             self.black_changes.append((row, col, old_piece, new_piece))
+        
+    #     if not fen_str:
+    #         return
+            
+    #     # 解析FEN字符串
+    #     fen = fen_str.split()[0]
+    #     rows = fen.split('/')
+        
+    #     # 根据红方位置调整行顺序
+    #     if not is_red:  # 如果红方不在下方，需要反转行顺序
+    #         rows.reverse()
+        
+    #     for y, row in enumerate(rows):
+    #         x = 0
+    #         for char in row:
+    #             if char.isdigit():
+    #                 # 数字表示空格的个数
+    #                 x += int(char)
+    #             elif char.isalpha():
+    #                 # 字母表示棋子
+    #                 # 注意：FEN字符串中，大写字母表示红方，小写字母表示黑方
+    #                 # 如果红方不在下方，需要反转x坐标
+    #                 pos_x = 8 - x if not is_red else x
+    #                 self.pieces.append((char, pos_x, y))
+    #                 x += 1
+    #             else:
+    #                 # 忽略其他字符
+    #                 continue
+        
+    #     # 处理着法代码
+    #     if move and len(move) == 4:
+    #         # 解析着法代码
+    #         start_col = ord(move[0]) - ord('a')  # 将字母转换为0-8的数字
+    #         start_row = int(move[1])
+    #         end_col = ord(move[2]) - ord('a')
+    #         end_row = int(move[3])
+            
+    #         # 注意：引擎使用的坐标系是从上到下0-9，从左到右a-i
+    #         # 如果红方在上方，需要反转横坐标，以匹配棋子的显示
+    #         if not is_red:
+    #             start_col = 8 - start_col
+    #             end_col = 8 - end_col
+    #         else:
+    #             # 如果红方在下方，需要反转纵坐标，因为引擎的坐标系是从上到下0-9
+    #             start_row = 9 - start_row
+    #             end_row = 9 - end_row
+            
+    #         print(f"Debug - Arrow coordinates: start({start_col}, {start_row}) -> end({end_col}, {end_row})")
+    #         self.move_arrow = (start_col, start_row, end_col, end_row)
+        
+    #     self.update()
     
     def update_rotation(self):
         """更新旋转角度并触发重绘"""
