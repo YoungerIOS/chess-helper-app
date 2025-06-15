@@ -55,7 +55,7 @@ class MainWindow(QMainWindow):
         screen_height = screen.size().height()
         
         # 加载棋盘图片并计算其宽高比
-        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.jpeg'))
+        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.png'))
         board_ratio = board_img.width() / board_img.height()
         
         # 使用屏幕高度 x 80% x 0.56 计算窗口宽度, 不为什么, 就是觉得协调,
@@ -259,14 +259,14 @@ class MainWindow(QMainWindow):
         
         # 创建控制按钮
         buttons = [
-            ("分析", self.on_analyze),
+            ("按钮", None),  # 移除回调函数
             ("手动", self.on_manual_analyze),
         ]
         
         for text, callback in buttons:
             btn = QPushButton(text)
-            btn.setMinimumHeight(35)  # 调整按钮高度
-            btn.setFont(QFont("Arial", 11))  # 调整按钮字体
+            btn.setMinimumHeight(35)
+            btn.setFont(QFont("Arial", 11))
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #1874CD;
@@ -285,20 +285,26 @@ class MainWindow(QMainWindow):
                     border: 1px solid #0d47a1;
                 }
             """)
-            btn.clicked.connect(callback)
+            if callback:  # 只有当callback不为None时才连接点击事件
+                btn.clicked.connect(callback)
             control_layout.addWidget(btn)
         
-        # 创建"按钮2" - 修改为"显示/隐藏原点"按钮
-        self.show_dot_btn = QPushButton("隐藏原点") # 初始时原点显示，所以按钮文本是"隐藏原点"
-        self.show_dot_btn.setMinimumHeight(35)
-        self.show_dot_btn.setFont(QFont("Arial", 11))
-        self.show_dot_btn.setStyleSheet("""
+        # 创建"其他设置"按钮
+        self.settings_btn = QPushButton("其他设置") 
+        self.settings_btn.setFixedSize(75, 35)  
+        self.settings_btn.setFont(QFont("Arial", 11))
+        # 加载并设置箭头图标
+        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        self.settings_btn.setIcon(arrow_icon)
+        self.settings_btn.setIconSize(QSize(12, 12))
+        self.settings_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1874CD;
                 color: white;
                 border: 1px solid #1874CD;
                 border-radius: 5px;
-                padding: 0px;
+                text-align: center;
+                padding: 0px 8px;  /* 左右padding设为8px */
                 margin: 0px;
             }
             QPushButton:hover {
@@ -312,8 +318,44 @@ class MainWindow(QMainWindow):
         """)
         # 不再使用checkable属性
         self.is_dot_visible = True # 添加一个状态变量来跟踪原点是否可见
-        self.show_dot_btn.clicked.connect(self.toggle_show_dot)
-        control_layout.addWidget(self.show_dot_btn)
+        self.settings_btn.clicked.connect(self.show_settings_menu)
+        control_layout.addWidget(self.settings_btn)
+        
+        # 创建设置菜单
+        self.settings_menu = QMenu(self)
+        self.settings_menu.setStyleSheet("""
+            QMenu {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 2px;
+            }
+            QMenu::item {
+                padding: 5px 10px;
+                min-height: 20px;
+                color: black;
+            }
+            QMenu::item:selected {
+                background-color: #e0e0e0;
+            }
+            QMenu::item:checked {
+                background-color: #e0e0e0;
+            }
+        """)
+        self.show_dot_action = self.settings_menu.addAction("显示原点")
+        self.continuous_action = self.settings_menu.addAction("连续识别")
+        self.timer_action = self.settings_menu.addAction("计时识别")
+        # 设置菜单项可选中
+        self.show_dot_action.setCheckable(True)
+        self.continuous_action.setCheckable(True)
+        self.timer_action.setCheckable(True)
+        # 设置初始选中状态
+        self.show_dot_action.setChecked(True)  # 初始时原点显示
+        self.continuous_action.setChecked(context.analysis_mode == "continuous")  # 根据配置设置初始状态
+        self.timer_action.setChecked(context.analysis_mode == "timer")  # 根据配置设置初始状态
+        self.show_dot_action.triggered.connect(self.toggle_show_dot)
+        self.continuous_action.triggered.connect(self.toggle_continuous)
+        self.timer_action.triggered.connect(self.toggle_timer)
         
         # 创建参数选择按钮
         self.param_btn = QPushButton("参数")
@@ -519,6 +561,8 @@ class MainWindow(QMainWindow):
         if not self.is_running:
             self.is_running = True
             self.sender().setText("停止")
+            # 初始化局面检查器
+            context.init_position_checker()
             self.create_queue()
         else:
             self.is_running = False
@@ -530,22 +574,14 @@ class MainWindow(QMainWindow):
                 self.capture_thread.join()
             # 关闭引擎进程
             engine.terminate_engine()
+            # 在所有操作完成后，再清理局面检查器
+            context.clear_position_checker()
     
     def on_stop(self):
         """停止分析"""
         self.stop_analysis()
         self.is_running = False
         self.sender().setText("开始")
-    
-    def on_analyze(self):
-        """重新分析"""
-        self.sender().setText("停止") #重新计算实际就是重启while循环,等同于"开始下棋",只是不会重复启动引擎
-        self.is_running = False
-        if self.check_timer:
-            self.check_timer.stop()
-        self.stop_event.set()
-        self.stop_event.clear()
-        self.create_queue()
     
     def create_queue(self):
         """创建队列和启动分析线程"""
@@ -575,13 +611,17 @@ class MainWindow(QMainWindow):
         if not self.result_queue.empty():
             result = self.result_queue.get()
             if isinstance(result, Message):
-                if result.type == MessageType.BOARD_DISPLAY:
+                if result.type == MessageType.CHANGE:
                     # 显示棋局
-                    self.board_display.update_board(result.kwargs['fen_str'], result.kwargs['is_red'])
+                    self.board_display.update_board_with_array(
+                        result.kwargs['position'], 
+                        red_changes=result.kwargs.get('red_changes', []),
+                        black_changes=result.kwargs.get('black_changes', [])
+                    )
                     self.update_text(result.content)
                 elif result.type == MessageType.MOVE_CODE:
                     # 显示着法箭头
-                    self.board_display.update_board(result.kwargs['fen_str'], result.kwargs['is_red'], result.content)
+                    self.board_display.update_move_arrow(result.content, result.kwargs['is_red'])
                 elif result.type == MessageType.MOVE_TEXT:
                     # 显示着法文本
                     self.update_text(result.content)
@@ -728,6 +768,10 @@ class MainWindow(QMainWindow):
             window_y = cursor_pos.y() - height - 5  # 保持一致的偏移
             self.position_dot.move(window_x, window_y)
     
+    def show_settings_menu(self):
+        """显示设置菜单"""
+        self.settings_menu.exec_(self.settings_btn.mapToGlobal(self.settings_btn.rect().bottomLeft()))
+
     def toggle_show_dot(self):
         """切换显示/隐藏原点"""
         if self.is_dot_visible:
@@ -735,14 +779,40 @@ class MainWindow(QMainWindow):
             if self.position_dot:
                 self.position_dot.close()
                 self.position_dot = None
-            self.show_dot_btn.setText("显示原点")
             self.is_dot_visible = False
+            self.show_dot_action.setChecked(False)
         else:
             # 当前原点隐藏，点击后显示原点
             self.create_position_dot()
-            self.show_dot_btn.setText("隐藏原点")
             self.is_dot_visible = True
-    
+            self.show_dot_action.setChecked(True)
+
+    def toggle_continuous(self):
+        """切换连续识别模式"""
+        # 如果已经是连续模式，保持选中状态
+        if context.analysis_mode == "continuous":
+            self.continuous_action.setChecked(True)
+            return
+            
+        # 切换到连续模式
+        self.continuous_action.setChecked(True)
+        self.timer_action.setChecked(False)
+        context.analysis_mode = "continuous"
+        context.save_config()
+
+    def toggle_timer(self):
+        """切换计时识别模式"""
+        # 如果已经是计时模式，保持选中状态
+        if context.analysis_mode == "timer":
+            self.timer_action.setChecked(True)
+            return
+            
+        # 切换到计时模式
+        self.timer_action.setChecked(True)
+        self.continuous_action.setChecked(False)
+        context.analysis_mode = "timer"
+        context.save_config()
+
     def on_reposition(self):
         """处理重新定位选项"""
         self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角，<br>点击鼠标左键或按S键确认</span>')
@@ -842,10 +912,8 @@ class MainWindow(QMainWindow):
         self.position_dot.show()
         self.position_dot.raise_()  # 确保显示在最前方
         
-        # 更新定位点状态和按钮文本
+        # 更新定位点状态
         self.is_dot_visible = True
-        self.show_dot_btn.setText("隐藏原点")
-        
         self.move_display.setText('<span style="color: green;">定位完成!</span>')
     
     def keyPressEvent(self, event: QKeyEvent):
