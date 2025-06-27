@@ -7,8 +7,8 @@ import queue
 import threading
 import sys
 from chess.screenshot import capture_region, get_position, trigger_manual_recognition
-from chess import engine
-from ui.board_display import BoardDisplay
+from chess.engine import ChessEngine
+from chess.history import MoveHistory
 from chess.message import Message, MessageType
 from chess.context import context
 from ui.board_display import BoardDisplay
@@ -512,6 +512,7 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.lines = ["", "", ""]
     
+    
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
         self.engine_params["goParam"] = param
@@ -561,38 +562,35 @@ class MainWindow(QMainWindow):
         if not self.is_running:
             self.is_running = True
             self.sender().setText("停止")
-            # 初始化局面检查器
-            context.init_position_checker()
             self.create_queue()
         else:
+            self.on_stop()
             self.is_running = False
             self.sender().setText("开始")
-            # 设置事件，通知capture_region线程停止
-            self.stop_event.set()
-            # 等待线程结束
-            if self.capture_thread and self.capture_thread.is_alive():
-                self.capture_thread.join()
-            # 关闭引擎进程
-            engine.terminate_engine()
-            # 在所有操作完成后，再清理局面检查器
-            context.clear_position_checker()
+ 
     
     def on_stop(self):
-        """停止分析"""
-        self.stop_analysis()
-        self.is_running = False
-        self.sender().setText("开始")
-    
+        """停止事件"""
+        self.close_queue()
+
+        if context.engine:
+            context.engine.stop()
+            context.engine = None
+        context.clear_checker() #清理局面检查器
+        context.history.clear()  # 停止时清空历史
+        
     def create_queue(self):
         """创建队列和启动分析线程"""
-        # 首先停止之前的线程（如果有的话）  
+        # 首先停止旧线程（如果有的话）  
         if self.capture_thread is not None and self.capture_thread.is_alive():  
             self.stop_event.set()  # 通知正在运行的线程停止  
             self.capture_thread.join()  # 等待线程结束  
-    
-        # 重置停止事件  
         self.stop_event.clear() 
-
+        
+        # 初始化局面检查器和历史记录
+        context.init_checker()
+        context.history = MoveHistory()
+        
         #创建一个线程和队列,用于执行截图和返回引擎计算结果
         self.result_queue = queue.Queue()  
         self.capture_thread = threading.Thread(target=self.capture_func)  
@@ -604,24 +602,38 @@ class MainWindow(QMainWindow):
     
     def capture_func(self):
         """截图和分析函数"""
+        # 启动引擎
+        try:
+            if context.engine is None:
+                context.engine = ChessEngine()
+                context.engine.start()
+            if not context.engine.is_initialized:
+                print("引擎启动失败")
+                self.result_queue.put(Message(MessageType.STATUS, "引擎启动失败"))
+                return
+        except Exception as e:
+            print(f"capture_func error: {e}")
+
         capture_region(self.result_queue, self.stop_event)
-    
+
     def check_queue(self):
         """检查结果队列"""
         if not self.result_queue.empty():
             result = self.result_queue.get()
             if isinstance(result, Message):
                 if result.type == MessageType.CHANGE:
-                    # 显示棋局
-                    self.board_display.update_board_with_array(
-                        result.kwargs['position'], 
-                        red_changes=result.kwargs.get('red_changes', []),
-                        black_changes=result.kwargs.get('black_changes', [])
+                    # 更新棋局变化
+                    self.board_display.update_board(
+                        result.kwargs['array'], 
+                        step_info=result.kwargs.get('step_info')
                     )
                     self.update_text(result.content)
+                elif result.type == MessageType.PIECES:
+                    # 更新棋子位置
+                    self.board_display.update_pieces(result.kwargs['array'])
                 elif result.type == MessageType.MOVE_CODE:
-                    # 显示着法箭头
-                    self.board_display.update_move_arrow(result.content, result.kwargs['is_red'])
+                    # 更新着法箭头
+                    self.board_display.update_arrow(result.content, result.kwargs['is_red'])
                 elif result.type == MessageType.MOVE_TEXT:
                     # 显示着法文本
                     self.update_text(result.content)
@@ -629,6 +641,15 @@ class MainWindow(QMainWindow):
                     # 显示状态消息
                     self.update_text(result.content)
     
+    def close_queue(self):
+        """销毁截图线程和定时器"""
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.stop_event.set()
+            self.capture_thread.join()
+        if self.check_timer:
+            self.check_timer.stop()
+            self.check_timer = None
+
     def update_text(self, text):
         """更新显示文本"""
         if len(text) == 4:
@@ -923,19 +944,6 @@ class MainWindow(QMainWindow):
             cursor_pos = QCursor.pos()
             # 使用共同确认逻辑
             self.confirm_position(cursor_pos)
-    
-    def stop_analysis(self):
-        """停止分析线程"""
-        if self.capture_thread and self.capture_thread.is_alive():
-            self.stop_event.set()
-            self.capture_thread.join()
-        
-        if self.check_timer:
-            self.check_timer.stop()
-            self.check_timer = None
-        
-        # 关闭引擎
-        engine.terminate_engine() 
 
     def on_manual_analyze(self):
         """手动触发识别"""
@@ -976,7 +984,7 @@ class MainWindow(QMainWindow):
         """窗口关闭时处理"""
         # 停止所有线程和监听器
         self.stop_mouse_listener()
-        self.stop_analysis()
+        self.close_queue()
         super().closeEvent(event)
 
 def main():
