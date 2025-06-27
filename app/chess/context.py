@@ -3,6 +3,7 @@ from typing import Dict, Optional, List
 from tools.utils import resource_path
 import json
 from threading import Lock
+from chess.history import MoveHistory 
 
 @dataclass
 class Platform:
@@ -42,9 +43,12 @@ class ChessContext:
     _engine_params: Dict[str, str] = field(default_factory=dict)
     _engine_params_lock: Lock = field(default_factory=Lock)
     _platforms: Dict[str, Platform] = field(default_factory=dict)
-    _analysis_mode: str = field(default="timer")  # 使用 field 确保默认值在实例化时设置
-    position_checker: Optional[object] = None  # 局面检查器
-
+    _analysis_mode: str = field(default="timer")  
+    engine: Optional[object] = None  # 当前引擎实例
+    checker: Optional[object] = None  # 局面检查器
+    history: MoveHistory = field(default_factory=MoveHistory) 
+    
+    
     def __post_init__(self):
         """初始化时加载配置"""
         self.load_config()
@@ -209,14 +213,14 @@ class ChessContext:
         self._analysis_mode = mode
         self.save_config()  # 保存配置
 
-    def init_position_checker(self):
+    def init_checker(self):
         """初始化局面检查器"""
         from .checker import PositionChecker
-        self.position_checker = PositionChecker()
+        self.checker = PositionChecker()
 
-    def clear_position_checker(self):
+    def clear_checker(self):
         """清理局面检查器"""
-        self.position_checker = None
+        self.checker = None
 
 # 创建全局上下文实例
 context = ChessContext(platform="TT")  # 默认使用TT平台 

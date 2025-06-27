@@ -3,6 +3,7 @@ from enum import Enum, auto
 class MessageType(Enum):
     """消息类型枚举"""
     CHANGE = auto()         # 局面变化消息
+    PIECES = auto()         # 棋子位置消息
     MOVE_CODE = auto()      # 着法代码消息
     MOVE_TEXT = auto()      # 着法文本消息
     STATUS = auto()         # 状态消息

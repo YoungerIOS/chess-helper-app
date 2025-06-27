@@ -3,194 +3,237 @@ import os
 import sys
 import subprocess
 import threading
+from typing import Optional, Tuple, List, Callable
 from chess.message import Message, MessageType
 from chess.context import context
 
-#使用线程锁,可以确保任何时刻只有一个线程可以访问pikafish变量
-#在这里用处可能不大,但感觉日后如果要面对大量用户同时使用,可能用得上
-pikafish_lock = threading.Lock()
-pikafish = None
-
-def init_engine():
-    global pikafish # 全局变量
-
-    with pikafish_lock:
-        # 检查 pikafish 是否已经存在且正在运行  
-        if pikafish is not None and pikafish.poll() is None:  
-            print("Pikafish 引擎已经在运行")  
-            return 
-        # 如果 pikafish 不存在或者已经停止，则重新启动
-        elif pikafish is None or pikafish.poll() is not None:
-            # 开辟一个子进程, 运行引擎
-            # 读取存在本地的坐标 
-            pikafish_command = resource_path("Pikafish/src/pikafish")
-            try:  
-                pikafish = subprocess.Popen(pikafish_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) 
-                print("Pikafish 引擎已启动。")  
-            except Exception as e:  
-                print(f"启动 Pikafish 引擎时出错：{e}")  
-                pikafish = None  # 如果启动失败，将 pikafish 设置为 None
-
-    # 准备
-    uci(pikafish) # 可以用全局变量,也可以用传参
-    send_command('setoption name Threads value 2', 1, 'threads')
-    set_option('setoption name Hash value 256')
-    isready()
-
-def terminate_engine():
-    # 安全地关闭引擎进程
-    global pikafish
-    with pikafish_lock:
-        if pikafish and pikafish.poll() is None:  # 检查进程是否还在运行  
-            pikafish.terminate()  # 发送 SIGTERM 信号  
-            try:  
-                # 可选：等待进程结束
-                pikafish.wait(timeout=3)  # 等待最多3秒  
-            except subprocess.TimeoutExpired:  
-                pikafish.kill()  # 如果超时，则强制杀死进程  
-            finally:  
-                pikafish = None
-                print("Pikafish 引擎已关闭。")
-
-def resource_path(relative_path):  
-    """ 获取资源文件的绝对路径 """  
-    if hasattr(sys, '_MEIPASS'):  
-        # 如果是打包后的应用，则使用 sys._MEIPASS  
-        return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./app/"), relative_path)
+class ChessEngine:
+    """中国象棋引擎类，封装了与Pikafish引擎的交互"""
     
-def get_best_move(fen, side, display_callback=None):
-    fen_string = fen + ' ' + ('w' if side else 'b')
-
-    # 从上下文获取引擎参数
-    engine_params = context.get_engine_params()
-    param = engine_params['goParam']
-    value = engine_params[param]
-    if param is None or param == '' or value is None or value == '':
-        param = 'depth'
-        value = '20'
-
-    # 显示计算状态
-    if display_callback:
-        display_callback(Message(MessageType.STATUS, "引擎正在计算..."))
-
-    lines, best_move = go(fen_string, param, value)
-
-    if not lines:  
-        best_move = "No output received within 40 seconds. code:408"  # 使用408 Request Timeout作为HTTP状态码  
-    else:
-        if not best_move:
-            best_move = ' '.join(lines)
+    def __init__(self, engine_path: str = None, threads: int = 4, hash_size: int = 256):
+        """
+        初始化象棋引擎
+        
+        Args:
+            engine_path: 引擎可执行文件路径，如果为None则使用默认路径
+            threads: 引擎使用的线程数
+            hash_size: 引擎哈希表大小(MB)
+        """
+        self.engine_path = engine_path or self._get_default_engine_path()
+        self.threads = threads
+        self.hash_size = hash_size
+        self.process: Optional[subprocess.Popen] = None
+        self.lock = threading.Lock()
+        self.is_initialized = False
+        
+    def _get_default_engine_path(self) -> str:
+        """获取默认引擎路径"""
+        return self._resource_path("Pikafish/src/pikafish")
+    
+    def _resource_path(self, relative_path: str) -> str:
+        """获取资源文件的绝对路径"""
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.join(os.path.abspath("./app/"), relative_path)
+    
+    def start(self) -> bool:
+        """启动引擎"""
+        with self.lock:
+            try:
+                if self.process is not None and self.process.poll() is None:
+                    print("引擎已经在运行")
+                    return True
+                
+                self.process = subprocess.Popen(
+                    self.engine_path,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                self._initialize_engine()
+                self.is_initialized = True
+                print("引擎启动成功")
+                return True
+                
+            except Exception as e:
+                print(f"启动引擎时出错：{e}")
+                self.process = None
+                self.is_initialized = False
+                return False
+    
+    def _initialize_engine(self):
+        """初始化引擎设置"""
+        self._send_command('uci')
+        self._wait_for_response('uciok', timeout=1)
+        
+        self._send_command(f'setoption name Threads value {self.threads}')
+        self._send_command(f'setoption name Hash value {self.hash_size}')
+        time.sleep(0.2)
+        
+        self._send_command('isready')
+        self._wait_for_response('readyok', timeout=1)
+    
+    def stop(self):
+        """停止引擎"""
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                finally:
+                    self.process = None
+                    self.is_initialized = False
+                    print("引擎已停止")
+    
+    def _send_command(self, command: str):
+        """发送命令到引擎"""
+        if not self.process:
+            raise RuntimeError("引擎未启动")
+        print(f"[ENGINE CMD] {command}")  # 调试用，打印实际发给引擎的命令
+        self.process.stdin.write(f'{command}\n')
+        self.process.stdin.flush()
+    
+    def _wait_for_response(self, keyword: str, timeout: float = 1.0) -> List[str]:
+        """等待引擎响应，直到包含指定关键字"""
+        if not self.process:
+            return []
+        
+        lines = []
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            output = self.process.stdout.readline().strip()
+            if output:
+                lines.append(output)
+                if keyword in output:
+                    break
+        
+        return lines
+    
+    def new_game(self):
+        """开始新游戏"""
+        if not self.is_initialized:
+            raise RuntimeError("引擎未初始化")
+        
+        self._send_command('ucinewgame')
+        self._send_command('isready')
+        self._wait_for_response('readyok', timeout=3)
+    
+    def _position(self, fen_string: str, use_startpos: bool = True, moves: Optional[str] = None):
+        """
+        发送position命令
+        """
+        if use_startpos:
+            cmd = "position startpos"
+            if moves:
+                cmd += f" moves {moves}"
         else:
-            # 截取4个字符
-            start_index = best_move.find('bestmove') + len('bestmove') + 1
-            best_move = best_move[start_index:start_index + 4]
+            cmd = f"position fen {fen_string}"
+        self._send_command(cmd)
 
-    return best_move, fen_string
+    def _go(self, param: str, value: str) -> Tuple[List[str], str]:
+        """
+        发送go命令和读取结果
+        """
+        self._send_command(f"go {param} {value}")
+        return self._read_output_with_timeout(60)
 
-def send_command(cmd, interval, keyword):
-    command = cmd
-    pikafish.stdin.write(f'{command}\n')    
-    pikafish.stdin.flush() 
-    lines = []
-    start_time = time.time()
-    while True:  
-        # 读取一行输出（包括换行符），然后去除换行符  
-        output = pikafish.stdout.readline().strip()  
-        if (time.time() - start_time > interval):  # 如果超过指定时间，则退出循环  
-            break  
-        if output:  
-            lines.append(output)  # 将非空输出添加到列表中  
-            if keyword in output:  # 如果找到 输出关键字，则立即退出循环  
-                break  
-    return lines
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None) -> Tuple[str, str]:
+        """获取最佳走法
+        参数:
+        - fen: FEN字符串
+        - side: 当前轮到哪一方（True为红方，False为黑方）
+        - display_callback: 显示回调函数
+        - is_startpos: 是否用startpos（否则用fen）
+        - is_newgame: 是否新局
+        - moves: 历史走法字符串
+        """
+        if not self.is_initialized:
+            raise RuntimeError("引擎未初始化")
+        fen_string = ''
+        if fen:
+            fen_string = fen + ' ' + ('w' if side else 'b')
+        engine_params = context.get_engine_params()
+        param = engine_params.get('goParam', 'depth')
+        value = engine_params.get(param, '20')
+        if not param or not value:
+            param = 'depth'
+            value = '20'
 
-def uci(engine):
-    command = 'uci'
-    engine.stdin.write(f'{command}\n')    
-    engine.stdin.flush() 
-    lines = []
-    start_time = time.time()
-    while True:  
-        # 读取一行输出（包括换行符），然后去除换行符  
-        output = engine.stdout.readline().strip()  
-        if (time.time() - start_time > 1):  # 如果超过1秒，则退出循环  
-            break  
-        if output:  
-            lines.append(output)  # 将非空输出添加到列表中  
-            if 'uciok' in output:  # 如果找到 'uciok'，则立即退出循环  
-                break  
-    return lines
+        if display_callback:
+            display_callback(Message(MessageType.STATUS, "引擎正在计算..."))
 
-def isready():
-    command = 'isready'
-    pikafish.stdin.write(f'{command}\n')    
-    pikafish.stdin.flush() 
-    time.sleep(0.5)
-    output = pikafish.stdout.readline().strip()
-    return output
+        if is_newgame:
+            self.new_game()
 
-def set_option(cmd):
-    command = cmd
-    pikafish.stdin.write(f'{command}\n')    
-    pikafish.stdin.flush() 
-    time.sleep(0.2)
-    return
+        self._position(fen_string, use_startpos=use_startpos, moves=moves)
+        lines, best_move = self._go(param, value)
 
-def ucinewgame():
-    """
-    发送ucinewgame之后应该总是发送isready命令,然后等待readyok
-    """
-    newgame_command = 'ucinewgame\n'
-    isready_command = 'isready\n'
-    pikafish.stdin.write(newgame_command)
-    pikafish.stdin.write(isready_command)
-    pikafish.stdin.flush() 
-    start_time = time.time()
-    while True:  
-        output = pikafish.stdout.readline().strip()  
-        if (time.time() - start_time > 3):  # 如果超过3秒，则退出循环 
-            break  
-        if output:  
-            if 'readyok' in output:  
-                break  
-    return output
-
-def go(fen_string, param, value):
-    start_position1 = 'rnbakabnr/9/1c5c1/p1p1p1p1p'
-    start_position2 = 'P1P1P1P1P/1C5C1/9/RNBAKABNR'
-    if start_position1 in fen_string or start_position2 in fen_string:
-        ucinewgame()
-        pos_command1 = "position startpos\n"
-        pikafish.stdin.write(pos_command1)
-
-    pos_command2 = "position fen " + fen_string + "\n"  
-    go_command = "go " + param + " " + value + "\n" 
-    # 发送命令  
-    pikafish.stdin.write(pos_command2)  
-    pikafish.stdin.write(go_command)  
-    pikafish.stdin.flush() 
-    # 读取数据
-    lines, best_move = read_output_with_timeout(pikafish, 50)
-
-    return lines, best_move
-
-def read_output_with_timeout(process, timeout=1):  
-    lines = []
-    best_move = ''
-    start_time = time.time()  
+        if not lines:
+            best_move = "No output received within 40 seconds"
+        else:
+            if not best_move:
+                best_move = ' '.join(lines)
+            else:
+                start_index = best_move.find('bestmove') + len('bestmove') + 1
+                best_move = best_move[start_index:start_index + 4]
+        return best_move, fen_string
     
-    while True:  
-        # 读取一行输出（包括换行符），然后去除换行符  
-        output = process.stdout.readline().strip()  
-        # 控制读取时间,超时不再读取 
-        if time.time() - start_time > timeout:  
-            break
-        if output: 
-            lines.append(output)
-            if "bestmove" in output:
-                best_move = output  # 获取包含"bestmove"的输出行
+    def verify_history(self, moves: str) -> str:
+        """
+        用历史moves复盘并用d命令获取FEN, 校验历史记录是否有误.
+        """
+        if not self.is_initialized:
+            raise RuntimeError("引擎未初始化")
+        self._send_command('position startpos moves ' + moves)
+        self._send_command('d')
+        # 读取输出直到出现Fen: ...
+        fen = None
+        start_time = time.time()
+        while time.time() - start_time < 2.0:  # 最多等2秒
+            output = self.process.stdout.readline()
+            if not output:
+                continue
+            output = output.strip()
+            if output.startswith('Fen:'):
+                fen = output.split('Fen:')[1].strip()
+                if fen:
+                    fen = fen.split(' ')[0]
                 break
+        return fen or ""
+
+    def _read_output_with_timeout(self, timeout: float = 1.0) -> Tuple[List[str], str]:
+        """读取引擎输出，带超时控制"""
+        lines = []
+        best_move = ''
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            output = self.process.stdout.readline().strip()
+            if output:
+                lines.append(output)
+                if "bestmove" in output:
+                    best_move = output
+                    break
+        
+        return lines, best_move
     
-    # 返回: 所有输出以及包含bestmove的行            
-    return lines, best_move 
+    def __enter__(self):
+        """上下文管理器入口"""
+        self.start()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """上下文管理器出口"""
+        self.stop()
+    
+    def __del__(self):
+        """析构函数，确保资源被正确释放"""
+        self.stop()
+
+
+

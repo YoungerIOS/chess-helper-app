@@ -2,7 +2,7 @@ import mss
 import time
 import cv2
 import numpy as np
-from chess import process, engine
+from chess.processor import ChessProcess
 from chess.message import Message, MessageType, MessageContent
 from chess.context import context
 from tools.utils import resource_path
@@ -105,12 +105,6 @@ def capture_region(result_queue, stop_event):
     """截图和分析函数"""
     # 重新加载配置，确保工作线程读取到最新配置
     context.load_config()
-    print(f"Debug - 工作线程加载配置后的分析模式: {context.analysis_mode}")
-    
-    # 启动象棋引擎
-    engine.init_engine()    
-
-    # 从上下文获取区域配置
     platform = context.get_platform(context.platform)
     board_region = platform.regions["board"]
     avatar_region = platform.regions["avatar"]
@@ -119,7 +113,7 @@ def capture_region(result_queue, stop_event):
 
     while not stop_event.is_set():
         if context.analysis_mode == "continuous":  # 使用字符串值进行比较
-            print("Debug - 连续模式")
+            print("Debug - 连续截图")
             # 连续模式：直接截图识别
             with mss.mss() as sct:
                 screenshot = sct.grab(board_region)
@@ -128,14 +122,14 @@ def capture_region(result_queue, stop_event):
                 def callback(msg):
                     result_queue.put(msg)
                 
-                move_text_msg, move_code_msg = process.main_process(screenshot, callback)
-                # 如果识别成功，发送着法消息
-                if move_code_msg.content:
-                    result_queue.put(move_code_msg)
-                    result_queue.put(move_text_msg)
+                result = ChessProcess.from_context(context).process_image(screenshot, callback)
+                if result.move_code and result.move_code.content:
+                    result_queue.put(result.move_code)
+                    result_queue.put(result.move_text)
+                        
                 
         elif context.analysis_mode == "timer":
-            print("Debug - 倒计时模式")
+            print("Debug - 倒计时截图")
             # 倒计时模式：根据计时器轮流截图识别
             if check_turn_order(avatar_region): # 我方进入计时状态
                 # 还没有获得着法
@@ -151,23 +145,23 @@ def capture_region(result_queue, stop_event):
                         def callback(msg):
                             result_queue.put(msg)
                             
-                        move_text_msg, move_code_msg = process.main_process(screenshot, callback)
-                        if move_code_msg.content:  # 如果有着法代码
-                            result_queue.put(move_code_msg)  # 先发送着法代码用于显示箭头
-                            result_queue.put(move_text_msg)  # 再发送中文着法用于显示文本
-                            print(f"Debug - Move : {move_code_msg}, Text : {move_text_msg}") 
-                        else:  # 如果发生错误
-                            result_queue.put(move_text_msg)  # 发送错误消息
-                            result_queue.put(move_code_msg)  # 发送空的棋盘显示消息
+                        result = ChessProcess.from_context(context).process_image(screenshot, callback)
+                        if result.move_code and result.move_code.content:
+                            result_queue.put(result.move_code)  # 先发送着法代码用于显示箭头
+                            result_queue.put(result.move_text)  # 再发送中文着法用于显示文本
+                            print(f"Debug - Move : {result.move_code}, Text : {result.move_text}") 
+                        else:
+                            result_queue.put(result.move_text)  # 发送错误消息
+                            result_queue.put(result.move_code)  # 发送空的棋盘显示消息
 
                     got_move = True
             else:
                 got_move = False
         else:
             print(f"Debug - 未知的分析模式: {context.analysis_mode}")
-            time.sleep(0.5)  
         # 控制识别频率
-        time.sleep(0.2 if context.analysis_mode == "continuous" else 0.3)
+        if context.analysis_mode == "timer":
+            time.sleep(0.3)
 
 def get_position(x, y):  
     # 确定截图区域  

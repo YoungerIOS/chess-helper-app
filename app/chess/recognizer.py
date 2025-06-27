@@ -202,8 +202,7 @@ def recognize_piece_from_circle(img, x_array, y_array, callback=None):
 
     else:
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-        is_red = False
-    return pieceArray, is_red
+    return pieceArray
 
 def recognize_piece_from_grid(img, x_array, y_array, callback=None):
     """
@@ -215,12 +214,10 @@ def recognize_piece_from_grid(img, x_array, y_array, callback=None):
         callback: 回调函数，用于发送消息
     Returns:
         pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
-        is_red: 是否为红方
     """
     # 预处理
     resized_img, _ = preprocess_image(img)
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-    is_red = False  # 默认值设为False
     
     # 遍历棋盘格点，切割并识别棋子
     covered_count = 0  # 添加被遮挡棋子计数
@@ -255,22 +252,16 @@ def recognize_piece_from_grid(img, x_array, y_array, callback=None):
                 # 统计covered数量
                 if piece_type == 'covered':
                     covered_count += 1
-                # 在上下两个九宫格内寻找黑将
-                if piece_type == 'k':  # 黑将
-                    # 判断是否在九宫格内
-                    if (3 <= j <= 5 and 0 <= i <= 2) or (3 <= j <= 5 and 7 <= i <= 9):
-                        # 根据黑将位置判断红黑方
-                        is_red = (i <= 2)  # 如果黑将在上半部分，则为红方
-                        # print(f"位置({j}, {i}) 检测到黑将")
+                
                 pieceArray[i][j] = piece_type
             else:
-                return None, is_red
+                return None
     
     # 检查covered数量是否超过阈值
     if covered_count > 0:
-        return None, is_red  
+        return None  
     
-    return pieceArray, is_red
+    return pieceArray
 
 # 计算棋子坐标
 def get_piece_position(point, x_array, y_array):
@@ -402,84 +393,10 @@ def recognize_piece_type(piece_img):
     # 使用识别结果
     piece_type = result['class_name']
     confidence = result['confidence']
-    print(f"识别结果: {piece_type}, 置信度: {confidence:.2%}")
+    # print(f"识别结果: {piece_type}, 置信度: {confidence:.2%}")
     
     # 删除临时文件
     os.remove(temp_path)
     
     return piece_type, confidence
 
-def is_valid_position(piece_type, x, y, is_red):
-    """
-    根据中国象棋规则验证(x,y)是否为 "兵卒 象相 士仕 将帅" 的合法位置
-    Args:
-        piece_type: 棋子类型
-        x: 棋盘横坐标
-        y: 棋盘纵坐标
-        is_red: 红方在棋盘下方
-    Returns:
-        bool: 位置是否合法
-    """
-    
-    # 士/仕的合法位置（九宫格内的5个位置）
-    if piece_type in ['a', 'A']:  # 士/仕
-        if piece_type.isupper():  # 红士
-            if is_red:  # 红方在下方
-                return (x, y) in [(3, 7), (5, 7), (4, 8), (3, 9), (5, 9)]  # 红方在下方时，士在下方九宫格
-            else:  # 红方在上方
-                return (x, y) in [(3, 0), (5, 0), (4, 1), (3, 2), (5, 2)]  # 红方在上方时，士在上方九宫格
-        else:  # 黑仕
-            if is_red:  # 红方在下方，黑方在上方
-                return (x, y) in [(3, 0), (5, 0), (4, 1), (3, 2), (5, 2)]  # 黑方在上方九宫格
-            else:  # 红方在上方，黑方在下方
-                return (x, y) in [(3, 7), (5, 7), (4, 8), (3, 9), (5, 9)]  # 黑方在下方九宫格
-    
-    # 相/象的合法位置（己方区域的7个位置）
-    elif piece_type in ['b', 'B']:  # 相/象
-        if piece_type.isupper():  # 红相
-            if is_red:  # 红方在下方
-                return (x, y) in [(2, 5), (6, 5), (0, 7), (4, 7), (8, 7), (2, 9), (6, 9)]  # 红方在下方时，相在下方区域
-            else:  # 红方在上方
-                return (x, y) in [(2, 0), (6, 0), (0, 2), (4, 2), (8, 2), (2, 4), (6, 4)]  # 红方在上方时，相在上方区域
-        else:  # 黑象
-            if is_red:  # 红方在下方，黑方在上方
-                return (x, y) in [(2, 0), (6, 0), (0, 2), (4, 2), (8, 2), (2, 4), (6, 4)]  # 黑方在上方区域
-            else:  # 红方在上方，黑方在下方
-                return (x, y) in [(2, 5), (6, 5), (0, 7), (4, 7), (8, 7), (2, 9), (6, 9)]  # 黑方在下方区域
-    
-    # 将/帅的合法位置（九宫格内的9个位置）
-    elif piece_type in ['k', 'K']:  # 将/帅
-        if piece_type.isupper():  # 红帅
-            if is_red:  # 红方在下方
-                return (x, y) in [(3, 7), (4, 7), (5, 7), (3, 8), (4, 8), (5, 8), (3, 9), (4, 9), (5, 9)]  # 红方在下方时，帅在下方九宫格
-            else:  # 红方在上方
-                return (x, y) in [(3, 0), (4, 0), (5, 0), (3, 1), (4, 1), (5, 1), (3, 2), (4, 2), (5, 2)]  # 红方在上方时，帅在上方九宫格
-        else:  # 黑将
-            if is_red:  # 红方在下方，黑方在上方
-                return (x, y) in [(3, 0), (4, 0), (5, 0), (3, 1), (4, 1), (5, 1), (3, 2), (4, 2), (5, 2)]  # 黑方在上方九宫格
-            else:  # 红方在上方，黑方在下方
-                return (x, y) in [(3, 7), (4, 7), (5, 7), (3, 8), (4, 8), (5, 8), (3, 9), (4, 9), (5, 9)]  # 黑方在下方九宫格
-    
-    # 兵/卒的合法位置
-    elif piece_type in ['p', 'P']:  # 兵/卒
-        if piece_type.isupper():  # 红兵
-            if is_red:  # 红方在下方
-                if y >= 5:  # 在己方区域
-                    return (x, y) in [(0, 6), (2, 6), (4, 6), (6, 6), (8, 6), (0, 5), (2, 5), (4, 5), (6, 5), (8, 5)]  # 红方在下方时，兵在下方第5行和第6行
-                return True  # 过河后可以在任何位置
-            else:  # 红方在上方
-                if y <= 4:  # 在己方区域
-                    return (x, y) in [(0, 3), (2, 3), (4, 3), (6, 3), (8, 3), (0, 4), (2, 4), (4, 4), (6, 4), (8, 4)]  # 红方在上方时，兵在上方第3行和第4行
-                return True  # 过河后可以在任何位置
-        else:  # 黑卒
-            if is_red:  # 红方在下方，黑方在上方
-                if y <= 4:  # 在己方区域
-                    return (x, y) in [(0, 3), (2, 3), (4, 3), (6, 3), (8, 3), (0, 4), (2, 4), (4, 4), (6, 4), (8, 4)]  # 黑方在上方区域
-                return True  # 过河后可以在任何位置
-            else:  # 红方在上方，黑方在下方
-                if y >= 5:  # 在己方区域
-                    return (x, y) in [(0, 6), (2, 6), (4, 6), (6, 6), (8, 6), (0, 5), (2, 5), (4, 5), (6, 5), (8, 5)]  # 黑方在下方区域
-                return True  # 过河后可以在任何位置
-    
-    # 车、马、炮可以在任何位置
-    return True
