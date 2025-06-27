@@ -148,6 +148,8 @@ def convert_array_to_fen(array, is_red):
 
 # 着法move转文字描述
 def convert_move_to_chinese(move, board_array, is_red): 
+    if not move or len(move) != 4:
+        return "着法为空或格式错误"
     # 棋子代码与中文名称的对应关系  
     PIECE_CODES = {  
         'r': '车',  
@@ -232,3 +234,33 @@ def convert_move_to_chinese(move, board_array, is_red):
             desc = f"{name}{(start_colunm)}{direction}{end_colunm}" 
 
     return desc
+
+def convert_coords_to_move(from_pos, to_pos, is_red=False):
+    """
+    将棋盘坐标(from_pos, to_pos)转为move字符串.
+    - a0始终是红方视角的左下角
+    - from_pos, to_pos: (row, col)，数组坐标，左上角(0,0)
+    - is_red: True表示红方在下，False表示黑方在下
+    """
+    if from_pos is None or to_pos is None:
+        return ""
+    if not isinstance(from_pos, (tuple, list)) or len(from_pos) != 2:
+        return ""
+    if not isinstance(to_pos, (tuple, list)) or len(to_pos) != 2:
+        return ""
+    try:
+        from_row, from_col = int(from_pos[0]), int(from_pos[1])
+        to_row, to_col = int(to_pos[0]), int(to_pos[1])
+    except (ValueError, TypeError):
+        return ""
+    if is_red:
+        move_from_col = from_col
+        move_to_col = to_col
+        move_from_row = 9 - from_row
+        move_to_row = 9 - to_row
+    else:
+        move_from_col = 8 - from_col
+        move_to_col = 8 - to_col
+        move_from_row = from_row
+        move_to_row = to_row
+    return f"{chr(ord('a')+move_from_col)}{move_from_row}{chr(ord('a')+move_to_col)}{move_to_row}"

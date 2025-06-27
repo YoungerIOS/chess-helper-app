@@ -27,14 +27,14 @@
         },
         "regions": {
             "board": {
-                "left": 1039,
-                "top": 215,
+                "left": 1038,
+                "top": 213,
                 "width": 375,
                 "height": 415
             },
             "avatar": {
-                "left": 1320.25,
-                "top": 630,
+                "left": 1319.25,
+                "top": 628,
                 "width": 93.75,
                 "height": 124.5
             }
@@ -85,7 +85,7 @@
     "analysis_mode": "continuous",
     "engine_params": {
         "movetime": "3000",
-        "depth": "23",
+        "depth": "22",
         "goParam": "depth"
     }
 }
