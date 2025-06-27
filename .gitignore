@@ -145,3 +145,4 @@ cython_debug/
 
 # VS Code
 .vscode/
+.DS_Store
