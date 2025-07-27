@@ -4,7 +4,7 @@ import sys
 import subprocess
 import threading
 from typing import Optional, Tuple, List, Callable
-from chess.message import Message, MessageType
+from chess.message import Message, MessageType, MessageContent
 from chess.context import context
 
 class ChessEngine:
@@ -165,7 +165,7 @@ class ChessEngine:
             value = '20'
 
         if display_callback:
-            display_callback(Message(MessageType.STATUS, "引擎正在计算..."))
+            display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))
 
         if is_newgame:
             self.new_game()

@@ -32,18 +32,26 @@ class CountdownPredictor:
         self.model = self._load_model(model_path)
         self.model = self.model.to(self.device)
         
-        # 设置图像预处理
-        self.transform = transforms.Compose([
-            self.CropBottomSquare(),
-            transforms.Resize((96, 96)),
-            transforms.ToTensor()
-        ])
+        # 根据平台设置不同的图像预处理
+        if platform == "TT":
+            # TT平台使用裁剪预处理
+            self.transform = transforms.Compose([
+                self.CropBottomSquare(),
+                transforms.Resize((96, 96)),
+                transforms.ToTensor()
+            ])
+        else:  # JJ平台使用简单resize
+            self.transform = transforms.Compose([
+                transforms.Resize((96, 96)),
+                transforms.ToTensor()
+            ])
     
     class CropBottomSquare:
         def __call__(self, img):
             width, height = img.size
             side = min(width, height)
-            top = height - side  # 从顶部裁去
+            # top = height - side  # 从顶部裁去
+            top = 0
             return transforms.functional.crop(img, top, 0, side, side)
     
     def _load_model(self, model_path):
@@ -51,10 +59,12 @@ class CountdownPredictor:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"找不到模型文件: {model_path}")
         
-        weights = MobileNet_V2_Weights.DEFAULT
-        model = models.mobilenet_v2(weights=weights)
+        # 创建模型架构
+        model = models.mobilenet_v2(weights=None)
         model.classifier[1] = nn.Linear(model.last_channel, len(self.class_names))
-        model.load_state_dict(torch.load(model_path))
+        
+        # 加载训练好的权重
+        model.load_state_dict(torch.load(model_path, map_location=self.device))
         model.eval()
         return model
     
@@ -92,15 +102,24 @@ class CountdownPredictor:
 
 # 使用示例
 if __name__ == '__main__':
+    # 测试TT和JJ两个平台
+    platforms = ["TT", "JJ"]
+    
+    for platform in platforms:
+        print(f"\n{'='*60}")
+        print(f"测试 {platform} 平台")
+        print(f"{'='*60}")
+        
     # 创建预测器实例
-    predictor = CountdownPredictor(platform="TT")
+        predictor = CountdownPredictor(platform=platform)
     
-    # 测试数据集中的图片
-    test_dirs = [
-        "countdown_tt/test_images",
-    ]
+        # 根据平台选择测试目录
+        if platform == "TT":
+            test_dirs = ["countdown_tt/test_images"]
+        else:  # JJ
+            test_dirs = ["countdown_jj/test_images"]
     
-    print("\n开始测试预测...")
+        print(f"\n开始测试 {platform} 平台预测...")
     for test_dir in test_dirs:
         print(f"\n测试目录: {test_dir}")
         print("-" * 50)

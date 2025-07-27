@@ -27,16 +27,22 @@
         },
         "regions": {
             "board": {
-                "left": 1038,
-                "top": 213,
+                "left": 1002,
+                "top": 254,
                 "width": 375,
                 "height": 415
             },
-            "avatar": {
-                "left": 1319.25,
-                "top": 628,
-                "width": 93.75,
-                "height": 124.5
+            "avatar_upper": {
+                "left": 997,
+                "top": 119,
+                "width": 72,
+                "height": 72
+            },
+            "avatar_lower": {
+                "left": 1310,
+                "top": 732,
+                "width": 72,
+                "height": 72
             }
         }
     },
@@ -68,21 +74,27 @@
         },
         "regions": {
             "board": {
-                "left": 1024,
-                "top": 215,
+                "left": 1026,
+                "top": 240,
                 "width": 375,
                 "height": 415
             },
-            "avatar": {
-                "left": 1305.25,
-                "top": 630,
-                "width": 93.75,
-                "height": 124.5
+            "avatar_upper": {
+                "left": 1026,
+                "top": 109,
+                "width": 72,
+                "height": 72
+            },
+            "avatar_lower": {
+                "left": 1332,
+                "top": 699,
+                "width": 72,
+                "height": 72
             }
         }
     },
-    "platform": "TT",
-    "analysis_mode": "continuous",
+    "platform": "JJ",
+    "analysis_mode": "timer",
     "engine_params": {
         "movetime": "3000",
         "depth": "22",

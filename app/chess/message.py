@@ -21,7 +21,12 @@ class MessageContent:
     # 状态消息
     WAITING = "等待获取棋局..."
     RECOGNIZING = "正在识别局面..."
-    MY_TURN = "轮到我方走棋..."
+    MY_TURN = "轮到我方走棋"
+    MY_MOVING = "我方思考中..."
+    OPPONENT_TURN = "轮到对方走棋"
+    OPPONENT_MOVING = "对方思考中..."
+    ENGINE_THINKING = "引擎正在计算..."
+
     ANIMATION_COVERED = "检测到动画遮挡，等待1秒..."
     POSITIONING = "将光标移到棋盘左上角，<br>点击鼠标左键或按S键确认"
     POSITION_COMPLETE = "定位完成!"

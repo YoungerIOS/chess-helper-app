@@ -264,3 +264,18 @@ def convert_coords_to_move(from_pos, to_pos, is_red=False):
         move_from_row = from_row
         move_to_row = to_row
     return f"{chr(ord('a')+move_from_col)}{move_from_row}{chr(ord('a')+move_to_col)}{move_to_row}"
+
+def convert_to_builtin_type(obj):
+    """递归转换所有numpy类型为Python内置类型"""
+    import numpy as np
+    
+    if isinstance(obj, dict):
+        return {k: convert_to_builtin_type(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_builtin_type(i) for i in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    else:
+        return obj

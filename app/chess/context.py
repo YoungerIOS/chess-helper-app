@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List
-from tools.utils import resource_path
+from tools import utils
 import json
+import os
 from threading import Lock
 from chess.history import MoveHistory 
 
@@ -13,12 +14,10 @@ class Platform:
     regions: Dict  # 区域配置
     _piece_recognizer: Optional[object] = None  # 棋子识别器
     _timer_recognizer: Optional[object] = None  # 倒计时识别器
-    animation_delay: float = 0.3  # 动画等待时长（秒）
     
     def __post_init__(self):
         """初始化时设置动画等待时长"""
-        # 根据平台设置不同的动画等待时长
-        self.animation_delay = 1.2 if self.name == 'TT' else 0.3
+        pass
     
     @property
     def piece_recognizer(self) -> object:
@@ -69,7 +68,7 @@ class ChessContext:
     def load_config(self):
         """从配置文件加载所有设置"""
         try:
-            with open(resource_path("json/platform_config.json"), "r") as f:
+            with open(utils.resource_path("json/platform_config.json"), "r") as f:
                 config = json.load(f)
                 
             # 初始化平台
@@ -141,8 +140,15 @@ class ChessContext:
             with self._engine_params_lock:
                 config['engine_params'] = self._engine_params.copy()
             
-            with open(resource_path("json/platform_config.json"), "w") as f:
+            # 递归转换所有numpy类型
+            config = utils.convert_to_builtin_type(config)
+            
+            # 使用原子写入避免文件损坏
+            path = utils.resource_path("json/platform_config.json")
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(config, f, indent=4)
+            os.replace(tmp_path, path)  # 原子覆盖
         except Exception as e:
             print(f"Error saving config: {e}")
     
@@ -198,11 +204,6 @@ class ChessContext:
     def timer_recognizer(self) -> object:
         """获取当前平台的倒计时识别器"""
         return self._platforms[self.platform].timer_recognizer
-
-    @property
-    def animation_delay(self) -> float:
-        """获取当前平台的动画等待时长"""
-        return self._platforms[self.platform].animation_delay
 
     @property
     def analysis_mode(self) -> str:

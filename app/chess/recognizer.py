@@ -4,7 +4,10 @@ import os
 from tools.utils import filter_vertical_lines, filter_horizontal_lines, resource_path
 from chess.context import context
 from chess.message import Message, MessageType, MessageContent
+import uuid
 
+class RecognitionError(Exception):
+    pass
 
 def show_image(name, image):
     # 显示结果  
@@ -38,19 +41,14 @@ def get_board_data():
     platform = context.get_platform(context.platform)
     x_array = platform.board_coords["x"]
     y_array = platform.board_coords["y"]
-    error = ""
     
-    # 检查坐标数组是否为空
-    if not x_array or not y_array:
-        error = "No board coordinates found"
-    
-    return x_array, y_array, error
+    return x_array, y_array
 
 # 识别棋盘
 def recognize_board(img):
     """识别棋盘并保存坐标到上下文"""
-    x_arr, y_arr, error = get_board_data()
-    if not error: 
+    x_arr, y_arr = get_board_data()
+    if x_arr and y_arr:
         return x_arr, y_arr
     
     # 预处理
@@ -204,7 +202,7 @@ def recognize_piece_from_circle(img, x_array, y_array, callback=None):
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
     return pieceArray
 
-def recognize_piece_from_grid(img, x_array, y_array, callback=None):
+def recognize_piece_from_grid(img, x_array, y_array):
     """
     切割棋盘格点识别棋子，返回9x10棋盘数组和红黑方
     Args:
@@ -220,7 +218,6 @@ def recognize_piece_from_grid(img, x_array, y_array, callback=None):
     pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
     
     # 遍历棋盘格点，切割并识别棋子
-    covered_count = 0  # 添加被遮挡棋子计数
     for i in range(len(y_array)):
         for j in range(len(x_array)):
             center_x = x_array[j]
@@ -249,17 +246,11 @@ def recognize_piece_from_grid(img, x_array, y_array, callback=None):
             # 识别棋子类型
             piece_type, confidence = recognize_piece_type(piece_img)
             if piece_type and confidence > 0.9:
-                # 统计covered数量
                 if piece_type == 'covered':
-                    covered_count += 1
-                
+                    raise RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
                 pieceArray[i][j] = piece_type
             else:
-                return None
-    
-    # 检查covered数量是否超过阈值
-    if covered_count > 0:
-        return None  
+                raise RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
     
     return pieceArray
 
@@ -380,23 +371,30 @@ def recognize_piece_type(piece_img):
     :param piece_img: 棋子图片
     :return: 棋子类型, 置信度或None
     """
-    # 保存临时图片
-    temp_path = "temp_piece.jpg"
+    # 保存唯一临时图片
+    temp_path = f"temp_piece_{uuid.uuid4().hex}.jpg"
     cv2.imwrite(temp_path, piece_img)
     
     # 使用模型识别
     result = context.piece_recognizer.recognize(temp_path)
     if result is None:
         print(f"无法识别棋子: {temp_path}")
+        # 删除临时文件
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
         return None
     
     # 使用识别结果
     piece_type = result['class_name']
     confidence = result['confidence']
-    # print(f"识别结果: {piece_type}, 置信度: {confidence:.2%}")
     
     # 删除临时文件
-    os.remove(temp_path)
+    try:
+        os.remove(temp_path)
+    except Exception:
+        pass
     
     return piece_type, confidence
 

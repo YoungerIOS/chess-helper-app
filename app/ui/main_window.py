@@ -6,7 +6,7 @@ import os
 import queue
 import threading
 import sys
-from chess.screenshot import capture_region, get_position, trigger_manual_recognition
+from chess.screenshot import ChessCaptureManager
 from chess.engine import ChessEngine
 from chess.history import MoveHistory
 from chess.message import Message, MessageType
@@ -208,35 +208,29 @@ class MainWindow(QMainWindow):
         middle_buttons_layout.addWidget(self.board_btn)
         
         # 添加其他按钮
-        other_buttons = [
-            ("开始", self.on_start),  # 将开始/停止功能移到按钮3
-        ]
-        
-        for text, callback in other_buttons:
-            btn = QPushButton(text)
-            btn.setMinimumHeight(35)
-            btn.setFont(QFont("Arial", 11))
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #1874CD;
-                    color: white;
-                    border: 1px solid #1874CD;
-                    border-radius: 5px;
-                    padding: 0px;
-                    margin: 0px;
-                }
-                QPushButton:hover {
-                    background-color: #1565c0;
-                    border: 1px solid #1565c0;
-                }
-                QPushButton:pressed {
-                    background-color: #0d47a1;
-                    border: 1px solid #0d47a1;
-                }
-            """)
-            if callback:  # 只有当callback不为None时才连接点击事件
-                btn.clicked.connect(callback)
-            middle_buttons_layout.addWidget(btn)
+        self.start_btn = QPushButton("开始")
+        self.start_btn.setMinimumHeight(35)
+        self.start_btn.setFont(QFont("Arial", 11))
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        self.start_btn.clicked.connect(self.on_start)
+        middle_buttons_layout.addWidget(self.start_btn)
         
         main_layout.addLayout(middle_buttons_layout)
         
@@ -504,13 +498,15 @@ class MainWindow(QMainWindow):
         
         # 初始化线程和队列
         self.stop_event = threading.Event()
-        self.result_queue = queue.Queue()
+        self.ui_message_queue = queue.Queue()
         self.capture_thread = None
         self.check_timer = None
+        self.capture_manager = ChessCaptureManager(self.ui_message_queue)
 
         # 初始化状态
         self.is_running = False
         self.lines = ["", "", ""]
+        
     
     
     def on_engine_param_changed(self, param):
@@ -561,45 +557,52 @@ class MainWindow(QMainWindow):
         """开始/停止按钮事件"""
         if not self.is_running:
             self.is_running = True
-            self.sender().setText("停止")
+            self.start_btn.setText("停止")
             self.create_queue()
         else:
             self.on_stop()
             self.is_running = False
-            self.sender().setText("开始")
+            self.start_btn.setText("开始")
  
-    
     def on_stop(self):
         """停止事件"""
         self.close_queue()
-
         if context.engine:
             context.engine.stop()
             context.engine = None
         context.clear_checker() #清理局面检查器
         context.history.clear()  # 停止时清空历史
-        
+
     def create_queue(self):
         """创建队列和启动分析线程"""
         # 首先停止旧线程（如果有的话）  
         if self.capture_thread is not None and self.capture_thread.is_alive():  
             self.stop_event.set()  # 通知正在运行的线程停止  
             self.capture_thread.join()  # 等待线程结束  
-        self.stop_event.clear() 
-        
-        # 初始化局面检查器和历史记录
-        context.init_checker()
-        context.history = MoveHistory()
-        
-        #创建一个线程和队列,用于执行截图和返回引擎计算结果
-        self.result_queue = queue.Queue()  
-        self.capture_thread = threading.Thread(target=self.capture_func)  
+        if self.check_timer:
+            self.check_timer.stop()
+            self.check_timer = None
+        if self.capture_manager is not None:
+            self.capture_manager = None
+
+        # 创建 stop_event 和队列
+        self.stop_event = threading.Event()
+        self.ui_message_queue = queue.Queue()
+
+        # 关键：每次都new新的ChessCaptureManager，保证识别线程能重启
+        self.capture_manager = ChessCaptureManager(self.ui_message_queue)
+        # 创建截图线程
+        self.capture_thread = threading.Thread(target=self.capture_func)
         self.capture_thread.start()
-        # 创建一个定时器来定期检查队列  
+        # UI消息队列检查定时器
         self.check_timer = QTimer()
         self.check_timer.timeout.connect(self.check_queue)
         self.check_timer.start(100)
-    
+
+        # 初始化局面检查器和历史记录
+        context.init_checker()
+        context.history = MoveHistory()
+
     def capture_func(self):
         """截图和分析函数"""
         # 启动引擎
@@ -609,17 +612,24 @@ class MainWindow(QMainWindow):
                 context.engine.start()
             if not context.engine.is_initialized:
                 print("引擎启动失败")
-                self.result_queue.put(Message(MessageType.STATUS, "引擎启动失败"))
+                self.ui_message_queue.put(Message(MessageType.STATUS, "引擎启动失败"))
                 return
         except Exception as e:
             print(f"capture_func error: {e}")
 
-        capture_region(self.result_queue, self.stop_event)
+        # 使用已创建的ChessCaptureManager实例
+        self.capture_manager.capture_region(self.stop_event)
 
     def check_queue(self):
         """检查结果队列"""
-        if not self.result_queue.empty():
-            result = self.result_queue.get()
+        if not self.ui_message_queue.empty():
+            result = self.ui_message_queue.get()
+            # 自动检测识别线程超时停止信号
+            if result == ("STOP", None):
+                self.on_stop()
+                self.is_running = False
+                self.start_btn.setText("开始")
+                return
             if isinstance(result, Message):
                 if result.type == MessageType.CHANGE:
                     # 更新棋局变化
@@ -892,8 +902,8 @@ class MainWindow(QMainWindow):
         x = cursor_pos.x()
         y = cursor_pos.y()
         
-        # 使用get_position保存坐标
-        get_position(x, y)
+        # 使用已创建的ChessCaptureManager实例保存坐标
+        self.capture_manager.get_position(x, y)
         
         # 重置定位状态
         self.is_positioning = False
@@ -947,7 +957,7 @@ class MainWindow(QMainWindow):
 
     def on_manual_analyze(self):
         """手动触发识别"""
-        trigger_manual_recognition()
+        self.capture_manager.trigger_manual_recognition()
 
     def show_param_menu(self):
         """显示参数菜单"""

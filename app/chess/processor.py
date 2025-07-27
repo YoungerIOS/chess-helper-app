@@ -1,18 +1,31 @@
 from chess import recognizer
-from tools.utils import convert_array_to_fen, convert_move_to_chinese, convert_coords_to_move
-from chess.message import Message, MessageType
+from tools import utils
+from chess.message import Message, MessageType, MessageContent
 from chess.context import context
-import time
+from chess.checker import BoardStatus
 from pprint import pformat
 from typing import Tuple, Optional, Dict, Any, List
 from dataclasses import dataclass
+import threading, queue
+
 
 @dataclass
-class MoveResult:
-    move_text: Optional[Message] = None
-    move_code: Optional[Message] = None
+class ProcessResult:
+    board_array: Optional[list] = None
+    board_status: Optional[BoardStatus] = None
 
 class ChessProcess:
+
+    @classmethod
+    def from_context(cls, context):
+        """从全局上下文创建实例"""
+        return cls(
+            checker=context.checker,
+            engine=context.engine,
+            history=context.history,
+            context=context
+        )
+   
     def __init__(self, checker, engine, history, context):
         """
         初始化处理器
@@ -28,122 +41,129 @@ class ChessProcess:
         self.context = context
         self.use_startpos = False
 
-    def process_image(self, img_origin, callback=None) -> MoveResult:
+    def _process_image(self, img):
         """主流程入口，处理图像并返回相应消息"""
         # 1. 识别棋盘和棋子
-        piece_array = self._recognize_board_and_pieces(img_origin, callback)
-        if piece_array is None:
-            return MoveResult()
+        board = self._recognize_board_and_pieces(img)
+        if board is None:
+            return ProcessResult()
 
         # 2. 检查局面状态
-        result = self._check_board_status(piece_array)
+        status = self._check_board_status(board)
+        return ProcessResult(board_array=board, board_status=status)
+    
+    def _handle_result(self, turn, board_array, status, ui_message_queue):
+        def callback(msg):
+            ui_message_queue.put(msg)
         
         # 初始局
         self.use_startpos = True
         # 3. 根据不同状态分发处理
         # 新对局
-        if result.is_new_game:
+        if status.is_new_game:
             self._handle_new_game()
         # 红方开局
-        if result.is_red_start:
-            return self._handle_red_start(piece_array, result, callback)
+        if status.is_red_start:
+            return self._handle_red_start(board_array, status, callback, ui_message_queue)            
         # 黑方开局
-        if result.is_black_start:
-            return self._handle_black_start(piece_array, result, callback)
-        # 局面重复或不合法
-        if result.is_same_board or result.is_illegal:
-            return self._handle_invalid_board()
+        if status.is_black_start:
+            return self._handle_black_start(board_array, status, ui_message_queue)
+        # 局面重复
+        if status.is_same_board:
+            return self._handle_same_board()
+        # 局面不合法
+        if status.is_illegal:
+            return self._handle_illegal_board()
         # 己方走棋
-        if result.is_my_step:
-            return self._handle_my_move(piece_array, result, callback)
+        if status.is_my_step:
+            return self._handle_my_move(board_array, status, ui_message_queue)
         # 对方走棋
-        if result.is_opponent_step:
-            return self._handle_opponent_move(piece_array, result, callback)
+        if status.is_opponent_step:
+            return self._handle_opponent_move(board_array, status, callback, ui_message_queue)
         # 多步移动
-        if result.is_multi_step:
-            return self._handle_multi_step(piece_array, result, callback)
+        if status.is_multi_step:
+            return self._handle_multi_step(turn, board_array, status, callback, ui_message_queue)
 
-        return MoveResult()
-
-    def _recognize_board_and_pieces(self, img_origin, callback) -> Optional[list]:
+        return ProcessResult()
+        
+    def _recognize_board_and_pieces(self, img) -> Optional[list]:
         # 识别棋盘和棋子
         try:
-            x_array, y_array = recognizer.recognize_board(img_origin)
+            x_array, y_array = recognizer.recognize_board(img)
         except Exception as e:
             print(f"棋盘识别失败: {str(e)}")
             return None
 
         try:
-            pieces_array = recognizer.recognize_piece_from_grid(
-                img_origin, x_array, y_array, callback
-            )
+            board_array = recognizer.recognize_piece_from_grid(img, x_array, y_array)
+        except recognizer.RecognitionError as e:
+            print(f"棋子识别失败: {e}")
+            return None
         except Exception as e:
-            print(f"棋子识别失败: {str(e)}")
+            print(f"棋子识别发生未知错误: {e}")
             return None
 
-        if pieces_array is None:
-            time.sleep(0.2)
-            print("Debug - 动画遮挡或识别失败,延时0.2秒后继续截图循环")
-            return None
+        return board_array
 
-        return pieces_array
-
-    def _check_board_status(self, pieces_array):
+    def _check_board_status(self, board_array):
         # 检查棋盘状态
-        result = self.checker.check_board(pieces_array)
+        result = self.checker.check_board(board_array)
         print("Debug - 局面检查:\n" + pformat(result))
         return result
 
-    def _handle_red_start(self, pieces_array, result, callback):
+    def _handle_red_start(self, board_array, result, callback, ui_message_queue):
         # 处理红方开局
         self.use_startpos = True
         self.history.clear()
-        if callback:
-            callback(Message(
-                MessageType.CHANGE,
-                "红方开局",
-                array=pieces_array,
-                step_info=result.step_info
-            ))
+        ui_message_queue.put(Message(
+            MessageType.CHANGE,
+            "红方开局",
+            array=board_array,
+            step_info=result.step_info
+        ))
+            
         return self._get_engine_move(
-            '', None, pieces_array, result, callback
+            '', None, board_array, result, callback, ui_message_queue
         )
 
-    def _handle_black_start(self, pieces_array, result, callback):
+    def _handle_black_start(self, board_array, result, ui_message_queue):
         # 处理黑方开局
         self.use_startpos = True
         self.history.clear()
-        if callback:
-            callback(Message(
-                MessageType.CHANGE,
-                "黑方开局",
-                array=pieces_array,
-                step_info=result.step_info
-            ))
-        return MoveResult()
+        ui_message_queue.put(Message(
+            MessageType.CHANGE,
+            "黑方开局",
+            array=board_array,
+            step_info=result.step_info
+        ))
+        return ProcessResult()
 
     def _handle_new_game(self):
         # 处理新对局
         self.history.clear()
         print("Debug - 新对局或多步移动, 清空历史记录.")
 
-    def _handle_invalid_board(self):
-        # 处理无效棋盘
-        print("Debug - 局面重复或不合法, 继续截图循环.")
-        return MoveResult()
+    def _handle_same_board(self):
+        # 处理局面重复
+        print("Debug - 重复画面, 继续处理下一张.")
+        return ProcessResult()
 
-    def _handle_my_move(self, pieces_array, result, callback):
+    def _handle_illegal_board(self):
+        # 处理局面不合法
+        print("Debug - 非法局面, 继续处理下一张.")
+        return ProcessResult()
+
+    def _handle_my_move(self, board_array, result, ui_message_queue):
         # 处理己方走棋
-        if callback:
-            callback(Message(
-                MessageType.CHANGE,
-                "我方已走棋",
-                array=pieces_array,
-                step_info=result.step_info
-            ))
+        ui_message_queue.put(Message(
+            MessageType.CHANGE,
+            MessageContent.OPPONENT_TURN,
+            array=board_array,
+            step_info=result.step_info
+        ))
         
         # 记录我方走棋历史
-        move_str = convert_coords_to_move(
+        move_str = utils.convert_coords_to_move(
             result.step_info.get('from_pos'),
             result.step_info.get('to_pos'),
             self.checker.is_red
@@ -154,20 +174,19 @@ class ChessProcess:
         all_moves = self.history.add_and_get_all("", move_str, "", self.checker.is_red)
         print(f"Debug - 我方走棋后完整历史记录: {all_moves}")
         
-        return MoveResult()
+        return ProcessResult()
 
-    def _handle_opponent_move(self, pieces_array, result, callback):
+    def _handle_opponent_move(self, board_array, result, callback, ui_message_queue):
         # 处理对方走棋
-        if callback:
-            callback(Message(
-                MessageType.CHANGE,
-                "对方已走棋",
-                array=pieces_array,
-                step_info=result.step_info
-            ))
+        ui_message_queue.put(Message(
+            MessageType.CHANGE,
+            MessageContent.MY_TURN,
+            array=board_array,
+            step_info=result.step_info
+        ))
 
-        fen_str, board_array = convert_array_to_fen(pieces_array, self.checker.is_red)
-        move_str = convert_coords_to_move(
+        fen_str, board = utils.convert_array_to_fen(board_array, self.checker.is_red)
+        move_str = utils.convert_coords_to_move(
             result.step_info.get('from_pos'),
             result.step_info.get('to_pos'),
             self.checker.is_red
@@ -192,29 +211,32 @@ class ChessProcess:
         # 获取引擎着法
         print("Debug - 开始引擎分析...")
         return self._get_engine_move(
-            fen_str, all_moves, board_array, result, callback
+            fen_str, all_moves, board, result, callback, ui_message_queue
         )
 
-    def _handle_multi_step(self, pieces_array, result, callback):
+    def _handle_multi_step(self, turn, board_array, result, callback, ui_message_queue):
         # 更新棋子位置
-        if callback:
-            callback(Message(
-                MessageType.PIECES,
-                "更新棋子位置",
-                array=pieces_array
-            ))
+        ui_message_queue.put(Message(
+            MessageType.PIECES,
+            "更新棋子位置",
+            array=board_array
+        ))
 
         # 处理多步变化
         self.history.clear()
         self.use_startpos = False
-        fen_str, board_array = convert_array_to_fen(pieces_array, self.checker.is_red)
+        fen_str, board = utils.convert_array_to_fen(board_array, self.checker.is_red)
            
         # 获取引擎着法
-        return self._get_engine_move(
-            fen_str, None, board_array, result, callback
-        )
+        if turn is not None and turn == 'my_turn':
+            print("Debug - 多步移动, 己方走棋.")
+            return self._get_engine_move(
+                fen_str, None, board, result, callback, ui_message_queue
+            )
+        else:
+            return ProcessResult()
 
-    def _get_engine_move(self, fen_str, moves, board_array, check_result, callback) -> MoveResult:
+    def _get_engine_move(self, fen_str, moves, board_array, check_result, callback, ui_message_queue) -> ProcessResult:
         # 获取引擎着法
         try:
             move, fen = self.engine.get_bestmove(
@@ -227,25 +249,70 @@ class ChessProcess:
             )
             print(f"Debug - 引擎分析结果: move={move}, FEN={fen}")
             
-            chinese_move = convert_move_to_chinese(move, board_array, self.checker.is_red)
-            return MoveResult(
-                move_text=Message(MessageType.MOVE_TEXT, chinese_move),
-                move_code=Message(MessageType.MOVE_CODE, move, is_red=self.checker.is_red)
-            )
+            chinese_move = utils.convert_move_to_chinese(move, board_array, self.checker.is_red)
+            # 新增：推送到UI队列
+            ui_message_queue.put(Message(MessageType.MOVE_TEXT, chinese_move))
+            ui_message_queue.put(Message(MessageType.MOVE_CODE, move, is_red=self.checker.is_red))
+                
+            return ProcessResult()
             
         except Exception as e:
             print(f"引擎分析失败: {str(e)}")
-            return MoveResult(
-                move_text=Message(MessageType.STATUS, "引擎分析错误，请重试"),
-                move_code=Message(MessageType.CHANGE, "", fen_str=fen_str, is_red=self.checker.is_red)
-            )
+            ui_message_queue.put(Message(MessageType.STATUS, "引擎分析错误，请重试"))
+            ui_message_queue.put(Message(MessageType.CHANGE, "", fen_str=fen_str, is_red=self.checker.is_red))
+                
+            return ProcessResult()
 
-    @classmethod
-    def from_context(cls, context):
-        """从全局上下文创建实例"""
-        return cls(
-            checker=context.checker,
-            engine=context.engine,
-            history=context.history,
-            context=context
-        )
+def start_process_worker(process_queue, result_queue, ui_message_queue):
+    result_dict = {}
+    result_lock = threading.Lock()
+    result_ready = threading.Condition(result_lock)
+    next_seq_id = 0
+    NUM_WORKERS = 3
+
+    def process_worker():
+        while True:
+            try:
+                seq_id, current_turn, screenshot = process_queue.get(timeout=120)
+            except queue.Empty:
+                print(f"[process_worker] 120秒无识别任务，自动停止监控")
+                break
+            result = ChessProcess.from_context(context)._process_image(screenshot)
+            with result_lock:
+                result_dict[seq_id] = (current_turn, result)
+                result_ready.notify_all()
+            process_queue.task_done()
+
+    # 按顺序排列任务结果
+    def result_sort_worker():
+        nonlocal next_seq_id
+        while True:
+            with result_lock:
+                while next_seq_id not in result_dict:
+                    result_ready.wait()
+                current_turn, process_result = result_dict.pop(next_seq_id)
+                result_queue.put((current_turn, process_result))
+                next_seq_id += 1
+
+    # 处理结果
+    def result_handler_worker():
+        while True:
+            current_turn, process_result = result_queue.get()
+            if process_result and process_result.board_status is not None:
+                proc = ChessProcess.from_context(context)
+                proc._handle_result(
+                    current_turn,
+                    process_result.board_array,
+                    process_result.board_status,
+                    ui_message_queue 
+                )
+            result_queue.task_done()
+
+    for _ in range(NUM_WORKERS):
+        threading.Thread(target=process_worker, daemon=True).start()
+    threading.Thread(target=result_sort_worker, daemon=True).start()
+    threading.Thread(target=result_handler_worker, daemon=True).start()
+
+    
+
+

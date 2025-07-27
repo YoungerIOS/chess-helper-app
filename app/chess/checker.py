@@ -366,7 +366,7 @@ class PositionChecker:
                 is_my_step=is_my_step,
                 is_opponent_step=not is_my_step,
                 step_info=step_info,
-                message='单步合法的移动'
+                message='我方单步合法的移动' if is_my_step else '对方单步合法的移动'
             )
 
         # 多步移动，包含所有变化信息
@@ -419,7 +419,7 @@ class PositionChecker:
         if result.is_same_board:
             return result
         
-        # 3. 是否合法单步移动
+        # 3. 判断合法单步移动
         if result.is_my_step or result.is_opponent_step:
             self.last_board = [row[:] for row in current_board]
             # 用吃子信息更新数量变化
@@ -431,16 +431,16 @@ class PositionChecker:
         # 4. 过滤其他非法局面
         count_valid, count_msg, current_counts = self.check_pieces_count(current_board)
         if not count_valid:
-            return result
+            return BoardStatus(is_illegal=True, message=count_msg)
 
         position_valid, position_msg = self.check_pieces_position(current_board, self.is_red)
         if not position_valid:
-            return result
+            return BoardStatus(is_illegal=True, message=position_msg)
         
         # 5. 多步移动或残局，更新状态
         if result.is_multi_step:
             self.last_board = [row[:] for row in current_board]
-            self.last_counts = current_counts.copy()
+            # self.last_counts = current_counts.copy()
             result.is_new_game = True
             return result
         

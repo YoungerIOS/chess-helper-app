@@ -108,8 +108,8 @@ class BoardDisplay(QLabel):
             
             # 绘制起始位置的bullseye
             scaled_bullseye = self.bullseye_image.scaled(
-                int(cell_width * 0.5),
-                int(cell_height * 0.5),
+                int(cell_width * 0.45),
+                int(cell_height * 0.45),
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
