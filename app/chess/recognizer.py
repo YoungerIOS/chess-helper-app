@@ -2,399 +2,340 @@ import cv2
 import numpy as np
 import os
 from tools.utils import filter_vertical_lines, filter_horizontal_lines, resource_path
-from chess.context import context
-from chess.message import Message, MessageType, MessageContent
+from chess.context import context as global_context
 import uuid
 
-class RecognitionError(Exception):
-    pass
+class ChessRecognizer:
+    class RecognitionError(Exception):
+        pass
 
-def show_image(name, image):
-    # 显示结果  
-    cv2.imshow(name, image)  
-    cv2.waitKey(0)  
-    cv2.destroyAllWindows()
+    def __init__(self, context=None):
+        # 支持依赖注入，默认使用全局context
+        self.context = context or global_context
 
-def preprocess_image(img_origin):
-    # img = cv2.imread(img_path)  
-    img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
-    img_np = img_np[:, :, :3]  # 去掉 alpha 通道
-    if img_np is None:  
-        print("Error: npImage is None.")  
-        return  None, None 
-    new_width = 800  
-    scale_factor = new_width / img_np.shape[1]  # 注意使用宽度来计算缩放因子  
-    new_height = int(img_np.shape[0] * scale_factor)  
-    resized_img = cv2.resize(img_np, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
-    
-    # cv2.imwrite('./chess_assistant/app/uploads/图像.png', resized_img)
-    # print(f"图片宽高是:{img.shape[1]} x {img.shape[0]}")
-    # 灰度化  
-    gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) 
+    def preprocess_image(self, img_origin):
+        # img = cv2.imread(img_path)  
+        img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
+        img_np = img_np[:, :, :3]  # 去掉 alpha 通道
+        if img_np is None:  
+            print("Error: npImage is None.")  
+            return  None, None 
+        new_width = 800  
+        scale_factor = new_width / img_np.shape[1]  # 注意使用宽度来计算缩放因子  
+        new_height = int(img_np.shape[0] * scale_factor)  
+        resized_img = cv2.resize(img_np, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+        # cv2.imwrite('./chess_assistant/app/uploads/图像.png', resized_img)
+        # print(f"图片宽高是:{img.shape[1]} x {img.shape[0]}")
+        # 灰度化  
+        gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) 
+        return resized_img, gray
 
-    return resized_img, gray
+    # 获取本地棋盘数据
+    def get_board_data(self):
+        platform = self.context.get_platform(self.context.platform)
+        coords = getattr(platform, 'board_coords', {}) or {}
+        x_array = coords.get("x", [])
+        y_array = coords.get("y", [])
+        return x_array, y_array
 
-# 获取本地棋盘数据
-def get_board_data():
-    """从上下文获取当前平台的棋盘坐标"""
-    # 获取当前平台的坐标
-    platform = context.get_platform(context.platform)
-    x_array = platform.board_coords["x"]
-    y_array = platform.board_coords["y"]
-    
-    return x_array, y_array
+    # 识别棋盘
+    def recognize_board(self, img):
+        """识别棋盘并保存坐标到上下文"""
+        x_arr, y_arr = self.get_board_data()
+        if x_arr and y_arr:
+            return x_arr, y_arr
+        # 预处理
+        resized_img, gray = self.preprocess_image(img)
+        # 高斯模糊  
+        gaus = cv2.GaussianBlur(gray, (5, 5), 0)  
+        # 边缘检测  
+        edges = cv2.Canny(gaus, 20, 120, apertureSize=3)  
+        # 霍夫线变换  
+        lines = cv2.HoughLinesP(edges, 0.5, np.pi/180, threshold=80, minLineLength=100, maxLineGap=5)  
+        # 创建一张新图用于绘制检测到的线条
+        board_vis = resized_img.copy()
+        # 过滤线段并在新图上绘制
+        # 竖线 (x1 == x2)
+        x_array = []
+        vlines, yMin, yMax = filter_vertical_lines(lines, resized_img.shape[1])
+        for line in vlines:  
+            for x1, y1, x2, y2 in line:
+                cv2.line(board_vis, (x1, yMin), (x2, yMax), (0, 255, 0), 2)  # 绿色，加粗线条
+                x_array.append(int(x1))
+        # 横线 (y1 == y2)
+        y_array = []
+        hlines, xMin, xMax = filter_horizontal_lines(lines, resized_img.shape[1])
+        for line in hlines:  
+            for x1, y1, x2, y2 in line:  
+                cv2.line(board_vis, (xMin, y1), (xMax, y2), (0, 0, 255), 2)  # 红色，加粗线条
+                y_array.append(int(y1))
+        # 对坐标进行排序
+        x_array.sort()
+        y_array.sort()
+        # 使用IQR方法修复缺失的线条
+        def fix_missing_lines(coords, expected_count):
+            if len(coords) >= expected_count:
+                return coords
+            # 计算相邻坐标的间距
+            spacings = [coords[i+1] - coords[i] for i in range(len(coords)-1)]
+            # 计算四分位数
+            Q1 = np.percentile(spacings, 25)
+            Q3 = np.percentile(spacings, 75)
+            IQR = Q3 - Q1
+            # 计算上界
+            upper_bound = Q3 + 1.5 * IQR
+            # 找出异常大的间距
+            missing_positions = []
+            for i, spacing in enumerate(spacings):
+                if spacing > upper_bound:
+                    missing_positions.append(i)
+            # 在缺失位置插入新的坐标
+            new_coords = coords.copy()
+            for pos in sorted(missing_positions, reverse=True):
+                # 计算缺失坐标的值（使用相邻坐标的平均值）
+                missing_value = int((new_coords[pos] + new_coords[pos+1]) / 2)
+                new_coords.insert(pos+1, missing_value)
+            return new_coords
+        # 修复竖线（应该有9条）
+        x_array = fix_missing_lines(x_array, 9)
+        # 修复横线（应该有10条）
+        y_array = fix_missing_lines(y_array, 10)
+        # 在可视化图像上绘制修复后的线条
+        # 绘制修复后的竖线（使用蓝色）
+        for x in x_array:
+            if x not in [int(line[0][0]) for line in vlines]:  # 只绘制新修复的线条
+                cv2.line(board_vis, (x, yMin), (x, yMax), (255, 0, 0), 2)  # 蓝色，加粗线条
+        # 绘制修复后的横线（使用黄色）
+        for y in y_array:
+            if y not in [int(line[0][1]) for line in hlines]:  # 只绘制新修复的线条
+                cv2.line(board_vis, (xMin, y), (xMax, y), (0, 255, 255), 2)  # 黄色，加粗线条
+        # 保存可视化结果
+        output_dir = os.path.dirname(resource_path("images/board/board_visual.jpg"))
+        os.makedirs(output_dir, exist_ok=True)
+        cv2.imwrite(resource_path("images/board/board_visual.jpg"), board_vis)
+        # 更新当前平台的棋盘坐标
+        platform = self.context.get_platform(self.context.platform)
+        platform.board_coords = {
+            "x": x_array,
+            "y": y_array
+        }
+        # 保存到文件
+        self.context.save_config()
+        return x_array, y_array
 
-# 识别棋盘
-def recognize_board(img):
-    """识别棋盘并保存坐标到上下文"""
-    x_arr, y_arr = get_board_data()
-    if x_arr and y_arr:
-        return x_arr, y_arr
-    
-    # 预处理
-    resized_img, gray = preprocess_image(img)
-    
-    # 高斯模糊  
-    gaus = cv2.GaussianBlur(gray, (5, 5), 0)  
-    # 边缘检测  
-    edges = cv2.Canny(gaus, 20, 120, apertureSize=3)  
-    
-    # 霍夫线变换  
-    lines = cv2.HoughLinesP(edges, 0.5, np.pi/180, threshold=80, minLineLength=100, maxLineGap=5)  
-    
-    # 创建一张新图用于绘制检测到的线条
-    board_vis = resized_img.copy()
-    
-    # 过滤线段并在新图上绘制
-    # 竖线 (x1 == x2)
-    x_array = []
-    vlines, yMin, yMax = filter_vertical_lines(lines, resized_img.shape[1])
-    for line in vlines:  
-        for x1, y1, x2, y2 in line:
-            cv2.line(board_vis, (x1, yMin), (x2, yMax), (0, 255, 0), 2)  # 绿色，加粗线条
-            x_array.append(int(x1))
+    # 识别棋子
+    def recognize_piece_from_circle(self, img, x_array, y_array):
+        """
+        识别棋子并确定其位置和类型
+        Args:
+            img: 原始图像
+            x_array: 棋盘横线坐标数组
+            y_array: 棋盘纵线坐标数组
+        Returns:
+            pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
+            is_red: 是否为红方
+        """
+        # 预处理
+        resized_img, gray = self.preprocess_image(img)
+        width = resized_img.shape[1]
+        maxRadius = int(width/9/2)  # 棋盘宽度除以9（横向最多9个棋子，再除2就是半径）
+        minRadius = int(0.8 * width/9/2)
+        minDist = int(0.8 * width/9)  # 棋子与棋子间距，最小就是2个半径
+        # 检测圆形
+        circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, minDist, 
+                                  param1=50, param2=30, 
+                                  minRadius=minRadius, maxRadius=maxRadius)
+        if circles is not None:
+            circles = np.round(circles[0, :]).astype("int")
+            # 识别黑将并获取计算好坐标的棋盘数组
+            pieceArray, is_red = self.recognize_black_king(circles, resized_img, x_array, y_array)
+            print(f"\n当前方为{'红方' if is_red else '黑方'}")
+            # 识别所有棋子
+            for i in range(len(pieceArray)):
+                for j in range(len(pieceArray[0])):
+                    if pieceArray[i][j] == '-':
+                        continue
+                    x, y, r = pieceArray[i][j]
+                    piece_img = self.get_piece_image(resized_img, x, y, r)
+                    piece_type, confidence = self.recognize_piece_type(piece_img)
+                    # print(f"位置({j}, {i}) 识别为 {piece_type}")
+                    if piece_type:
+                        pieceArray[i][j] = piece_type
+                    else:
+                        pieceArray[i][j] = '-'
+        else:
+            pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+        return pieceArray
 
-    # 横线 (y1 == y2)
-    y_array = []
-    hlines, xMin, xMax = filter_horizontal_lines(lines, resized_img.shape[1])
-    for line in hlines:  
-        for x1, y1, x2, y2 in line:  
-            cv2.line(board_vis, (xMin, y1), (xMax, y2), (0, 0, 255), 2)  # 红色，加粗线条
-            y_array.append(int(y1))
-    
-    # 对坐标进行排序
-    x_array.sort()
-    y_array.sort()
-    
-    # 使用IQR方法修复缺失的线条
-    def fix_missing_lines(coords, expected_count):
-        if len(coords) >= expected_count:
-            return coords
-            
-        # 计算相邻坐标的间距
-        spacings = [coords[i+1] - coords[i] for i in range(len(coords)-1)]
-        
-        # 计算四分位数
-        Q1 = np.percentile(spacings, 25)
-        Q3 = np.percentile(spacings, 75)
-        IQR = Q3 - Q1
-        
-        # 计算上界
-        upper_bound = Q3 + 1.5 * IQR
-        
-        # 找出异常大的间距
-        missing_positions = []
-        for i, spacing in enumerate(spacings):
-            if spacing > upper_bound:
-                missing_positions.append(i)
-        
-        # 在缺失位置插入新的坐标
-        new_coords = coords.copy()
-        for pos in sorted(missing_positions, reverse=True):
-            # 计算缺失坐标的值（使用相邻坐标的平均值）
-            missing_value = int((new_coords[pos] + new_coords[pos+1]) / 2)
-            new_coords.insert(pos+1, missing_value)
-            
-        return new_coords
-    
-    # 修复竖线（应该有9条）
-    x_array = fix_missing_lines(x_array, 9)
-    
-    # 修复横线（应该有10条）
-    y_array = fix_missing_lines(y_array, 10)
-    
-    # 在可视化图像上绘制修复后的线条
-    # 绘制修复后的竖线（使用蓝色）
-    for x in x_array:
-        if x not in [int(line[0][0]) for line in vlines]:  # 只绘制新修复的线条
-            cv2.line(board_vis, (x, yMin), (x, yMax), (255, 0, 0), 2)  # 蓝色，加粗线条
-    
-    # 绘制修复后的横线（使用黄色）
-    for y in y_array:
-        if y not in [int(line[0][1]) for line in hlines]:  # 只绘制新修复的线条
-            cv2.line(board_vis, (xMin, y), (xMax, y), (0, 255, 255), 2)  # 黄色，加粗线条
-    
-    # 保存可视化结果
-    output_dir = os.path.dirname(resource_path("images/board/board_visual.jpg"))
-    os.makedirs(output_dir, exist_ok=True)
-    cv2.imwrite(resource_path("images/board/board_visual.jpg"), board_vis)
+    def recognize_piece_from_grid(self, img, x_array, y_array):
+        """
+        切割棋盘格点识别棋子，返回9x10棋盘数组和红黑方
+        Args:
+            img: 原始图像
+            x_array: 棋盘横线坐标数组
+            y_array: 棋盘纵线坐标数组
+        Returns:
+            pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
+        """
+        # 预处理
+        resized_img, _ = self.preprocess_image(img)
+        pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+        # 遍历棋盘格点，切割并识别棋子
+        for i in range(len(y_array)):
+            for j in range(len(x_array)):
+                center_x = x_array[j]
+                center_y = y_array[i]
+                # 计算当前位置的切割半径
+                if j == 0:
+                    x_radius = (x_array[j+1] - x_array[j]) // 2
+                elif j == len(x_array)-1:
+                    x_radius = (x_array[j] - x_array[j-1]) // 2
+                else:
+                    x_radius = min((x_array[j] - x_array[j-1]) // 2, (x_array[j+1] - x_array[j]) // 2)
+                if i == 0:
+                    y_radius = (y_array[i+1] - y_array[i]) // 2
+                elif i == len(y_array)-1:
+                    y_radius = (y_array[i] - y_array[i-1]) // 2
+                else:
+                    y_radius = min((y_array[i] - y_array[i-1]) // 2, (y_array[i+1] - y_array[i]) // 2)
+                cut_radius = int(min(x_radius, y_radius) * 0.9)
+                vertical_offset = int(cut_radius * 0.06)
+                x1 = max(0, center_x - cut_radius)
+                y1 = max(0, center_y - cut_radius - vertical_offset)
+                x2 = min(resized_img.shape[1]-1, center_x + cut_radius)
+                y2 = min(resized_img.shape[0]-1, center_y + cut_radius - vertical_offset)
+                piece_img = resized_img[y1:y2, x1:x2]
+                # 识别棋子类型
+                piece_type, confidence = self.recognize_piece_type(piece_img)
+                if piece_type and confidence > 0.7:  # 降低置信度阈值
+                    if piece_type == 'covered':
+                        raise self.RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
+                    pieceArray[i][j] = piece_type
+                else:
+                    raise self.RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
+        return pieceArray
 
-    # 更新当前平台的棋盘坐标
-    platform = context.get_platform(context.platform)
-    platform.board_coords = {
-        "x": x_array,
-        "y": y_array
-    }
-    
-    # 保存到文件
-    context.save_board_coords()
-    
-    return x_array, y_array
+    # 计算棋子坐标
+    def get_piece_position(self, point, x_array, y_array):
+        """
+        根据像素坐标计算棋盘格点坐标
+        Args:
+            point: 棋子中心坐标
+            x_array: 棋盘横线坐标数组
+            y_array: 棋盘纵线坐标数组
+        Returns:
+            (board_x, board_y): 棋盘格点坐标
+        """
+        distances = [abs(point[0] - x) for x in x_array]
+        board_x = distances.index(min(distances))
+        distances = [abs(point[1] - y) for y in y_array]
+        board_y = distances.index(min(distances))
+        return board_x, board_y
 
-# 识别棋子
-def recognize_piece_from_circle(img, x_array, y_array, callback=None):
-    """
-    识别棋子并确定其位置和类型
-    Args:
-        img: 原始图像
-        x_array: 棋盘横线坐标数组
-        y_array: 棋盘纵线坐标数组
-        callback: 回调函数，用于发送消息
-    Returns:
-        pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
-        is_red: 是否为红方
-    """
-    # 预处理
-    resized_img, gray = preprocess_image(img)
-    
-    width = resized_img.shape[1]
-    maxRadius = int(width/9/2)  # 棋盘宽度除以9（横向最多9个棋子，再除2就是半径）
-    minRadius = int(0.8 * width/9/2)
-    minDist = int(0.8 * width/9)  # 棋子与棋子间距，最小就是2个半径
-    
-    # 检测圆形
-    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, minDist, 
-                              param1=50, param2=30, 
-                              minRadius=minRadius, maxRadius=maxRadius)
-    if circles is not None:
-        circles = np.round(circles[0, :]).astype("int")
-        
-        # 识别黑将并获取计算好坐标的棋盘数组
-        pieceArray, is_red = recognize_black_king(circles, resized_img, x_array, y_array, callback)
-        print(f"\n当前方为{'红方' if is_red else '黑方'}")
-        
-        # 识别所有棋子
-        for i in range(len(pieceArray)):
-            for j in range(len(pieceArray[0])):
+    # 圆形轮廓转棋子图片
+    def get_piece_image(self, img, x, y, r):
+        """
+        根据圆心和半径获取棋子图像
+        Args:
+            img: 原始图像
+            x: 圆心x坐标
+            y: 圆心y坐标
+            r: 半径
+        Returns:
+            piece_img: 棋子图像
+        """
+        x1, y1, x2, y2 = x - r, y - r, x + r, y + r
+        if x1 < 0: x1 = 0
+        if y1 < 0: y1 = 0
+        if x2 >= img.shape[1]: x2 = img.shape[1] - 1
+        if y2 >= img.shape[0]: y2 = img.shape[0] - 1
+        return img[y1:y2+1, x1:x2+1]
+
+    # 计算棋子9x10坐标,单独识别将
+    def recognize_black_king(self, circles, img, x_array, y_array):
+        # 初始化棋盘数组和is_red
+        pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+        is_red = False  # 默认值设为False
+        # 计算所有棋子的棋盘坐标
+        for x, y, r in circles:
+            board_x, board_y = self.get_piece_position((x, y), x_array, y_array)
+            # 存储棋子的原始信息到对应位置
+            pieceArray[board_y][board_x] = (x, y, r)
+        # 在上下两个九宫格内寻找黑将
+        upper_palace_king = None  # 上方九宫格黑将位置
+        lower_palace_king = None  # 下方九宫格黑将位置
+        # 检查上方九宫格
+        for i in range(3):  # 上方九宫格是前3行
+            for j in range(3, 6):  # 上方九宫格是中间3列
                 if pieceArray[i][j] == '-':
                     continue
                 x, y, r = pieceArray[i][j]
-                piece_img = get_piece_image(resized_img, x, y, r)
-
-                piece_type, confidence = recognize_piece_type(piece_img)
-                # print(f"位置({j}, {i}) 识别为 {piece_type}")
-                if piece_type:
-                    pieceArray[i][j] = piece_type
-                else:
-                    pieceArray[i][j] = '-'
-
-    else:
-        pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-    return pieceArray
-
-def recognize_piece_from_grid(img, x_array, y_array):
-    """
-    切割棋盘格点识别棋子，返回9x10棋盘数组和红黑方
-    Args:
-        img: 原始图像
-        x_array: 棋盘横线坐标数组
-        y_array: 棋盘纵线坐标数组
-        callback: 回调函数，用于发送消息
-    Returns:
-        pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
-    """
-    # 预处理
-    resized_img, _ = preprocess_image(img)
-    pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-    
-    # 遍历棋盘格点，切割并识别棋子
-    for i in range(len(y_array)):
-        for j in range(len(x_array)):
-            center_x = x_array[j]
-            center_y = y_array[i]
-            # 计算当前位置的切割半径
-            if j == 0:
-                x_radius = (x_array[j+1] - x_array[j]) // 2
-            elif j == len(x_array)-1:
-                x_radius = (x_array[j] - x_array[j-1]) // 2
-            else:
-                x_radius = min((x_array[j] - x_array[j-1]) // 2, (x_array[j+1] - x_array[j]) // 2)
-            if i == 0:
-                y_radius = (y_array[i+1] - y_array[i]) // 2
-            elif i == len(y_array)-1:
-                y_radius = (y_array[i] - y_array[i-1]) // 2
-            else:
-                y_radius = min((y_array[i] - y_array[i-1]) // 2, (y_array[i+1] - y_array[i]) // 2)
-            cut_radius = int(min(x_radius, y_radius) * 0.9)
-            vertical_offset = int(cut_radius * 0.06)
-            x1 = max(0, center_x - cut_radius)
-            y1 = max(0, center_y - cut_radius - vertical_offset)
-            x2 = min(resized_img.shape[1]-1, center_x + cut_radius)
-            y2 = min(resized_img.shape[0]-1, center_y + cut_radius - vertical_offset)
-            piece_img = resized_img[y1:y2, x1:x2]
-            
-            # 识别棋子类型
-            piece_type, confidence = recognize_piece_type(piece_img)
-            if piece_type and confidence > 0.9:
-                if piece_type == 'covered':
-                    raise RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
-                pieceArray[i][j] = piece_type
-            else:
-                raise RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
-    
-    return pieceArray
-
-# 计算棋子坐标
-def get_piece_position(point, x_array, y_array):
-    """
-    根据像素坐标计算棋盘格点坐标
-    Args:
-        point: 棋子中心坐标
-        x_array: 棋盘横线坐标数组
-        y_array: 棋盘纵线坐标数组
-    Returns:
-        (board_x, board_y): 棋盘格点坐标
-    """
-    distances = [abs(point[0] - x) for x in x_array]
-    board_x = distances.index(min(distances))
-    distances = [abs(point[1] - y) for y in y_array]
-    board_y = distances.index(min(distances))
-    return board_x, board_y
-
-# 圆形轮廓转棋子图片
-def get_piece_image(img, x, y, r):
-    """
-    根据圆心和半径获取棋子图像
-    Args:
-        img: 原始图像
-        x: 圆心x坐标
-        y: 圆心y坐标
-        r: 半径
-    Returns:
-        piece_img: 棋子图像
-    """
-    x1, y1, x2, y2 = x - r, y - r, x + r, y + r
-    if x1 < 0: x1 = 0
-    if y1 < 0: y1 = 0
-    if x2 >= img.shape[1]: x2 = img.shape[1] - 1
-    if y2 >= img.shape[0]: y2 = img.shape[0] - 1
-    return img[y1:y2+1, x1:x2+1]
-
-# 计算棋子9x10坐标,单独识别将
-def recognize_black_king(circles, img, x_array, y_array, callback=None):
-
-    # 初始化棋盘数组和is_red
-    pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-    is_red = False  # 默认值设为False
-    
-    # 计算所有棋子的棋盘坐标
-    for x, y, r in circles:
-        board_x, board_y = get_piece_position((x, y), x_array, y_array)
-        # 存储棋子的原始信息到对应位置
-        pieceArray[board_y][board_x] = (x, y, r)
-    
-    # 在上下两个九宫格内寻找黑将
-    upper_palace_king = None  # 上方九宫格黑将位置
-    lower_palace_king = None  # 下方九宫格黑将位置
-
-    # 检查上方九宫格
-    for i in range(3):  # 上方九宫格是前3行
-        for j in range(3, 6):  # 上方九宫格是中间3列
-            if pieceArray[i][j] == '-':
-                continue
-            x, y, r = pieceArray[i][j]
-            piece_img = get_piece_image(img, x, y, r)
-            
-            # 使用recognize_piece_type识别棋子类型
-            piece_type = recognize_piece_type(piece_img)
-            if piece_type is None:
-                print(f"无法识别棋子: {piece_img}")
-                continue
-            
-            if piece_type == 'k':  # 如果是黑将
-                upper_palace_king = (j, i)
+                piece_img = self.get_piece_image(img, x, y, r)
+                # 使用recognize_piece_type识别棋子类型
+                piece_type = self.recognize_piece_type(piece_img)
+                if piece_type is None:
+                    print(f"无法识别棋子: {piece_img}")
+                    continue
+                if piece_type == 'k':  # 如果是黑将
+                    upper_palace_king = (j, i)
+                    break
+            if upper_palace_king:
                 break
+        # 检查下方九宫格
+        for i in range(7, 10):  # 下方九宫格是后3行
+            for j in range(3, 6):  # 下方九宫格是中间3列
+                if pieceArray[i][j] == '-':
+                    continue
+                x, y, r = pieceArray[i][j]
+                piece_img = self.get_piece_image(img, x, y, r)
+                # 使用recognize_piece_type识别棋子类型
+                piece_type = self.recognize_piece_type(piece_img)
+                if piece_type is None:
+                    print(f"无法识别棋子: {piece_img}")
+                    continue
+                if piece_type == 'k':  # 如果是黑将
+                    lower_palace_king = (j, i)
+                    break
+            if lower_palace_king:
+                break
+        # 根据黑将位置判断红黑方
+        # 如果上方九宫格有黑将，说明红方在下方
+        # 如果下方九宫格有黑将，说明红方在上方
         if upper_palace_king:
-            break
-    
-    # 检查下方九宫格
-    for i in range(7, 10):  # 下方九宫格是后3行
-        for j in range(3, 6):  # 下方九宫格是中间3列
-            if pieceArray[i][j] == '-':
-                continue
-            x, y, r = pieceArray[i][j]
-            piece_img = get_piece_image(img, x, y, r)
-            
-            # 使用recognize_piece_type识别棋子类型
-            piece_type = recognize_piece_type(piece_img)
-            if piece_type is None:
-                print(f"无法识别棋子: {piece_img}")
-                continue
-            
-            if piece_type == 'k':  # 如果是黑将
-                lower_palace_king = (j, i)
-                break
-        if lower_palace_king:
-            break
-    
-    # 根据黑将位置判断红黑方
-    # 如果上方九宫格有黑将，说明红方在下方
-    # 如果下方九宫格有黑将，说明红方在上方
-    if upper_palace_king:
-        is_red = True  # 红方在下方
-        # print(f"检测到黑将在上方九宫格，位置: {upper_palace_king}")
-    elif lower_palace_king:
-        is_red = False  # 红方在上方
-        # print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
-    else:
-        # 如果两个九宫格都没有找到黑将，通过回调通知
-        if callback:
-            callback(Message(MessageType.STATUS, "未检测到黑将位置"))
-        is_red = False  # 设置默认值
-    
-    return pieceArray, is_red
+            is_red = True  # 红方在下方
+            # print(f"检测到黑将在上方九宫格，位置: {upper_palace_king}")
+        elif lower_palace_king:
+            is_red = False  # 红方在上方
+            # print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
+        else:
+            is_red = False  # 设置默认值
+        return pieceArray, is_red
 
-
-def recognize_piece_type(piece_img):
-    """
-    识别棋子类型
-    :param piece_img: 棋子图片
-    :return: 棋子类型, 置信度或None
-    """
-    # 保存唯一临时图片
-    temp_path = f"temp_piece_{uuid.uuid4().hex}.jpg"
-    cv2.imwrite(temp_path, piece_img)
-    
-    # 使用模型识别
-    result = context.piece_recognizer.recognize(temp_path)
-    if result is None:
-        print(f"无法识别棋子: {temp_path}")
+    def recognize_piece_type(self, piece_img):
+        """
+        识别棋子类型
+        :param piece_img: 棋子图片
+        :return: 棋子类型, 置信度或None
+        """
+        # 保存唯一临时图片
+        temp_path = f"temp_piece_{uuid.uuid4().hex}.jpg"
+        cv2.imwrite(temp_path, piece_img)
+        # 使用模型识别
+        result = self.context.piece_recognizer.recognize(temp_path)
+        if result is None:
+            print(f"无法识别棋子: {temp_path}")
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+            return None
+        # 使用识别结果
+        piece_type = result['class_name']
+        confidence = result['confidence']
         # 删除临时文件
         try:
             os.remove(temp_path)
         except Exception:
             pass
-        return None
-    
-    # 使用识别结果
-    piece_type = result['class_name']
-    confidence = result['confidence']
-    
-    # 删除临时文件
-    try:
-        os.remove(temp_path)
-    except Exception:
-        pass
-    
-    return piece_type, confidence
+        return piece_type, confidence
 

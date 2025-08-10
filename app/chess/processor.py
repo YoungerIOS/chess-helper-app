@@ -1,8 +1,8 @@
-from chess import recognizer
-from tools import utils
+from chess.recognizer import ChessRecognizer
 from chess.message import Message, MessageType, MessageContent
 from chess.context import context
 from chess.checker import BoardStatus
+from tools import utils
 from pprint import pformat
 from typing import Tuple, Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -40,6 +40,7 @@ class ChessProcess:
         self.history = history
         self.context = context
         self.use_startpos = False
+        self.recognizer = ChessRecognizer(self.context)
 
     def _process_image(self, img):
         """主流程入口，处理图像并返回相应消息"""
@@ -49,13 +50,15 @@ class ChessProcess:
             return ProcessResult()
 
         # 2. 检查局面状态
-        status = self._check_board_status(board)
+        status = self.checker.check_board(board)
+        print("Debug - 局面检查:\n" + pformat(status))
+        
         return ProcessResult(board_array=board, board_status=status)
     
-    def _handle_result(self, turn, board_array, status, ui_message_queue):
+    def _handle_status(self, turn, board_array, status, ui_message_queue):
         def callback(msg):
             ui_message_queue.put(msg)
-        
+        print(f"Debug - 当前轮次: {turn}")
         # 初始局
         self.use_startpos = True
         # 3. 根据不同状态分发处理
@@ -73,7 +76,7 @@ class ChessProcess:
             return self._handle_same_board()
         # 局面不合法
         if status.is_illegal:
-            return self._handle_illegal_board()
+            return self._handle_illegal_board(status)
         # 己方走棋
         if status.is_my_step:
             return self._handle_my_move(board_array, status, ui_message_queue)
@@ -89,14 +92,14 @@ class ChessProcess:
     def _recognize_board_and_pieces(self, img) -> Optional[list]:
         # 识别棋盘和棋子
         try:
-            x_array, y_array = recognizer.recognize_board(img)
+            x_array, y_array = self.recognizer.recognize_board(img)
         except Exception as e:
             print(f"棋盘识别失败: {str(e)}")
             return None
 
         try:
-            board_array = recognizer.recognize_piece_from_grid(img, x_array, y_array)
-        except recognizer.RecognitionError as e:
+            board_array = self.recognizer.recognize_piece_from_grid(img, x_array, y_array)
+        except self.recognizer.RecognitionError as e:
             print(f"棋子识别失败: {e}")
             return None
         except Exception as e:
@@ -104,12 +107,6 @@ class ChessProcess:
             return None
 
         return board_array
-
-    def _check_board_status(self, board_array):
-        # 检查棋盘状态
-        result = self.checker.check_board(board_array)
-        print("Debug - 局面检查:\n" + pformat(result))
-        return result
 
     def _handle_red_start(self, board_array, result, callback, ui_message_queue):
         # 处理红方开局
@@ -148,9 +145,18 @@ class ChessProcess:
         print("Debug - 重复画面, 继续处理下一张.")
         return ProcessResult()
 
-    def _handle_illegal_board(self):
+    def _handle_illegal_board(self, status):
         # 处理局面不合法
         print("Debug - 非法局面, 继续处理下一张.")
+        
+        # 将/帅数量错误时先去重新定位棋盘
+        if status is not None:
+            message = status.message
+            if "非法将帅数量" in message:
+                self.context.send_message("relocate_board", True)
+            else:
+                print("其他类型非法局面")
+        
         return ProcessResult()
 
     def _handle_my_move(self, board_array, result, ui_message_queue):
@@ -263,44 +269,56 @@ class ChessProcess:
                 
             return ProcessResult()
 
-def start_process_worker(process_queue, result_queue, ui_message_queue):
+def start_process_worker(process_queue, result_queue, ui_message_queue, stop_event=None):
     result_dict = {}
     result_lock = threading.Lock()
     result_ready = threading.Condition(result_lock)
-    next_seq_id = 0
-    NUM_WORKERS = 3
+    NUM_WORKERS = 2
 
     def process_worker():
         while True:
+            if stop_event and stop_event.is_set():
+                break
             try:
-                seq_id, current_turn, screenshot = process_queue.get(timeout=120)
+                item = process_queue.get(timeout=120)
+                if item == "STOP":
+                    break
+                capture_time, current_turn, screenshot = item
             except queue.Empty:
                 print(f"[process_worker] 120秒无识别任务，自动停止监控")
+                ui_message_queue.put("STOP")
                 break
             result = ChessProcess.from_context(context)._process_image(screenshot)
             with result_lock:
-                result_dict[seq_id] = (current_turn, result)
+                result_dict[capture_time] = (current_turn, result)
                 result_ready.notify_all()
             process_queue.task_done()
 
-    # 按顺序排列任务结果
     def result_sort_worker():
-        nonlocal next_seq_id
         while True:
+            if stop_event and stop_event.is_set():
+                break
             with result_lock:
-                while next_seq_id not in result_dict:
+                if not result_dict:
                     result_ready.wait()
-                current_turn, process_result = result_dict.pop(next_seq_id)
+                    if stop_event and stop_event.is_set():
+                        return
+                # 按时间戳排序，处理最早的结果
+                earliest_time = min(result_dict.keys())
+                current_turn, process_result = result_dict.pop(earliest_time)
                 result_queue.put((current_turn, process_result))
-                next_seq_id += 1
 
-    # 处理结果
     def result_handler_worker():
         while True:
-            current_turn, process_result = result_queue.get()
+            if stop_event and stop_event.is_set():
+                break
+            item = result_queue.get()
+            if item == "STOP":
+                break
+            current_turn, process_result = item
             if process_result and process_result.board_status is not None:
                 proc = ChessProcess.from_context(context)
-                proc._handle_result(
+                proc._handle_status(
                     current_turn,
                     process_result.board_array,
                     process_result.board_status,
@@ -308,10 +326,19 @@ def start_process_worker(process_queue, result_queue, ui_message_queue):
                 )
             result_queue.task_done()
 
-    for _ in range(NUM_WORKERS):
-        threading.Thread(target=process_worker, daemon=True).start()
-    threading.Thread(target=result_sort_worker, daemon=True).start()
-    threading.Thread(target=result_handler_worker, daemon=True).start()
+    threads = []
+    for _ in range(NUM_WORKERS): 
+        t = threading.Thread(target=process_worker, daemon=True) # 2个线程,负责识别与检查
+        t.start()
+        threads.append(t)
+    t = threading.Thread(target=result_sort_worker, daemon=True) # 1个线程,负责排序
+    t.start()
+    threads.append(t)
+    t = threading.Thread(target=result_handler_worker, daemon=True) # 1个线程,负责处理结果
+    t.start()
+    threads.append(t)
+
+    return threads
 
     
 

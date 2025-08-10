@@ -119,7 +119,7 @@ class PositionChecker:
                     counts[piece] = counts.get(piece, 0) + 1
         
         if self.last_counts is None:
-            return True, "初始局面", counts
+            return True, "重置局面", counts
         
         if counts.get('k', 0) != 1 or counts.get('K', 0) != 1:
             return False, f"非法将帅数量: 检测到{counts.get('k', 0)}个将,{counts.get('K', 0)}个帅", counts

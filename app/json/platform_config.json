@@ -27,20 +27,20 @@
         },
         "regions": {
             "board": {
-                "left": 1002,
-                "top": 254,
+                "left": 531.0,
+                "top": 246.6,
                 "width": 375,
                 "height": 415
             },
             "avatar_upper": {
-                "left": 997,
-                "top": 119,
+                "left": 526.0,
+                "top": 111.6,
                 "width": 72,
                 "height": 72
             },
             "avatar_lower": {
-                "left": 1310,
-                "top": 732,
+                "left": 839.0,
+                "top": 724.6,
                 "width": 72,
                 "height": 72
             }
@@ -74,20 +74,20 @@
         },
         "regions": {
             "board": {
-                "left": 1026,
-                "top": 240,
+                "left": 471.0,
+                "top": 229.0,
                 "width": 375,
                 "height": 415
             },
             "avatar_upper": {
-                "left": 1026,
-                "top": 109,
+                "left": 471.0,
+                "top": 99.0,
                 "width": 72,
                 "height": 72
             },
             "avatar_lower": {
-                "left": 1332,
-                "top": 699,
+                "left": 779.0,
+                "top": 692.0,
                 "width": 72,
                 "height": 72
             }

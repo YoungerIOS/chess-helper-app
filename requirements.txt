@@ -47,6 +47,13 @@ pyobjc-framework-CoreText==11.0
 pyobjc-framework-Quartz==11.0
 rubicon-objc==0.5.0
 
+# 跨平台窗口检测依赖
+# Windows: pywin32 (需要安装)
+pywin32>=300; sys_platform == "win32"
+
+# OCR相关 (可选)
+pytesseract>=0.3.8
+
 # 仅如有需要再加
 # playwright==1.42.0
 # mitmproxy==11.0.2

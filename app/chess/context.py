@@ -31,8 +31,8 @@ class Platform:
     def timer_recognizer(self) -> object:
         """获取倒计时识别器"""
         if self._timer_recognizer is None:
-            from chess.timer_recognizer import CountdownPredictor
-            self._timer_recognizer = CountdownPredictor(platform=self.name)
+            from chess.timer_recognizer import ChessTimerPredictor
+            self._timer_recognizer = ChessTimerPredictor(platform=self.name)
         return self._timer_recognizer
 
 @dataclass
@@ -222,6 +222,23 @@ class ChessContext:
     def clear_checker(self):
         """清理局面检查器"""
         self.checker = None
+
+    def send_message(self, message_type, data=None):
+        """发送消息"""
+        from chess.message import message_manager
+        message_manager.send_message(message_type, data)
+    
+    def subscribe(self, message_type, callback):
+        """订阅消息"""
+        from chess.message import message_manager
+        message_manager.subscribe(message_type, callback)
+    
+    def unsubscribe(self, message_type, callback):
+        """取消订阅"""
+        from chess.message import message_manager
+        message_manager.unsubscribe(message_type, callback)
+    
+
 
 # 创建全局上下文实例
 context = ChessContext(platform="TT")  # 默认使用TT平台 

@@ -8,7 +8,7 @@ import os
 import glob
 from tools.utils import resource_path
 
-class CountdownPredictor:
+class ChessTimerPredictor:
     def __init__(self, platform="TT"):
         """初始化预测器
         
@@ -111,7 +111,7 @@ if __name__ == '__main__':
         print(f"{'='*60}")
         
     # 创建预测器实例
-        predictor = CountdownPredictor(platform=platform)
+        predictor = ChessTimerPredictor(platform=platform)
     
         # 根据平台选择测试目录
         if platform == "TT":
