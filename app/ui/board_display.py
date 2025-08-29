@@ -1,5 +1,6 @@
 import os
 from PySide6.QtWidgets import QLabel
+from chess.context import context
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF, QTransform, QPainterPath
 from PySide6.QtCore import Qt, QRect, QPointF, QTimer
 import math
@@ -15,8 +16,23 @@ class BoardDisplay(QLabel):
         self.is_black_bottom = True  # 黑方是否在下方
         self.move_arrow = None  # 存储当前着法的箭头信息 (start_x, start_y, end_x, end_y)
         
+        # 底图边框相对于单格的比例（左右与上下可能不同）；根据素材实测值
+        self.border_ratio_x = 0.6  # 左/右边框厚度 = 0.6 * 单格宽
+        self.border_ratio_y = 0.5   # 上/下边框厚度 = 0.5 * 单格高
+        
+        # 棋盘底图选项
+        self.board_options = [
+            os.path.join('app', 'images', 'media', 'chessboard1.png'),
+            os.path.join('app', 'images', 'media', 'chessboard2.png'),
+            os.path.join('app', 'images', 'media', 'chessboard3.png'),
+            os.path.join('app', 'images', 'media', 'chessboard4.png'),
+            os.path.join('app', 'images', 'media', 'chessboard5.png')
+        ]
+        # 当前使用的棋盘索引（从上下文读取）
+        self.current_board_index = getattr(context, 'board_index', 0)
+        
         # 加载棋盘背景
-        self.board_bg = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.png'))
+        self.board_bg = QPixmap(self.board_options[self.current_board_index])
         
         # 加载棋子图片
         self.piece_images = {}
@@ -91,80 +107,78 @@ class BoardDisplay(QLabel):
         y = 0  # 不再需要垂直居中，因为高度已经匹配
         painter.drawPixmap(x, y, scaled_board)
         
-        # 计算棋盘中心点
-        center_x = x + scaled_board.width() // 2
-        
-        # 计算格子大小（使用8.8作为除数，让格子宽度略大一些）
-        cell_width = scaled_board.width() / 8.875
-        cell_height = scaled_board.height() // 10
+        # 计算内棋盘区域（四周边框为可配置比例的半格）
+        width_units = 8.0 + 2.0 * self.border_ratio_x
+        height_units = 9.0 + 2.0 * self.border_ratio_y
+        cell_width = scaled_board.width() / width_units
+        cell_height = scaled_board.height() / height_units
+        inner_left = x + self.border_ratio_x * cell_width
+        inner_top = y + self.border_ratio_y * cell_height
         
         # 绘制移动标记
         if self.move_from is not None and self.move_to is not None:
             # 绘制起始位置标记
             from_row, from_col = self.move_from
-            offset_from_center = (from_col - 4) * cell_width
-            from_x = center_x + offset_from_center
-            from_y = y + from_row * cell_height + cell_height // 2
+            from_x = inner_left + from_col * cell_width
+            from_y = inner_top + from_row * cell_height
             
             # 绘制起始位置的bullseye
             scaled_bullseye = self.bullseye_image.scaled(
-                int(cell_width * 0.45),
-                int(cell_height * 0.45),
+                int(round(cell_width * 0.45)),
+                int(round(cell_height * 0.45)),
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
-            bullseye_x = from_x - scaled_bullseye.width() // 2
-            bullseye_y = from_y - scaled_bullseye.height() // 2
+            bullseye_x = int(round(from_x - scaled_bullseye.width() / 2))
+            bullseye_y = int(round(from_y - scaled_bullseye.height() / 2))
             painter.drawPixmap(bullseye_x, bullseye_y, scaled_bullseye)
             
             # 绘制目标位置标记
             to_row, to_col = self.move_to
-            offset_from_center = (to_col - 4) * cell_width
-            to_x = center_x + offset_from_center
-            to_y = y + to_row * cell_height + cell_height // 2
+            to_x = inner_left + to_col * cell_width
+            to_y = inner_top + to_row * cell_height
             
             # 绘制目标位置的边框
             scaled_border = self.border_image.scaled(
-                int(cell_width * 1.1),
-                int(cell_height * 1.1),
+                int(round(cell_width * 1.1)),
+                int(round(cell_height * 1.1)),
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
-            border_x = to_x - scaled_border.width() // 2
-            border_y = to_y - scaled_border.height() // 2
+            border_x = int(round(to_x - scaled_border.width() / 2))
+            border_y = int(round(to_y - scaled_border.height() / 2))
             painter.drawPixmap(border_x, border_y, scaled_border)
         
         # 绘制棋子
         for piece_type, pos_x, pos_y in self.pieces:
             if piece_type in self.piece_images:
                 piece_img = self.piece_images[piece_type]
-                # 计算棋子位置（从中心点向两侧计算）
-                offset_from_center = (pos_x - 4) * cell_width  # 4是中心列的索引
-                piece_x = center_x + offset_from_center
-                piece_y = y + pos_y * cell_height + cell_height // 2
+                # 计算棋子中心（落点在交叉点）
+                piece_cx = inner_left + pos_x * cell_width
+                piece_cy = inner_top + pos_y * cell_height
                 
                 # 缩放棋子图片，使其略小于格子
                 scaled_piece = piece_img.scaled(
-                    int(cell_width * 0.98),  # 棋子宽度为格子的98%
-                    int(cell_height * 0.98),  # 棋子高度为格子的98%
+                    int(round(cell_width * 0.98)),  # 棋子宽度为格子的98%
+                    int(round(cell_height * 0.98)),  # 棋子高度为格子的98%
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
                 
                 # 居中显示棋子
-                piece_x -= scaled_piece.width() // 2
-                piece_y -= scaled_piece.height() // 2
+                draw_x = int(round(piece_cx - scaled_piece.width() / 2))
+                draw_y = int(round(piece_cy - scaled_piece.height() / 2))
                 
-                painter.drawPixmap(piece_x, piece_y, scaled_piece)
+                painter.drawPixmap(draw_x, draw_y, scaled_piece)
         
         # 绘制箭头
         if self.move_arrow:
             start_x, start_y, end_x, end_y = self.move_arrow
-            # 计算箭头的实际坐标（从中心点向两侧计算）
-            arrow_start_x = center_x + (start_x - 4) * cell_width
-            arrow_start_y = y + start_y * cell_height + cell_height // 2
-            arrow_end_x = center_x + (end_x - 4) * cell_width
-            arrow_end_y = y + end_y * cell_height + cell_height // 2
+            # 计算箭头的实际坐标（以交叉点为基准）
+            arrow_start_x = inner_left + start_x * cell_width
+            arrow_start_y = inner_top + start_y * cell_height
+            arrow_end_x = inner_left + end_x * cell_width
+            arrow_end_y = inner_top + end_y * cell_height
             
             # 设置箭头样式
             pen = QPen(QColor(255, 0, 0, 180))  # 半透明红色
@@ -390,4 +404,13 @@ class BoardDisplay(QLabel):
     def update_rotation(self):
         """更新旋转角度并触发重绘"""
         self.rotation_angle = (self.rotation_angle + 5) % 360  # 每次旋转5度
-        self.update() 
+        self.update()
+    
+    def next_board(self):
+        """切换到下一个棋盘底图并保存到配置"""
+        self.current_board_index = (self.current_board_index + 1) % len(self.board_options)
+        self.board_bg = QPixmap(self.board_options[self.current_board_index])
+        # 保存到上下文
+        context.board_index = self.current_board_index
+        context.save_config()
+        self.update()  # 立即重绘 

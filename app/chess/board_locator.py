@@ -72,6 +72,57 @@ class BoardLocator:
             "JJ": ["JJ象棋"],
             "TT": ["天天象棋"]
         }
+        
+        # 基准游戏窗口尺寸（JJ象棋在标准分辨率下的窗口尺寸）
+        self.base_window_width = 414
+        self.base_window_height = 736
+        
+        # 基准尺寸参数（在414x736游戏窗口下的实际值）
+        # 这些值需要根据实际测量调整
+        self.base_sizes = {
+            'board_width': 375,      # 棋盘宽度
+            'board_height': 415,     # 棋盘高度
+            'region_height': 135,    # 头像区域高度
+            'square_size': 72,       # 头像尺寸
+            'king_offset_x': 188,    # 将帅中心到棋盘左边的偏移
+            'king_offset_y_ratio': 1.2  # 将帅中心到棋盘上边的偏移比例
+        }
+        
+        # 当前窗口信息，用于缩放计算
+        self._current_window_info = None
+    
+    def _get_scale_factor(self, window_info):
+        """
+        根据游戏窗口尺寸计算缩放因子
+        基于414x736基准游戏窗口尺寸
+        """
+        if not window_info:
+            return 1.0
+            
+        window_width = window_info['region']['width']
+        window_height = window_info['region']['height']
+        
+        # 从上下文对象获取屏幕尺寸
+        screen_size = getattr(self.context, 'screen_size', None)
+        
+        if screen_size:
+            screen_width, screen_height = screen_size
+            print(f"从上下文获取屏幕尺寸: {screen_width}x{screen_height}")
+        
+        # 使用游戏窗口尺寸计算缩放因子
+        # 这是正确的逻辑：当前游戏窗口尺寸相对于基准游戏窗口尺寸的缩放
+        scale_x = window_width / self.base_window_width
+        scale_y = window_height / self.base_window_height
+        scale = min(scale_x, scale_y)  # 取较小的缩放因子，保持比例
+        scale = max(0.5, min(2.0, scale))  # 限制缩放范围
+        
+        print(f"游戏窗口尺寸: {window_width}x{window_height}, 基准: {self.base_window_width}x{self.base_window_height}, 缩放因子: {scale:.3f}")
+        return scale
+    
+    def _get_scaled_size(self, base_size, scale):
+        """获取缩放后的尺寸"""
+        scaled_size = int(round(base_size * scale))
+        return scaled_size
 
     def find_window_by_title_macos(self, keyword):
         """使用Quartz查找窗口（macOS）"""
@@ -153,7 +204,7 @@ class BoardLocator:
             
             # 保存截图
             filename = f"window_{platform_name}_{title.replace(' ', '_')}.jpg"
-            cv2.imwrite(filename, img_np)
+            # cv2.imwrite(filename, img_np)
             
             return filename
             
@@ -169,7 +220,7 @@ class BoardLocator:
             print(f"当前系统 {system} 不支持窗口检测，跳过窗口检测")
             return None
             
-        print(f"使用{system}系统API检测游戏窗口...")
+        # print(f"使用{system}系统API检测游戏窗口...")
         
         # 构建检测平台列表：先检测指定平台，检测不到时检测所有其他平台
         platforms_to_check = []
@@ -190,14 +241,14 @@ class BoardLocator:
             titles = self.game_titles[p]
             
             for title in titles:
-                print(f"搜索窗口标题: {title}")
+                # print(f"搜索窗口标题: {title}")
                 matches = self.find_window_by_title(title)
                 
                 if matches:
-                    print(f"找到 {len(matches)} 个匹配窗口:")
-                    for i, match in enumerate(matches):
-                        print(f"  {i+1}. 标题: {match['title']}")
-                        print(f"     位置: {match['bounds']}")
+                    # print(f"找到 {len(matches)} 个匹配窗口:")
+                    # for i, match in enumerate(matches):
+                        # print(f"  {i+1}. 标题: {match['title']}")
+                        # print(f"     位置: {match['bounds']}")
                     
                     # 返回第一个匹配的窗口
                     match = matches[0]
@@ -215,12 +266,16 @@ class BoardLocator:
                         'confidence': 1.0
                     }
                     
-                    print(f"选择窗口: {window_info['platform']} - {window_info['title']}")
+                    # 保存当前窗口信息，用于后续缩放计算
+                    self._current_window_info = window_info
                     
-                    # 更新上下文中的平台为检测到的平台
-                    if self.context:
+                    # print(f"检测到窗口: {window_info['title']}")
+                    # print(f"窗口尺寸: {window_info['region']['width']}x{window_info['region']['height']}")
+                    # print(f"计算缩放因子: {self._get_scale_factor(window_info):.3f}")
+                    
+                    # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
+                    if self.context and self.context.platform != p:
                         self.context.set_platform(p)
-                        print(f"已更新上下文平台为: {p}")
                     
                     # 保存窗口截图
                     self.save_window_screenshot(window_info)
@@ -237,7 +292,7 @@ class BoardLocator:
             List[Tuple[int, int]]: 所有检测到的"将"或"帅"的圆心坐标
         """
         # 1. 首先尝试检测游戏窗口
-        print("=== 步骤1: 检测游戏窗口 ===")
+        # print("=== 步骤1: 检测游戏窗口 ===")
         window_info = self.find_game_window(self.context.platform)
         
         if window_info:
@@ -250,15 +305,15 @@ class BoardLocator:
                 'height': region['height']
             }
             
-            # 3. 在搜索区域内检测将帅
-            return self._find_kings_in_region(search_region, window_info)
+            # 3. 在游戏窗口内检测将帅
+            return self._find_kings_in_window(search_region, window_info)
         else:
             print("未检测到游戏窗口，使用全屏检测")
             return self._find_kings_fullscreen()
 
     def _find_kings_fullscreen(self):
         """全屏检测将帅（原有逻辑）"""
-        print("使用全屏检测模式")
+        # print("使用全屏检测模式")
         
         # 1. 截取全屏
         with mss.mss() as sct:
@@ -297,7 +352,7 @@ class BoardLocator:
             param1 = 80
             param2 = 40
         
-        print(f"平台: {platform}, 参数: minRadius={minRadius}, maxRadius={maxRadius}, param1={param1}, param2={param2}")
+        # print(f"平台: {platform}, 参数: minRadius={minRadius}, maxRadius={maxRadius}, param1={param1}, param2={param2}")
         
         # 4. 霍夫圆检测
         circles = cv2.HoughCircles(processed, cv2.HOUGH_GRADIENT, 1, minDist,
@@ -311,20 +366,20 @@ class BoardLocator:
             return []
             
         circles = np.round(circles[0, :]).astype("int")
-        print(f"霍夫圆检测到 {len(circles)} 个圆形")
+        # print(f"霍夫圆检测到 {len(circles)} 个圆形")
         
         # 5. 使用线程池处理圆检测
         king_centers = self._process_circles_with_threadpool(circles, img_np)
         
         # 6. 保存可视化结果
-        cv2.imwrite("detected_circles.jpg", img_np)
-        print("已保存所有检测到圆的图片为 detected_circles.jpg")
+        # cv2.imwrite("detected_circles.jpg", img_np)
+        # print("已保存所有检测到圆的图片为 detected_circles.jpg")
         
         return king_centers
 
-    def _find_kings_in_region(self, search_region, window_info):
-        """在指定区域内检测将帅"""
-        print("使用区域检测模式")
+    def _find_kings_in_window(self, search_region, window_info):
+        """在指定游戏窗口内检测将帅"""
+        print("使用游戏窗口内检测模式")
         
         # 1. 截取搜索区域
         with mss.mss() as sct:
@@ -375,12 +430,12 @@ class BoardLocator:
                                   minRadius=minRadius, maxRadius=maxRadius)
         
         if circles is None:
-            print("在搜索区域内未检测到任何圆形")
-            cv2.imwrite("detected_circles.jpg", img_np)
+            print("在游戏窗口内未检测到任何圆形")
+            # cv2.imwrite("detected_circles.jpg", img_np)
             return []
             
         circles = np.round(circles[0, :]).astype("int")
-        # print(f"区域霍夫圆检测到 {len(circles)} 个圆形")
+        # print(f"游戏窗口内霍夫圆检测到 {len(circles)} 个圆形")
         
         # 5. 使用线程池处理圆检测
         king_centers = self._process_circles_with_threadpool(circles, img_np)
@@ -410,8 +465,8 @@ class BoardLocator:
             cv2.circle(full_img, (x, y), r, (0, 255, 0), 2)
             cv2.circle(full_img, (x, y), 2, (0, 0, 255), 3)
         
-        cv2.imwrite("detected_circles.jpg", full_img)
-        print("已保存区域检测结果图片为 detected_circles.jpg")
+        # cv2.imwrite("detected_circles.jpg", full_img)
+        # print("已保存区域检测结果图片为 detected_circles.jpg")
         
         return absolute_king_centers
     
@@ -542,14 +597,20 @@ class BoardLocator:
             king_pair = filtered_pairs[0]
             (x1, y1, r1), (x2, y2, r2) = king_pair
             mean_r = (r1 + r2) / 2
-            x_board = (x1 + x2) / 2 - 188
-            y_board = min(y1, y2) - 1.2 * mean_r
+            
+            # 获取当前窗口信息用于计算缩放因子
+            scale = self._get_scale_factor(self._current_window_info)
+            
+            # 动态计算偏移量
+            king_offset_x = self._get_scaled_size(self.base_sizes['king_offset_x'], scale)
+            king_offset_y_ratio = self.base_sizes['king_offset_y_ratio']  # 比例值不需要缩放
+            
+            x_board = (x1 + x2) / 2 - king_offset_x
+            y_board = min(y1, y2) - king_offset_y_ratio * mean_r
+            
             print(f"棋盘左上角坐标: x={x_board:.1f}, y={y_board:.1f}")
-            # 可选：画图
-            img = cv2.imread("detected_circles.jpg")
-            if img is not None:
-                cv2.circle(img, (int(round(x_board)), int(round(y_board))), 8, (255, 0, 0), -1)
-                cv2.imwrite("detected_circles.jpg", img)
+            print(f"缩放因子: {scale:.3f}, 偏移量: {king_offset_x:.1f}")
+            
             return (x_board, y_board)
         
     def update_board_and_avatars_regions(self, manual_coords=None):   
@@ -577,15 +638,27 @@ class BoardLocator:
                 # 重新抛出棋盘定位错误
                 raise
         
+        # 获取当前窗口信息用于计算缩放因子
+        scale = self._get_scale_factor(self._current_window_info)
+        
+        # 动态计算尺寸
+        board_width = self._get_scaled_size(self.base_sizes['board_width'], scale)
+        board_height = self._get_scaled_size(self.base_sizes['board_height'], scale)
+        region_height = self._get_scaled_size(self.base_sizes['region_height'], scale)
+        square_size = self._get_scaled_size(self.base_sizes['square_size'], scale)
+        
+        print(f"动态计算尺寸 - 缩放因子: {scale:.3f}")
+        print(f"棋盘: {board_width}x{board_height}, 头像区域: {region_height}, 头像尺寸: {square_size}")
+        
         # 棋盘区域
-        board_width = 375   
-        board_height = 415
         board_region = {'left': x, 'top': y, 'width': board_width, 'height': board_height}
+        print(f"棋盘区域: left={x}, top={y}, width={board_width}, height={board_height}")
 
         # 上下头像区域
-        region_height = 135
         upper_region = {'left': x, 'top': y - region_height, 'width': board_width, 'height': region_height}
         lower_region = {'left': x, 'top': y + board_height, 'width': board_width, 'height': region_height}
+        print(f"上头像区域: left={x}, top={y - region_height}, width={board_width}, height={region_height}")
+        print(f"下头像区域: left={x}, top={y + board_height}, width={board_width}, height={region_height}")
 
         # 截取棋盘区域的图片
         with mss.mss() as sct:
@@ -601,21 +674,26 @@ class BoardLocator:
         # 检测头像区域
         avatar_regions = {}
         avatar_rects = {}
-        square_size = 72
         
-        # 根据平台设置偏移量
+        # 根据平台设置偏移量（也需要缩放）
         if platform_type == "JJ":
             # JJ平台偏移量
-            upper_offset_x = 0
-            upper_offset_y = 5
-            lower_offset_x = 5
-            lower_offset_y = -15
+            base_upper_offset_x = 0
+            base_upper_offset_y = 5
+            base_lower_offset_x = 5
+            base_lower_offset_y = -15
         else:  # TT平台
             # TT平台偏移量
-            upper_offset_x = -5
-            upper_offset_y = 0
-            lower_offset_x = 5
-            lower_offset_y = 0
+            base_upper_offset_x = -5
+            base_upper_offset_y = 0
+            base_lower_offset_x = 5
+            base_lower_offset_y = 0
+        
+        # 动态计算偏移量
+        upper_offset_x = self._get_scaled_size(base_upper_offset_x, scale)
+        upper_offset_y = self._get_scaled_size(base_upper_offset_y, scale)
+        lower_offset_x = self._get_scaled_size(base_lower_offset_x, scale)
+        lower_offset_y = self._get_scaled_size(base_lower_offset_y, scale)
         
         # 统一计算头像区域
         # upper: 取upper_region左上角，应用偏移量
@@ -626,6 +704,8 @@ class BoardLocator:
             'width': square_size,
             'height': square_size
         }
+        print(f"上头像最终区域: left={upper_left[0]}, top={upper_left[1]}, width={square_size}, height={square_size}")
+        
         # lower: 取lower_region右下角，应用偏移量
         lower_right_x = lower_region['left'] + lower_region['width'] + lower_offset_x
         lower_right_y = lower_region['top'] + lower_region['height'] + lower_offset_y
@@ -635,6 +715,7 @@ class BoardLocator:
             'width': square_size,
             'height': square_size
         }
+        print(f"下头像最终区域: left={lower_right_x - square_size}, top={lower_right_y - square_size}, width={square_size}, height={square_size}")
         avatar_rects['upper'] = avatar_regions['upper']
         avatar_rects['lower'] = avatar_regions['lower']
 

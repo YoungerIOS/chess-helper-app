@@ -8,7 +8,24 @@ def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):  
         # 如果是打包后的应用，则使用 sys._MEIPASS  
         return os.path.join(sys._MEIPASS, relative_path)  
-    return os.path.join(os.path.abspath("./app/"), relative_path)
+    
+    # 尝试多种可能的路径
+    possible_paths = [
+        # 如果从项目根目录运行
+        os.path.join(os.path.abspath("./app/"), relative_path),
+        # 如果从app目录运行
+        os.path.join(os.path.abspath("./"), relative_path),
+        # 如果从其他目录运行，尝试相对路径
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", relative_path)
+    ]
+    
+    # 返回第一个存在的路径
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # 如果都不存在，返回第一个路径（保持向后兼容）
+    return possible_paths[0]
  
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  

@@ -61,30 +61,25 @@ class MessageManager:
             if message_type not in self._callbacks:
                 self._callbacks[message_type] = []
             self._callbacks[message_type].append(callback)
-            print(f"订阅消息: {message_type}")
     
     def unsubscribe(self, message_type, callback):
         """取消订阅"""
         with self._state_lock:
             if message_type in self._callbacks and callback in self._callbacks[message_type]:
                 self._callbacks[message_type].remove(callback)
-                print(f"取消订阅: {message_type}")
     
     def send_message(self, message_type, data=None):
         """发送消息并立即通知所有订阅者"""
         with self._state_lock:
             if message_type in self._callbacks:
                 callbacks = self._callbacks[message_type].copy()  # 复制避免回调中修改列表
-                print(f"发送消息: {message_type} = {data}")
                 # 异步执行回调，避免阻塞
                 for callback in callbacks:
                     try:
                         callback(message_type, data)
                     except Exception as e:
                         print(f"回调执行错误: {e}")
-            else:
-                print(f"发送消息: {message_type} = {data} (无订阅者)")
-    
+
     def get_subscribers(self, message_type):
         """获取指定消息类型的订阅者数量"""
         with self._state_lock:

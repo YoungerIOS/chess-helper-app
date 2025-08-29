@@ -3,8 +3,97 @@ from typing import Dict, Optional, List
 from tools import utils
 import json
 import os
+import logging
+from datetime import datetime
 from threading import Lock
 from chess.history import MoveHistory 
+
+def setup_logging():
+    """初始化日志系统"""
+    # 检查是否已经初始化过
+    if hasattr(setup_logging, '_initialized'):
+        return logging.getLogger('chess')
+    
+    # 创建logs目录
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # 尝试读取日志配置文件
+    log_config = {
+        "log_level": "INFO",
+        "log_to_file": True,
+        "log_to_console": True,
+        "max_log_size_mb": 10,
+        "backup_count": 5,
+        "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "date_format": "%Y-%m-%d %H:%M:%S"
+    }
+    
+    try:
+        log_config_path = utils.resource_path("json/log_config.json")
+        if os.path.exists(log_config_path):
+            with open(log_config_path, "r", encoding="utf-8") as f:
+                user_config = json.load(f)
+                log_config.update(user_config)
+    except Exception as e:
+        # 如果读取配置文件失败，使用默认配置
+        pass
+    
+    # 生成日志文件名（按日期）
+    log_file = os.path.join(log_dir, f"chess_helper_{datetime.now().strftime('%Y%m%d')}.log")
+    
+    # 配置日志格式
+    log_format = log_config["log_format"]
+    date_format = log_config["date_format"]
+    
+    # 设置日志级别
+    log_level = getattr(logging, log_config["log_level"].upper(), logging.INFO)
+    
+    # 检查根日志记录器是否已经配置
+    if not logging.getLogger().handlers:
+        # 配置根日志记录器
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            datefmt=date_format,
+            handlers=[]
+        )
+    
+    # 创建chess模块的日志记录器
+    chess_logger = logging.getLogger('chess')
+    chess_logger.setLevel(log_level)
+    
+    # 避免重复输出 - 清除所有现有处理器
+    for handler in chess_logger.handlers[:]:
+        chess_logger.removeHandler(handler)
+    
+    # 添加文件处理器（支持日志轮转）
+    if log_config["log_to_file"]:
+        from logging.handlers import RotatingFileHandler
+        max_bytes = log_config["max_log_size_mb"] * 1024 * 1024
+        file_handler = RotatingFileHandler(
+            log_file, 
+            maxBytes=max_bytes, 
+            backupCount=log_config["backup_count"],
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(logging.Formatter(log_format, date_format))
+        chess_logger.addHandler(file_handler)
+    
+    # 添加控制台处理器
+    if log_config["log_to_console"]:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(log_format, date_format))
+        chess_logger.addHandler(console_handler)
+    
+    # 标记为已初始化
+    setup_logging._initialized = True
+    
+    return chess_logger
+
+# 初始化日志系统
+logger = setup_logging()
 
 @dataclass
 class Platform:
@@ -45,7 +134,9 @@ class ChessContext:
     _analysis_mode: str = field(default="timer")  
     engine: Optional[object] = None  # 当前引擎实例
     checker: Optional[object] = None  # 局面检查器
-    history: MoveHistory = field(default_factory=MoveHistory) 
+    history: MoveHistory = field(default_factory=MoveHistory)
+    screen_size: Optional[tuple] = None  # 屏幕尺寸
+    _board_index: int = 0  # 棋盘皮肤索引（私有存储）
     
     
     def __post_init__(self):
@@ -68,17 +159,18 @@ class ChessContext:
     def load_config(self):
         """从配置文件加载所有设置"""
         try:
-            with open(utils.resource_path("json/platform_config.json"), "r") as f:
+            logger.info("开始加载配置文件...")
+            with open(utils.resource_path("json/game_config.json"), "r") as f:
                 config = json.load(f)
                 
             # 初始化平台
             self._platforms = {}
-            for platform_name, platform_config in config.items():
+            for platform_name, game_config in config.items():
                 if platform_name in ['TT', 'JJ']:
                     self._platforms[platform_name] = Platform(
                         name=platform_name,
-                        board_coords=platform_config['board_coords'],
-                        regions=platform_config['regions']
+                        board_coords=game_config['board_coords'],
+                        regions=game_config['regions']
                     )
             
             # 加载引擎参数
@@ -91,21 +183,35 @@ class ChessContext:
             
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
+            logger.info(f"当前平台设置为: {self.platform}")
             
             # 设置分析模式
             self._analysis_mode = config.get('analysis_mode', 'timer')
+            logger.info(f"分析模式设置为: {self._analysis_mode}")
+            
+            # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
+            self._board_index = config.get('board_index', 0)
+            logger.info(f"棋盘皮肤索引设置为: {self._board_index}")
             
             # 预加载当前平台的模型
             _ = self.piece_recognizer
             _ = self.timer_recognizer
-            print("模型初始化完成")
+            logger.info("模型初始化完成")
             
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"Error loading config: {e}")
+            logger.error(f"Error loading config: {e}")
             # 使用默认值初始化
             self._platforms = {
-                'TT': Platform(name='TT'),
-                'JJ': Platform(name='JJ')
+                'TT': Platform(
+                    name='TT',
+                    board_coords={'x': [], 'y': []},
+                    regions={}
+                ),
+                'JJ': Platform(
+                    name='JJ',
+                    board_coords={'x': [], 'y': []},
+                    regions={}
+                )
             }
             with self._engine_params_lock:
                 self._engine_params = {
@@ -119,11 +225,12 @@ class ChessContext:
             # 预加载默认平台的模型
             _ = self.piece_recognizer
             _ = self.timer_recognizer
-            print("模型初始化完成")
+            logger.info("模型初始化完成")
     
     def save_config(self):
         """保存所有配置到文件"""
         try:
+            logger.info("开始保存配置文件...")
             # 先创建平台配置
             config = {
                 platform_name: {
@@ -135,6 +242,8 @@ class ChessContext:
             # 添加其他配置
             config['platform'] = self.platform
             config['analysis_mode'] = self._analysis_mode
+            # 保存棋盘底图索引
+            config['board_index'] = self.board_index
             
             # 获取引擎参数的副本
             with self._engine_params_lock:
@@ -144,18 +253,21 @@ class ChessContext:
             config = utils.convert_to_builtin_type(config)
             
             # 使用原子写入避免文件损坏
-            path = utils.resource_path("json/platform_config.json")
+            path = utils.resource_path("json/game_config.json")
             tmp_path = path + ".tmp"
             with open(tmp_path, "w") as f:
                 json.dump(config, f, indent=4)
             os.replace(tmp_path, path)  # 原子覆盖
+            logger.info("配置文件保存成功")
         except Exception as e:
-            print(f"Error saving config: {e}")
+            logger.error(f"Error saving config: {e}")
     
     def set_platform(self, platform_name: str) -> None:
         """设置当前平台"""
         if platform_name not in self._platforms:
-            raise ValueError(f"未知的平台: {platform_name}")
+            error_msg = f"未知的平台: {platform_name}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # 获取目标平台
         platform = self._platforms[platform_name]
@@ -170,7 +282,6 @@ class ChessContext:
         """获取指定平台"""
         if platform_name not in self._platforms:
             raise ValueError(f"未知的平台: {platform_name}")
-            
         return self._platforms[platform_name]
     
     @property
@@ -213,7 +324,7 @@ class ChessContext:
     def analysis_mode(self, mode: str):
         self._analysis_mode = mode
         self.save_config()  # 保存配置
-
+    
     def init_checker(self):
         """初始化局面检查器"""
         from .checker import PositionChecker
@@ -238,7 +349,48 @@ class ChessContext:
         from chess.message import message_manager
         message_manager.unsubscribe(message_type, callback)
     
+    def get_log_info(self) -> dict:
+        """获取日志系统信息"""
+        try:
+            from tools.log_viewer import LogViewer
+            viewer = LogViewer()
+            log_files = viewer.get_log_files()
+            
+            if log_files:
+                latest_log = log_files[0]
+                stats = viewer.get_log_stats(latest_log)
+                return {
+                    "log_files_count": len(log_files),
+                    "latest_log": os.path.basename(latest_log),
+                    "latest_log_stats": stats
+                }
+            else:
+                return {"log_files_count": 0, "latest_log": None, "latest_log_stats": None}
+        except Exception as e:
+            logger.error(f"获取日志信息失败: {e}")
+            return {"error": str(e)}
+    
+    @property
+    def board_index(self) -> int:
+        """获取棋盘皮肤索引"""
+        return self._board_index
+
+    @board_index.setter
+    def board_index(self, value: int) -> None:
+        """设置棋盘皮肤索引并持久化"""
+        self._board_index = int(value)
+        self.save_config()
 
 
 # 创建全局上下文实例
-context = ChessContext(platform="TT")  # 默认使用TT平台 
+_context_instance = None
+
+def get_context():
+    """获取全局上下文实例（单例模式）"""
+    global _context_instance
+    if _context_instance is None:
+        _context_instance = ChessContext(platform="TT")  # 默认使用TT平台
+    return _context_instance
+
+# 为了向后兼容，保留context变量
+context = get_context() 

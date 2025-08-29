@@ -9,6 +9,7 @@ from chess.message import Message, MessageType, MessageContent
 from chess.context import context
 from tools.utils import resource_path
 from chess.board_locator import BoardLocator, BoardLocatorError
+from chess.border_detector import has_border, reset_border_cache
 
 
 class ChessCaptureManager:
@@ -30,8 +31,6 @@ class ChessCaptureManager:
         
         # 头像状态监测相关变量
         self.avatar_states = {"upper": "unknown", "lower": "unknown"}  # 当前头像状态
-        self.normal_duration_start = None  # 开始计时的时间
-        self.normal_duration_threshold = 3.0  # 持续3秒的阈值
         
         # 定位状态标志
         self._relocating = False
@@ -42,6 +41,12 @@ class ChessCaptureManager:
         
         # 订阅重新定位消息
         self.context.subscribe("relocate_board", self.try_locate_board)
+        
+        # 保存最近一次手动定位坐标，使手动定位结果可被后续自动调用复用
+        self._manual_coords = None
+        
+        # 初始定位完成事件，用于通知截图主循环
+        self._located_event = threading.Event()
 
     def try_locate_board(self, message_type=None, data=None, manual_coords=None):
         """
@@ -65,12 +70,24 @@ class ChessCaptureManager:
             if message_type is not None:
                 print(f"收到重新定位请求: {message_type} = {data}")
                 
-            # 尝试更新棋盘和头像区域（自动或手动检测模式）
-            self.board_locator.update_board_and_avatars_regions(manual_coords=manual_coords)
-            print("棋盘定位成功")
+            # 优先使用本次传入的手动坐标；未提供时复用最近一次手动坐标
+            if manual_coords is not None:
+                self._manual_coords = manual_coords
+            coords_to_use = manual_coords if manual_coords is not None else self._manual_coords
+
+            if coords_to_use is not None:
+                # 使用手动坐标更新棋盘和头像区域
+                self.board_locator.update_board_and_avatars_regions(manual_coords=coords_to_use)
+                print("棋盘定位成功(手动/复用手动)")
+            else:
+                # 使用自动检测更新棋盘和头像区域
+                self.board_locator.update_board_and_avatars_regions(manual_coords=None)
+                print("棋盘定位成功(自动)")
             
             # 发送成功消息到UI队列
             self.ui_message_queue.put(Message(MessageType.STATUS, "棋盘定位成功"))
+            # 设置定位成功事件（唤醒等待）
+            self._located_event.set()
             return True
         except BoardLocatorError as e:
             print(f"棋盘定位失败: {e}")
@@ -86,46 +103,6 @@ class ChessCaptureManager:
             # 重置定位状态
             with self._relocate_lock:
                 self._relocating = False
-
-    def record_timer_state(self, avatar_name, state):
-        """
-        记录头像状态并在满足条件时触发重新定位
-        Args:
-            avatar_name: 头像名称 ("upper" 或 "lower")
-            state: 头像状态 ("normal" 或 "countdown")
-        """
-        if avatar_name in self.avatar_states:
-            self.avatar_states[avatar_name] = state
-        
-        # 检查上下头像同时为normal状态且持续3秒以上
-        current_time = time.time()
-        
-        if self.avatar_states["upper"] == "normal" and self.avatar_states["lower"] == "normal":
-            # 如果都是normal状态
-            if self.normal_duration_start is None:
-                # 开始计时
-                self.normal_duration_start = current_time
-            else:
-                # 检查持续时间
-                duration = current_time - self.normal_duration_start
-                if duration >= self.normal_duration_threshold:
-                    # 重置计时器
-                    self.normal_duration_start = None
-                    # 触发重新定位
-                    print("检测到上下头像均为normal状态持续3秒以上，触发重新定位")
-                    # 检查是否正在定位中，避免重复触发
-                    with self._relocate_lock:
-                        if not self._relocating:
-                            threading.Thread(
-                                target=self.context.send_message,
-                                args=("relocate_board", True),
-                                daemon=True
-                            ).start()
-                        else:
-                            print("定位正在进行中，跳过重复触发")
-        else:
-            # 如果有任何一个不是normal状态，重置计时器
-            self.normal_duration_start = None
 
     def start_capture(self):
         """开始截图任务"""
@@ -151,18 +128,25 @@ class ChessCaptureManager:
         self.context.unsubscribe("relocate_board", self.try_locate_board)
 
     def capture_region(self): 
-        # 首先进行初始定位
+        # 首先进行初始定位,循环尝试,直到成功
         print("开始初始定位...")
-        while not self.stop_event.is_set():
+        while not self.stop_event.is_set(): 
+            # 如果已有定位成功的事件（可能来自手动定位），直接跳出
+            if self._located_event.is_set():
+                break
             if self.try_locate_board():
                 print("初始定位成功")
                 break
             else:
                 print("初始定位失败，1秒后重试")
-                time.sleep(1)
+                # 等待1秒，若期间手动定位成功会立即唤醒
+                self._located_event.wait(timeout=1)
         
         if self.stop_event.is_set():
             return
+        
+        # 重置事件，避免影响后续逻辑
+        self._located_event.clear()
         
         # 定位成功后，加载配置并开始截图
         self.context.load_config()
@@ -189,22 +173,48 @@ class ChessCaptureManager:
             )
             self.avatar_threads["lower"].start()
             
+            # 窗口移动监控初始化
+            last_window_info = self.board_locator.find_game_window(self.context.platform)
+            last_window_bounds = last_window_info['region'] if last_window_info else None
+            check_interval_s = 2
+            next_check_time = time.monotonic()
+            move_threshold = 2  # 像素阈值
+            # 持续监控窗口移动, 用dx dy 推算出新的棋盘左上角坐标
             while not self.stop_event.is_set():
+                now = time.monotonic()
+                if now >= next_check_time:
+                    next_check_time = now + check_interval_s
+                    try:
+                        win_info = self.board_locator.find_game_window(self.context.platform)
+                        if win_info and 'region' in win_info:
+                            current_bounds = win_info['region']
+                            if last_window_bounds is not None:
+                                dx = int(current_bounds['left']) - int(last_window_bounds['left'])
+                                dy = int(current_bounds['top']) - int(last_window_bounds['top'])
+                                if abs(dx) >= move_threshold or abs(dy) >= move_threshold:
+                                    platform = self.context.get_platform(self.context.platform)
+                                    board_region = platform.regions.get('board')
+                                    if board_region is not None:
+                                        new_top_left = (int(board_region['left']) + dx, int(board_region['top']) + dy)
+                                        success = self.try_locate_board(manual_coords=new_top_left)
+                                        if success:
+                                            # 窗口位置发生有效移动后，重置边框缓存
+                                            reset_border_cache(self.context.platform)
+                                            last_window_bounds = current_bounds
+                            else:
+                                last_window_bounds = current_bounds
+                    except Exception as e:
+                        print(f"窗口移动检测异常: {e}")
                 time.sleep(0.1)
             return
         else:
             print(f"Debug - 未知的分析模式: {self.context.analysis_mode}")
 
-    def _process_continuous_mode(self, board_region):
-        """处理连续模式"""
-        with mss.mss() as sct:
-            screenshot = sct.grab(board_region)
-
-    def _check_timer_state(self, img_path, img_cv):
+    def _check_avatar_state(self, screenshot, avatar):
         """
-        用颜色和模型预测,判断头像状态
+        用边框检测,判断头像状态
         """
-        color_state = 'countdown' if self._detect_avatar_border(img_cv, self.context.platform) else 'normal'
+        color_state = 'countdown' if has_border(screenshot, self.context.platform, avatar) else 'normal'
         return color_state
 
     def _capture_and_enqueue(self, current_turn, region):
@@ -214,7 +224,7 @@ class ChessCaptureManager:
             board_screenshot = sct.grab(region)
         self.process_queue.put((capture_time, current_turn, board_screenshot))
 
-    def _monitor_single_avatar(self, avatar, interval=0.02):
+    def _monitor_single_avatar(self, avatar, interval=0.1):
         def get_turn(avatar_name, avatar_state):
             if avatar_state == 'countdown':
                 return 'my_turn' if avatar_name == 'lower' else 'opponent_turn'
@@ -240,11 +250,8 @@ class ChessCaptureManager:
         
         with mss.mss() as sct:
             screenshot = sct.grab(avatar_region)
-            img_cv = np.frombuffer(screenshot.bgra, np.uint8).reshape(screenshot.height, screenshot.width, 4)[:, :, :3]
-            img_path = f"app/images/board/temp_avatar_{avatar}.png"
-            cv2.imwrite(img_path, img_cv)
 
-        last_state = self._check_timer_state(img_path, img_cv)
+        last_state = self._check_avatar_state(screenshot, avatar)
         print(f"初始化{avatar}: {last_state}")
         
         # 非阻塞截图时机管理
@@ -282,9 +289,9 @@ class ChessCaptureManager:
                 img_path = f"app/images/board/temp_avatar_{avatar}.png"
                 cv2.imwrite(img_path, img_cv)
                 
-            state = self._check_timer_state(img_path, img_cv)
+            state = self._check_avatar_state(screenshot, avatar)
             # 记录头像状态
-            self.record_timer_state(avatar, state)
+            self.avatar_states[avatar] = state
             
             # 截图信号1: 灭->亮
             shot_signal1 = (last_state != 'countdown' and state == 'countdown')
@@ -318,189 +325,8 @@ class ChessCaptureManager:
                 raise ValueError(f"不支持的平台: {self.context.platform}")
 
             time.sleep(interval)
-
-    def _detect_avatar_border(self, img, platform):
-        """
-        检测头像边框
-        Args:
-            img: 头像区域的图像
-            platform: 平台名称 ('TT' 或 'JJ')
-        Returns:
-            bool: 是否检测到边框
-        """
-        # 转换为HSV颜色空间
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        
-        # 定义颜色范围
-        if platform == 'TT':
-            # TT平台：绿色(前期) -> 黄色(中期)
-            color_ranges = [
-                # 绿色范围
-                (np.array([35, 50, 50]), np.array([85, 255, 255]), "绿色", 150),
-                # 黄色范围
-                (np.array([20, 100, 100]), np.array([40, 255, 255]), "黄色", 150)
-            ]
-        else:  # JJ平台
-            # JJ平台：黄色(前期) -> 红色(末期)
-            color_ranges = [
-                # 黄色范围
-                (np.array([20, 100, 100]), np.array([40, 255, 255]), "黄色", 250),
-                # 红色范围
-                (np.array([0, 100, 100]), np.array([10, 255, 255]), "红色", 50),
-                (np.array([170, 100, 100]), np.array([180, 255, 255]), "红色", 50)
-            ]
-        
-        # 按顺序检测每个颜色
-        for lower, upper, color_name, threshold in color_ranges:
-            # 创建当前颜色的掩码
-            mask = cv2.inRange(hsv, lower, upper)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             
-            # 查找轮廓
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                continue
-                
-            # 找到面积最大的轮廓
-            max_contour_area = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(max_contour_area)
-            
-            # 根据颜色使用不同的判断标准
-            if area > threshold:
-                if color_name == "黄色":
-                    self.max_contour = max_contour_area
-                return True
-                
-            # 检查当前最大轮廓是否在上一帧的轮廓内部
-            if color_name == "黄色" and self.max_contour is not None:
-                overlap_ratio = self._get_contour_overlap(max_contour_area, self.max_contour)
-                if overlap_ratio > 0.95:
-                    return True
-        
-        return False
-    
-    def _get_contour_overlap(self, contour1, contour2):
-        """
-        计算轮廓1中的像素在轮廓2内部的比例
-        Args:
-            contour1: 当前轮廓
-            contour2: 上一帧轮廓
-        Returns:
-            float: 在轮廓2内部的像素占轮廓1总像素的比例
-        """
-        if contour2 is None:
-            return 0.0
-            
-        # 获取轮廓的边界框
-        x1, y1, w1, h1 = cv2.boundingRect(contour1)
-        x2, y2, w2, h2 = cv2.boundingRect(contour2)
-        
-        # 计算合并后的边界框
-        x = min(x1, x2)
-        y = min(y1, y2)
-        width = max(x1 + w1, x2 + w2) - x
-        height = max(y1 + h1, y2 + h2) - y
-        
-        # 创建掩码
-        mask1 = np.zeros((height, width), dtype=np.uint8)
-        mask2 = np.zeros((height, width), dtype=np.uint8)
-        
-        # 调整轮廓坐标到新的坐标系
-        contour1_adjusted = contour1 - np.array([x, y])
-        contour2_adjusted = contour2 - np.array([x, y])
-        
-        # 绘制轮廓
-        cv2.drawContours(mask1, [contour1_adjusted], -1, 255, -1)
-        cv2.drawContours(mask2, [contour2_adjusted], -1, 255, -1)
-        
-        # 计算重叠区域
-        overlap = cv2.bitwise_and(mask1, mask2)
-        
-        # 计算像素数量
-        total_pixels1 = cv2.countNonZero(mask1)
-        total_pixels2 = cv2.countNonZero(mask2)
-        overlap_pixels = cv2.countNonZero(overlap)
-        
-        # 计算比例
-        overlap_ratio = overlap_pixels / total_pixels1 if total_pixels1 > 0 else 0
-        
-        return overlap_ratio
-    
-    def check_turn_order(self, avatar_upper, avatar_lower):#弃用
-        """
-        检查轮次顺序 - 分别识别上下两个头像
-        Args:
-            avatar_upper: 上方头像区域
-            avatar_lower: 下方头像区域
-        Returns:
-            bool: 是否轮到我方
-        """
-        if self.manual_trigger:
-            self.manual_trigger = False  # 使用后立即重置
-            print("手动触发识别")
-            return True
-        
-        # 检查上下头像区域是否有效
-        if avatar_upper is None or avatar_lower is None:
-            print("警告: 头像区域未配置，使用颜色检测")
-            return False
-        
-        # 分别截取上下头像区域
-        with mss.mss() as sct:
-            # 截取上方头像
-            upper_screenshot = sct.grab(avatar_upper)
-            
-            # 截取下方头像
-            lower_screenshot = sct.grab(avatar_lower)
-            
-            # 保存临时图片用于预测 - 使用与训练时相同的方式
-            upper_temp_path = "app/images/board/temp_avatar_upper.png"
-            lower_temp_path = "app/images/board/temp_avatar_lower.png"
-            
-            # 使用mss.tools.to_png保存，与训练时保持一致
-            mss.tools.to_png(upper_screenshot.rgb, upper_screenshot.size, output=upper_temp_path)
-            mss.tools.to_png(lower_screenshot.rgb, lower_screenshot.size, output=lower_temp_path)
-            
-            # 分别预测上下头像
-            try:
-                upper_result = self.context.timer_recognizer.predict(upper_temp_path)
-                lower_result = self.context.timer_recognizer.predict(lower_temp_path)
-                
-                print(f"upper头像: {upper_result['class_name']}, 置信度: {upper_result['confidence']:.2f}")
-                print(f"lower头像: {lower_result['class_name']}, 置信度: {lower_result['confidence']:.2f}")
-                
-                # 判断逻辑：如果上方头像显示倒计时，说明轮到我方
-                upper_countdown = upper_result['class_name'] == 'countdown' and upper_result['confidence'] > 0.9
-                lower_countdown = lower_result['class_name'] == 'countdown' and lower_result['confidence'] > 0.9
-                
-                # 根据平台判断轮次
-                if self.context.platform == "JJ":
-                    # JJ平台：上方头像倒计时表示轮到我方
-                    return upper_countdown
-                else:  # TT平台
-                    # TT平台：下方头像倒计时表示轮到我方
-                    return lower_countdown
-                    
-            except Exception as e:
-                print(f"预测出错: {e}, 使用颜色检测")
-                # 使用颜色检测作为备选方案
-                # 重新读取保存的图片进行颜色检测
-                try:
-                    upper_img = cv2.imread(upper_temp_path)
-                    lower_img = cv2.imread(lower_temp_path)
-                    
-                    upper_border = self._detect_avatar_border(upper_img, self.context.platform)
-                    lower_border = self._detect_avatar_border(lower_img, self.context.platform)
-                    
-                    if self.context.platform == "JJ":
-                        return upper_border
-                    else:  # TT平台
-                        return lower_border
-                except Exception as color_e:
-                    print(f"颜色检测也失败: {color_e}")
-                    return False
-            
-    def execute_single_capture_cycle(self):
+    def manually_capture_once(self):
         """
         执行一次完整的监控与截图流程
         从外界调用，执行一次头像监控、状态检测和截图任务
@@ -508,6 +334,11 @@ class ChessCaptureManager:
             bool: 是否成功执行截图任务
         """
         try:
+            # 手动刷新时，重置检查器状态
+            if hasattr(self.context, 'checker') and self.context.checker:
+                self.context.checker.reset_state()
+                print("Debug - 手动刷新，重置检查器状态")
+            
             # 获取当前平台配置
             platform = self.context.get_platform(self.context.platform)
             avatar_upper = platform.regions.get("avatar_upper")
@@ -519,7 +350,7 @@ class ChessCaptureManager:
                 return False
             
             # 执行一次头像状态检测
-            current_turn = self._check_single_turn_state(avatar_upper, avatar_lower)
+            current_turn = self._check_turn_state_once(avatar_upper, avatar_lower)
             
             if current_turn is not None:
                 # 执行截图任务
@@ -534,7 +365,7 @@ class ChessCaptureManager:
             print(f"执行单次截图流程失败: {e}")
             return False
     
-    def _check_single_turn_state(self, avatar_upper, avatar_lower):
+    def _check_turn_state_once(self, avatar_upper, avatar_lower):
         """
         检查单次轮次状态
         Args:
@@ -557,21 +388,10 @@ class ChessCaptureManager:
             # 截取下方头像
             lower_screenshot = sct.grab(avatar_lower)
             
-            # 保存临时图片用于颜色检测
-            upper_temp_path = "app/images/board/temp_avatar_upper.png"
-            lower_temp_path = "app/images/board/temp_avatar_lower.png"
-            
-            # 使用mss.tools.to_png保存
-            mss.tools.to_png(upper_screenshot.rgb, upper_screenshot.size, output=upper_temp_path)
-            mss.tools.to_png(lower_screenshot.rgb, lower_screenshot.size, output=lower_temp_path)
-            
-            # 使用颜色检测
+            # 使用边框检测
             try:
-                upper_img = cv2.imread(upper_temp_path)
-                lower_img = cv2.imread(lower_temp_path)
-                
-                upper_border = self._detect_avatar_border(upper_img, self.context.platform)
-                lower_border = self._detect_avatar_border(lower_img, self.context.platform)
+                upper_border = has_border(upper_screenshot, self.context.platform, "upper")
+                lower_border = has_border(lower_screenshot, self.context.platform, "lower")
                 
                 print(f"单次检测 - upper头像倒计时: {upper_border}")
                 print(f"单次检测 - lower头像倒计时: {lower_border}")
@@ -583,6 +403,6 @@ class ChessCaptureManager:
                     return 'opponent_turn'
                     
             except Exception as color_e:
-                print(f"单次检测颜色检测失败: {color_e}")
+                print(f"单次检测边框检测失败: {color_e}")
         
         return None

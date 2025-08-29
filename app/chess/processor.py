@@ -51,7 +51,7 @@ class ChessProcess:
 
         # 2. 检查局面状态
         status = self.checker.check_board(board)
-        print("Debug - 局面检查:\n" + pformat(status))
+        # print("Debug - 局面检查:\n" + pformat(status))
         
         return ProcessResult(board_array=board, board_status=status)
     
@@ -142,7 +142,7 @@ class ChessProcess:
 
     def _handle_same_board(self):
         # 处理局面重复
-        print("Debug - 重复画面, 继续处理下一张.")
+        # print("Debug - 重复画面, 继续处理下一张.")
         return ProcessResult()
 
     def _handle_illegal_board(self, status):
@@ -174,11 +174,11 @@ class ChessProcess:
             result.step_info.get('to_pos'),
             self.checker.is_red
         )
-        print(f"Debug - 我方走棋记录: {move_str}")
+        # print(f"Debug - 我方走棋记录: {move_str}")
         
         # 更新历史记录
         all_moves = self.history.add_and_get_all("", move_str, "", self.checker.is_red)
-        print(f"Debug - 我方走棋后完整历史记录: {all_moves}")
+        # print(f"Debug - 我方走棋后完整历史记录: {all_moves}")
         
         return ProcessResult()
 
@@ -197,7 +197,7 @@ class ChessProcess:
             result.step_info.get('to_pos'),
             self.checker.is_red
         )
-        print(f"Debug - 对方走棋记录: {move_str}")
+        # print(f"Debug - 对方走棋记录: {move_str}")
         
         # 更新历史记录
         all_moves = self.history.add_and_get_all("", move_str, "", self.checker.is_red)
@@ -212,7 +212,7 @@ class ChessProcess:
                 self.history.clear()
                 self.use_startpos = False
         
-        print(f"Debug - 完整历史记录-----: {all_moves}")
+        # print(f"Debug - 完整历史记录-----: {all_moves}")
 
         # 获取引擎着法
         print("Debug - 开始引擎分析...")
@@ -253,7 +253,7 @@ class ChessProcess:
                 is_newgame=check_result.is_new_game, 
                 moves=moves
             )
-            print(f"Debug - 引擎分析结果: move={move}, FEN={fen}")
+            # print(f"Debug - 引擎分析结果: move={move}, FEN={fen}")
             
             chinese_move = utils.convert_move_to_chinese(move, board_array, self.checker.is_red)
             # 新增：推送到UI队列

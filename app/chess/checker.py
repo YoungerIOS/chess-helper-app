@@ -54,6 +54,12 @@ class PositionChecker:
         self.last_board = None  # 上一次的棋盘数组
         self.last_counts = None  # 上一次的棋子数量统计
         
+    def reset_state(self):
+        """重置检查器状态，用于手动刷新时清除历史状态"""
+        self.last_board = None
+        self.last_counts = None
+        print("Debug - 检查器状态已重置")
+
     def is_red_at_bottom(self, board_array):
         """通过黑王的位置判断红方是否在棋盘底部"""
         for r in range(3):  # 上方九宫格是前3行

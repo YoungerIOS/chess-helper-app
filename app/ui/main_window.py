@@ -55,8 +55,11 @@ class MainWindow(QMainWindow):
         screen_height = screen.size().height()
         screen_width = screen.size().width()
         
+        # 将屏幕尺寸保存到上下文对象中，供其他模块使用
+        context.screen_size = (screen_width, screen_height)
+        
         # 加载棋盘图片并计算其宽高比
-        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard.png'))
+        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard1.png'))
         board_ratio = board_img.width() / board_img.height()
         
         # 使用屏幕高度 x 80% x 0.56 计算窗口宽度, 不为什么, 就是觉得协调,
@@ -77,7 +80,7 @@ class MainWindow(QMainWindow):
         # 设置窗口高度为棋盘高度加上其他UI元素的高度
         height = board_height + other_heights
         
-        print(f"Screen height: {screen_height}")
+        print(f"Screen size: {screen_width}x{screen_height}")
         print(f"Window size: {width}x{height}")
         
         # 设置窗口固定大小
@@ -186,11 +189,11 @@ class MainWindow(QMainWindow):
         else:
             self.tt_action.setChecked(True)
         
-        # 创建棋盘定位按钮 - 改为普通按钮直接调用重新定位功能
-        self.board_btn = QPushButton("棋盘定位")
-        self.board_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
-        self.board_btn.setFont(QFont("Arial", 11))
-        self.board_btn.setStyleSheet("""
+        # 创建手动刷新按钮
+        self.manual_refresh_btn = QPushButton("手动刷新")
+        self.manual_refresh_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
+        self.manual_refresh_btn.setFont(QFont("Arial", 11))
+        self.manual_refresh_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1874CD;
                 color: white;
@@ -209,9 +212,9 @@ class MainWindow(QMainWindow):
                 border: 1px solid #0d47a1;
             }
         """)
-        # 直接连接到重新定位功能
-        self.board_btn.clicked.connect(self.on_reposition)
-        middle_buttons_layout.addWidget(self.board_btn)
+        # 连接到手动刷新功能
+        self.manual_refresh_btn.clicked.connect(self.on_manual_capture)
+        middle_buttons_layout.addWidget(self.manual_refresh_btn)
         
         # 添加其他按钮
         self.start_btn = QPushButton("开始")
@@ -257,37 +260,83 @@ class MainWindow(QMainWindow):
         control_layout.setSpacing(5)
         control_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
         
-        # 创建控制按钮
-        buttons = [
-            ("按钮", None),  # 移除回调函数
-            ("手动刷新", self.on_manual_capture),
-        ]
+        # 创建退出按钮
+        self.exit_btn = QPushButton("退出")
+        self.exit_btn.setMinimumHeight(35)
+        self.exit_btn.setFont(QFont("Arial", 11))
+        self.exit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        self.exit_btn.clicked.connect(self.on_exit)
+        control_layout.addWidget(self.exit_btn)
         
-        for text, callback in buttons:
-            btn = QPushButton(text)
-            btn.setMinimumHeight(35)
-            btn.setFont(QFont("Arial", 11))
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #1874CD;
-                    color: white;
-                    border: 1px solid #1874CD;
-                    border-radius: 5px;
-                    padding: 0px;
-                    margin: 0px;
-                }
-                QPushButton:hover {
-                    background-color: #1565c0;
-                    border: 1px solid #1565c0;
-                }
-                QPushButton:pressed {
-                    background-color: #0d47a1;
-                    border: 1px solid #0d47a1;
-                }
-            """)
-            if callback:  # 只有当callback不为None时才连接点击事件
-                btn.clicked.connect(callback)
-            control_layout.addWidget(btn)
+        # 创建棋盘定位按钮 - 改为下拉菜单样式
+        self.board_btn = QPushButton("棋盘设置")
+        self.board_btn.setFixedSize(75, 35)  
+        self.board_btn.setFont(QFont("Arial", 11))
+        # 加载并设置箭头图标
+        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        self.board_btn.setIcon(arrow_icon)
+        self.board_btn.setIconSize(QSize(12, 12))
+        self.board_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                text-align: center;
+                padding: 0px 8px;  /* 左右padding设为8px */
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        self.board_btn.clicked.connect(self.show_board_menu)
+        control_layout.addWidget(self.board_btn)
+        
+        # 创建棋盘设置菜单
+        self.board_menu = QMenu(self)
+        self.board_menu.setStyleSheet("""
+            QMenu {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 2px;
+            }
+            QMenu::item {
+                padding: 5px 10px;
+                min-height: 20px;
+                color: black;
+            }
+            QMenu::item:selected {
+                background-color: #e0e0e0;
+            }
+        """)
+        self.manual_position_action = self.board_menu.addAction("手动定位")
+        self.change_board_action = self.board_menu.addAction("更换棋盘")
+        self.manual_position_action.triggered.connect(self.on_reposition)
+        self.change_board_action.triggered.connect(self.on_change_board_bg)
         
         # 创建"其他设置"按钮
         self.settings_btn = QPushButton("其他设置") 
@@ -589,7 +638,7 @@ class MainWindow(QMainWindow):
         """创建队列和启动分析线程"""
         # 首先停止旧线程（如果有的话）  
         if self.capture_thread is not None and self.capture_thread.is_alive():  
-            self.capture_manager.stop_capture()  # 使用截图模块的方法停止
+            self.capture_manager.stop_capture()  # 调用截图模块的方法停止
             self.capture_thread.join()  # 等待线程结束  
         if self.check_timer:
             self.check_timer.stop()
@@ -952,7 +1001,7 @@ class MainWindow(QMainWindow):
             # 设置手动触发标志
             self.capture_manager.manual_trigger = True
             # 执行一次完整的监控与截图流程
-            success = self.capture_manager.execute_single_capture_cycle()
+            success = self.capture_manager.manually_capture_once()
             if success:
                 self.update_text("手动触发截图完成")
             else:
@@ -974,6 +1023,31 @@ class MainWindow(QMainWindow):
         self.param_label.setText(self.engine_params[param])
         context.update_engine_params(self.engine_params)
 
+    def show_board_menu(self):
+        """显示棋盘定位菜单"""
+        self.board_menu.exec_(self.board_btn.mapToGlobal(self.board_btn.rect().bottomLeft()))
+    
+    def on_change_board_bg(self):
+        """更换棋盘底图"""
+        self.board_display.next_board()
+    
+    def on_exit(self):
+        """优雅安全规范地退出程序"""
+        # 停止所有线程和监听器
+        self.stop_mouse_listener()
+        self.close_queue()
+        
+        # 关闭定位点
+        if self.position_dot:
+            self.position_dot.close()
+            self.position_dot = None
+        
+        # 保存配置
+        context.save_config()
+        
+        # 优雅退出
+        QApplication.quit()
+    
     def show_game_menu(self):
         """显示游戏选择菜单"""
         self.game_menu.exec_(self.game_btn.mapToGlobal(self.game_btn.rect().bottomLeft()))
