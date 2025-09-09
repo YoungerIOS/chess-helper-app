@@ -45,7 +45,7 @@ class ChessProcess:
     def _process_image(self, img):
         """主流程入口，处理图像并返回相应消息"""
         # 1. 识别棋盘和棋子
-        board = self._recognize_board_and_pieces(img)
+        board = self._recognize_pieces(img)
         if board is None:
             return ProcessResult()
 
@@ -89,13 +89,12 @@ class ChessProcess:
 
         return ProcessResult()
         
-    def _recognize_board_and_pieces(self, img) -> Optional[list]:
+    def _recognize_pieces(self, img) -> Optional[list]:
         # 识别棋盘和棋子
-        try:
-            x_array, y_array = self.recognizer.recognize_board(img)
-        except Exception as e:
-            print(f"棋盘识别失败: {str(e)}")
-            return None
+        platform = self.context.get_platform(self.context.platform)
+        coords = getattr(platform, 'board_coords', {}) or {}
+        x_array = coords.get("x", [])
+        y_array = coords.get("y", [])
 
         try:
             board_array = self.recognizer.recognize_piece_from_grid(img, x_array, y_array)

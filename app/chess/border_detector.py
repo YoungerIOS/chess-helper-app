@@ -6,22 +6,15 @@ import time
 class BorderDetector:
     """边框检测器类，支持TT平台的矩形边框和JJ平台的圆弧边框检测"""
     
-    def __init__(
-            self, 
-            arc_area_threshold: int = 300, 
-            arc_radius_threshold: float = 25.0, 
-            arc_border_line_width: int = 5,
-            rect_area_threshold: int = 300,
-            rect_height_threshold: int = 40,
-            rect_border_line_width: int = 5
-            ):
+    def __init__(self):
         
-        self.arc_area_threshold = arc_area_threshold #圆弧面积阈值，默认300
-        self.arc_radius_threshold = arc_radius_threshold #圆弧半径阈值，默认25.0
-        self.arc_border_line_width = arc_border_line_width #圆弧线宽，默认5
-        self.rect_area_threshold = rect_area_threshold #矩形面积阈值，默认300
-        self.rect_height_threshold = rect_height_threshold #矩形高度阈值，默认40
-        self.rect_border_line_width = rect_border_line_width #矩形线宽，默认5
+        self.arc_area_threshold = 300 #圆弧面积阈值，默认300
+        self.arc_radius_threshold = 25 #圆弧半径阈值，默认25.0
+        self.arc_border_line_width = 5 #圆弧线宽，默认5
+
+        self.rect_area_threshold = 300 #矩形面积阈值，默认300
+        self.rect_height_threshold = 40 #矩形高度阈值，默认40
+        self.rect_border_line_width = 5 #矩形线宽，默认5
         
         self.upper_max_rect_border = None
         self.lower_max_rect_border = None
@@ -29,16 +22,14 @@ class BorderDetector:
         self.lower_max_arc_border = None
         
     
-
-    
     def has_border(self, screenshot, platform: str, avatar: str) -> bool:
         """
         检测头像是否有边框（倒计时状态）
-        根据头像截图尺寸动态调整检测阈值，确保在不同分辨率设备上都能正常工作
+        根据头像截图尺寸动态调整检测阈值，确保在不同窗口尺寸下都能正常工作
         """
         # 计算缩放比例：当前头像截图尺寸 / 标准头像尺寸
-        # 标准头像尺寸：72x72（与BoardLocator中的base_sizes['square_size']保持一致）
-        base_square_size = 72
+        # 标准头像尺寸：(参考值在1440x900分辨率/窗口尺寸400x753下测得)
+        base_square_size = 84
         current_size = min(screenshot.width, screenshot.height)
         scale_factor = current_size / base_square_size
         
@@ -216,8 +207,8 @@ class BorderDetector:
             green_ratio = green_length / center_line_perimeter
             yellow_ratio = yellow_length / center_line_perimeter
             
-            if avatar == "lower":
-                print(f"头像{avatar} - 绿色长度: {green_length:.1f}, 占比: {green_ratio:.3f} - 黄色长度: {yellow_length:.1f}, 占比: {yellow_ratio:.3f} - 中心线周长: {center_line_perimeter:.1f}")
+            # if avatar == "lower":
+                # print(f"头像{avatar} - 绿色长度: {green_length:.1f}, 占比: {green_ratio:.3f} - 黄色长度: {yellow_length:.1f}, 占比: {yellow_ratio:.3f} - 中心线周长: {center_line_perimeter:.1f}")
          
             # print(f"头像{avatar} - 绿色长度占比: {green_ratio:.3f}, 黄色长度占比: {yellow_ratio:.3f}")
             
@@ -306,8 +297,8 @@ class BorderDetector:
             red_ratio = (red_length / center_circumference) if center_circumference > 0 else 0.0
             
             # 调试输出
-            if avatar == "lower":
-                print(f"JJ平台圆弧边框环 - 黄长度: {yellow_length:.1f}, 红长度: {red_length:.1f}, 中心线周长: {center_circumference:.1f}")
+                # if avatar == "lower":
+                #     print(f"JJ平台圆弧边框环 - 黄长度: {yellow_length:.1f}, 红长度: {red_length:.1f}, 中心线周长: {center_circumference:.1f}")
             
             # 判定（与矩形逻辑风格一致，阈值可按需微调）
             if yellow_ratio > 0.13:

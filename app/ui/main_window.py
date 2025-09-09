@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QApplication, QMenu)
-from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject
 from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 import os
 import queue
@@ -14,36 +14,6 @@ from chess.context import context
 from ui.board_display import BoardDisplay
 from pynput import mouse
 
-# 定义一个自定义覆盖层类，直接处理鼠标事件
-class OverlayWidget(QWidget):
-    def __init__(self, parent=None, callback=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground)  # 背景透明
-        self.setWindowFlags(
-            Qt.FramelessWindowHint | 
-            Qt.WindowStaysOnTopHint | 
-            Qt.Tool |
-            Qt.X11BypassWindowManagerHint  # 绕过窗口管理器
-        )
-        self.callback = callback
-        self.setCursor(Qt.CrossCursor)  # 设置十字光标，让用户知道这是可点击区域
-        
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.callback:
-            self.callback(QCursor.pos())
-        super().mousePressEvent(event)
-    
-    def showEvent(self, event):
-        """窗口显示时调用，确保窗口在最前方"""
-        super().showEvent(event)
-        self.raise_()  # 保持在最前方
-        self.activateWindow()  # 激活窗口
-        
-    def focusOutEvent(self, event):
-        """处理失去焦点的情况，保持窗口在最前方"""
-        super().focusOutEvent(event)
-        self.raise_()  # 保持在最前方
-        self.activateWindow()  # 重新激活窗口
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -366,7 +336,6 @@ class MainWindow(QMainWindow):
             }
         """)
         # 不再使用checkable属性
-        self.is_dot_visible = True # 添加一个状态变量来跟踪原点是否可见
         self.settings_btn.clicked.connect(self.show_settings_menu)
         control_layout.addWidget(self.settings_btn)
         
@@ -391,18 +360,14 @@ class MainWindow(QMainWindow):
                 background-color: #e0e0e0;
             }
         """)
-        self.show_dot_action = self.settings_menu.addAction("显示原点")
         self.continuous_action = self.settings_menu.addAction("连续识别")
         self.timer_action = self.settings_menu.addAction("计时识别")
         # 设置菜单项可选中
-        self.show_dot_action.setCheckable(True)
         self.continuous_action.setCheckable(True)
         self.timer_action.setCheckable(True)
         # 设置初始选中状态
-        self.show_dot_action.setChecked(True)  # 初始时原点显示
         self.continuous_action.setChecked(context.analysis_mode == "continuous")  # 根据配置设置初始状态
         self.timer_action.setChecked(context.analysis_mode == "timer")  # 根据配置设置初始状态
-        self.show_dot_action.triggered.connect(self.toggle_show_dot)
         self.continuous_action.triggered.connect(self.toggle_continuous)
         self.timer_action.triggered.connect(self.toggle_timer)
         
@@ -540,29 +505,20 @@ class MainWindow(QMainWindow):
         control_layout.addLayout(param_layout)
         main_layout.addLayout(control_layout)
         
-        # 初始化定位状态
-        self.is_positioning = False
-        self.position_dot = None
-        self.is_show_dot = True
-        self.follow_cursor = False  # 新增：是否跟随光标
-        self.cursor_timer = None    # 新增：光标跟踪定时器
-        self.mouse_listener = None  # 新增：鼠标事件监听器
-        
-        # 显示定位点
-        self.create_position_dot()
-        
         # 初始化线程和队列
         self.ui_message_queue = queue.Queue()
         self.capture_thread = None
         self.check_timer = None
+        # 初始化截图管理器
         self.capture_manager = ChessCaptureManager(self.ui_message_queue)
+        # 初始化手动定位器
+        self.manual_positioner = ManualPositioner(self)
 
         # 初始化状态
         self.is_running = False
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
         self.lines = ["", "", ""]
-        
-    
+
     
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
@@ -791,80 +747,109 @@ class MainWindow(QMainWindow):
         """)
         self.move_display.setText(original_text)
     
-    def create_position_dot(self):
-        """创建定位点（图片右下角对齐光标，最大高度25像素，保持比例）"""
+    def create_position_dot(self, is_temp=False, x=None, y=None):
+        """
+        创建定位点
+        Args:
+            is_temp: 是否为临时定位点（跟随光标）
+            x, y: 指定位置坐标（如果为None且is_temp=False，则从配置读取）
+        """
         if self.position_dot:
+            # 移除事件过滤器（如果存在）
+            if hasattr(self.position_dot, 'removeEventFilter'):
+                self.position_dot.removeEventFilter(self)
             self.position_dot.close()
             self.position_dot = None
-        platform = context.get_platform(context.platform)
-        board_region = platform.regions["board"]
-        x = board_region['left']
-        y = board_region['top']
+        
+        # 创建定位点
         self.position_dot = QLabel(None)
-        self.position_dot.setWindowFlags(
-            Qt.FramelessWindowHint | 
-            Qt.WindowStaysOnTopHint | 
-            Qt.Tool |
-            Qt.NoDropShadowWindowHint
-        )
+        
+        # 设置窗口标志
+        if is_temp:
+            # 临时定位点：增强的窗口标志
+            self.position_dot.setWindowFlags(
+                Qt.FramelessWindowHint | 
+                Qt.WindowStaysOnTopHint | 
+                Qt.Tool |
+                Qt.X11BypassWindowManagerHint |  # 绕过窗口管理器
+                Qt.NoDropShadowWindowHint
+            )
+            self.position_dot.setAttribute(Qt.WA_ShowWithoutActivating)  # 显示但不激活
+            # 标记为临时定位点
+            self.position_dot.setProperty("is_temp", True)
+            # 安装事件过滤器
+            self.position_dot.installEventFilter(self)
+        else:
+            # 正常定位点：基本窗口标志
+            self.position_dot.setWindowFlags(
+                Qt.FramelessWindowHint | 
+                Qt.WindowStaysOnTopHint | 
+                Qt.Tool |
+                Qt.NoDropShadowWindowHint
+            )
+        
+        # 通用属性设置
         self.position_dot.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # 加载定位点图片
         pixmap = QPixmap('app/images/dingwei.png')
         scaled_pixmap = pixmap.scaledToHeight(25, Qt.SmoothTransformation)
         width = scaled_pixmap.width()
         height = scaled_pixmap.height()
-        # 修复：使用棋盘坐标，让原点图片的右下角顶点与棋盘坐标点重合
-        window_x = x - width - 3
-        window_y = y - height - 3
+        
+        # 确定位置
+        if is_temp:
+            # 临时定位点：跟随光标
+            cursor_pos = QCursor.pos()
+            window_x = cursor_pos.x() - width/2
+            window_y = cursor_pos.y() - height/2
+        elif x is not None and y is not None:
+            # 指定坐标
+            window_x = x - width/2
+            window_y = y - height/2
+        else:
+            # 从配置读取坐标
+            try:
+                platform = context.get_platform(context.platform)
+                board_region = platform.regions.get("board")
+                
+                if not board_region or 'left' not in board_region or 'top' not in board_region:
+                    print("棋盘区域配置无效，无法创建定位点")
+                    return
+                    
+                x = board_region['left']
+                y = board_region['top']
+                window_x = x - width/2
+                window_y = y - height/2
+            except Exception as e:
+                print(f"创建定位点失败: {e}")
+                # 如果创建失败，尝试创建临时定位点
+                self.create_position_dot(is_temp=True)
+                return
+        
+        # 设置位置和显示
         self.position_dot.setGeometry(window_x, window_y, width, height)
         self.position_dot.setStyleSheet("background: transparent;")
         self.position_dot.setPixmap(scaled_pixmap)
         self.position_dot.show()
         self.position_dot.raise_()
-        if self.follow_cursor:
+        
+        # 临时定位点的特殊处理
+        if is_temp:
+            # 强制保持在最前面
+            self.position_dot.setWindowState(Qt.WindowActive)
+        elif self.follow_cursor:
+            # 正常定位点：如果启用了光标跟踪
             self.start_cursor_tracking()
-    
-    def start_cursor_tracking(self):
-        """启动光标跟踪"""
-        if self.cursor_timer is None:
-            self.cursor_timer = QTimer()
-            self.cursor_timer.timeout.connect(self.update_dot_position)
-            self.cursor_timer.start(10)  # 每10毫秒更新一次位置
-    
-    def stop_cursor_tracking(self):
-        """停止光标跟踪"""
-        if self.cursor_timer:
-            self.cursor_timer.stop()
-            self.cursor_timer = None
-    
-    def update_dot_position(self):
-        """更新定位点位置，使鼠标始终在图片右下角顶点并偏移3像素"""
-        if self.position_dot and self.follow_cursor:
-            cursor_pos = QCursor.pos()
-            width = self.position_dot.width()
-            height = self.position_dot.height()
-            window_x = cursor_pos.x() - width - 3
-            window_y = cursor_pos.y() - height - 3
-            self.position_dot.move(window_x, window_y)
+
+    # 定位点相关方法已移至ManualPositioner类中
     
     def show_settings_menu(self):
         """显示设置菜单"""
         self.settings_menu.exec_(self.settings_btn.mapToGlobal(self.settings_btn.rect().bottomLeft()))
 
-    def toggle_show_dot(self):
-        """切换显示/隐藏原点"""
-        if self.is_dot_visible:
-            # 当前原点可见，点击后隐藏原点
-            if self.position_dot:
-                self.position_dot.close()
-                self.position_dot = None
-            self.is_dot_visible = False
-            self.show_dot_action.setChecked(False)
-        else:
-            # 当前原点隐藏，点击后显示原点
-            self.create_position_dot()
-            self.is_dot_visible = True
-            self.show_dot_action.setChecked(True)
+
 
     def toggle_continuous(self):
         """切换连续识别模式"""
@@ -894,106 +879,25 @@ class MainWindow(QMainWindow):
 
     def on_reposition(self):
         """处理重新定位选项"""
-        self.move_display.setText('<span style="color: red;">将光标移到棋盘左上角顶点，<br>点击确认</span>')
-        self.is_positioning = True
-        self.follow_cursor = True  # 重新定位时跟随光标
-        self.start_cursor_tracking()  # 开始跟踪
-        
-        # 启动鼠标监听
-        self.start_mouse_listener()
+        # 使用手动定位器开始定位
+        self.manual_positioner.start_positioning()
     
-    def start_mouse_listener(self):
-        """启动全局鼠标监听"""
-        # 如果已经有一个监听器在运行，先停止它
-        if self.mouse_listener:
-            self.stop_mouse_listener()
-        
-        # 创建新的监听器
-        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
-        # 启动监听线程
-        self.mouse_listener.start()
-    
-    def stop_mouse_listener(self):
-        """停止全局鼠标监听"""
-        if self.mouse_listener and self.mouse_listener.is_alive():
-            self.mouse_listener.stop()
-            self.mouse_listener = None
-    
-    def on_mouse_click(self, x, y, button, pressed):
-        """处理全局鼠标点击事件"""
-        # 只响应鼠标左键按下事件，并且仅在定位模式时生效
-        if button == mouse.Button.left and pressed and self.is_positioning:
-            # 获取点击位置并调用确认方法
-            cursor_pos = QPoint(x, y)
-            # 将该操作切换到主线程执行
-            QApplication.instance().postEvent(self, QEvent(QEvent.User))
-            # 在事件处理函数中处理
-            self.cursor_pos_clicked = cursor_pos  # 保存点击位置
-            return False  # 停止监听
-        return True  # 继续监听
     
     def event(self, event):
         """处理自定义事件"""
-        if event.type() == QEvent.User and hasattr(self, 'cursor_pos_clicked'):
+        if event.type() == CONFIRM_POSITION_EVENT and hasattr(self, 'cursor_pos_clicked'):
             # 从保存的属性获取光标位置
             cursor_pos = self.cursor_pos_clicked
             # 执行确认操作
-            self.confirm_position(cursor_pos)
+            self.manual_positioner.confirm_position(cursor_pos)
             # 删除临时属性
             delattr(self, 'cursor_pos_clicked')
             return True
+        elif event.type() == CANCEL_POSITION_EVENT:
+            # 取消定位事件
+            self.manual_positioner.cancel_positioning()
+            return True
         return super().event(event)
-    
-    def confirm_position(self, cursor_pos):
-        """确认位置，处理共同逻辑"""
-        x = cursor_pos.x()
-        y = cursor_pos.y()
-        
-        try:
-            # 修改为通过 try_locate_board 进行手动定位
-            success = self.capture_manager.try_locate_board(manual_coords=(x, y))
-        except Exception as e:
-            print(f'手动定位失败: {e}')
-            success = False
-        
-        # 重置定位状态
-        self.is_positioning = False
-        self.follow_cursor = False  # 禁用光标跟踪
-        self.stop_cursor_tracking()  # 停止跟踪
-        # 停止鼠标监听
-        self.stop_mouse_listener()
-        
-        if success:
-            # 创建并显示定位点
-            if self.position_dot:
-                self.position_dot.close()
-                self.position_dot = None
-            pixmap = QPixmap('app/images/dingwei.png')
-            scaled_pixmap = pixmap.scaledToHeight(25, Qt.SmoothTransformation)
-            width = scaled_pixmap.width()
-            height = scaled_pixmap.height()
-            window_x = x - width - 3
-            window_y = y - height - 3
-            self.position_dot = QLabel(None)
-            self.position_dot.setWindowFlags(
-                Qt.FramelessWindowHint | 
-                Qt.WindowStaysOnTopHint | 
-                Qt.Tool |
-                Qt.NoDropShadowWindowHint
-            )
-            self.position_dot.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
-            self.position_dot.setGeometry(window_x, window_y, width, height)
-            self.position_dot.setStyleSheet("background: transparent;")
-            self.position_dot.setPixmap(scaled_pixmap)
-            self.position_dot.show()
-            self.position_dot.raise_()  # 确保显示在最前方
-            # 更新定位点状态
-            self.is_dot_visible = True
-            self.move_display.setText('<span style="color: green;">手动定位完成!</span>')
-        else:
-            # 定位失败，显示错误信息
-            self.move_display.setText('<span style="color: red;">手动定位失败，请重试</span>')
 
     def on_manual_capture(self):
         """手动触发一次完整的监控与截图流程"""
@@ -1034,13 +938,9 @@ class MainWindow(QMainWindow):
     def on_exit(self):
         """优雅安全规范地退出程序"""
         # 停止所有线程和监听器
-        self.stop_mouse_listener()
+        if hasattr(self, 'manual_positioner'):
+            self.manual_positioner.cleanup()
         self.close_queue()
-        
-        # 关闭定位点
-        if self.position_dot:
-            self.position_dot.close()
-            self.position_dot = None
         
         # 保存配置
         context.save_config()
@@ -1061,14 +961,12 @@ class MainWindow(QMainWindow):
         # 更新平台
         platform = "JJ" if game == "JJ象棋" else "TT"
         context.set_platform(platform)
-        
-        # 更新定位点
-        self.create_position_dot()
 
     def closeEvent(self, event):
         """窗口关闭时处理"""
         # 停止所有线程和监听器
-        self.stop_mouse_listener()
+        if hasattr(self, 'manual_positioner'):
+            self.manual_positioner.cleanup()
         self.close_queue()
         super().closeEvent(event)
 
@@ -1077,3 +975,394 @@ def main():
     window = MainWindow()
     window.show()
     sys.exit(app.exec()) 
+
+
+# 定义一个自定义覆盖层类，直接处理鼠标事件
+class OverlayWidget(QWidget):
+    def __init__(self, parent=None, callback=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # 背景透明
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool |
+            Qt.X11BypassWindowManagerHint  # 绕过窗口管理器
+        )
+        self.callback = callback
+        self.setCursor(Qt.CrossCursor)  # 设置十字光标，让用户知道这是可点击区域
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.callback:
+            self.callback(QCursor.pos())
+        super().mousePressEvent(event)
+    
+    def showEvent(self, event):
+        """窗口显示时调用，确保窗口在最前方"""
+        super().showEvent(event)
+        self.raise_()  # 保持在最前方
+        self.activateWindow()  # 激活窗口
+        
+    def focusOutEvent(self, event):
+        """处理失去焦点的情况，保持窗口在最前方"""
+        super().focusOutEvent(event)
+        self.raise_()  # 保持在最前方
+        self.activateWindow()  # 重新激活窗口
+
+# 定义自定义事件类型
+CONFIRM_POSITION_EVENT = QEvent.Type(QEvent.User)
+CANCEL_POSITION_EVENT = QEvent.Type(QEvent.User + 1)
+
+class ManualPositioner(QObject):
+    """手动定位器 - 封装所有手动定位相关的功能"""
+    
+    def __init__(self, main_window):
+        super().__init__()  # 调用QObject的初始化方法
+        self.main_window = main_window
+        self.context = context  # 直接使用全局的context
+        
+        # 定位状态
+        self.is_positioning = False
+        self.position_dot = None
+        self.follow_cursor = False
+        self.cursor_timer = None
+        self.raise_timer = None
+        self.mouse_listener = None
+        
+        # 手动定位相关状态
+        self.positioning_step = 0  # 定位步骤：0-未开始，1-左上角，2-右下角
+        self.positioning_coords = []  # 存储2个角的坐标
+    
+    def start_positioning(self):
+        """开始手动定位"""
+        print("开始手动定位")
+        self.cancel_positioning()
+        
+        # 重置定位状态
+        self.positioning_step = 1
+        self.positioning_coords = []
+        self.is_positioning = True
+        self.follow_cursor = True
+        
+        # 创建临时定位点，跟随光标移动
+        self.create_position_dot(is_temp=True)
+        self.start_cursor_tracking()
+        
+        # 显示第一步提示
+        self.main_window.move_display.setText('<span style="color: red;">第1步：点击棋盘左上角顶点<br>右键点击可取消定位</span>')
+        
+        # 启动鼠标监听
+        self.start_mouse_listener()
+        print("手动定位已启动")
+    
+    def cancel_positioning(self):
+        """取消定位过程"""
+        print("取消定位过程")
+        self.positioning_step = 0
+        self.positioning_coords = []
+        self.is_positioning = False
+        self.follow_cursor = False
+        self.stop_cursor_tracking()
+        self.stop_mouse_listener()
+        
+        # 清理临时定位点
+        self.cleanup_position_dot()
+        
+        self.main_window.move_display.setText('<span style="color: blue;">定位已取消</span>')
+        print("手动定位已取消")
+    
+    def create_position_dot(self, is_temp=False, x=None, y=None):
+        """创建定位点"""
+        if self.position_dot:
+            self.cleanup_position_dot()
+        
+        # 创建定位点
+        self.position_dot = QLabel(None)
+        
+        # 设置窗口标志
+        if is_temp:
+            # 临时定位点：增强的窗口标志
+            self.position_dot.setWindowFlags(
+                Qt.FramelessWindowHint | 
+                Qt.WindowStaysOnTopHint | 
+                Qt.Tool |
+                Qt.X11BypassWindowManagerHint |
+                Qt.NoDropShadowWindowHint
+            )
+            self.position_dot.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.position_dot.setProperty("is_temp", True)
+            self.position_dot.installEventFilter(self)
+        else:
+            # 正常定位点：基本窗口标志
+            self.position_dot.setWindowFlags(
+                Qt.FramelessWindowHint | 
+                Qt.WindowStaysOnTopHint | 
+                Qt.Tool |
+                Qt.NoDropShadowWindowHint
+            )
+        
+        # 通用属性设置
+        self.position_dot.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # 加载定位点图片
+        pixmap = QPixmap('app/images/dingwei.png')
+        scaled_pixmap = pixmap.scaledToHeight(25, Qt.SmoothTransformation)
+        width = scaled_pixmap.width()
+        height = scaled_pixmap.height()
+        
+        # 确定位置
+        if is_temp:
+            # 临时定位点：跟随光标
+            cursor_pos = QCursor.pos()
+            window_x = cursor_pos.x() - width/2
+            window_y = cursor_pos.y() - height/2
+        elif x is not None and y is not None:
+            # 指定坐标
+            window_x = x - width/2
+            window_y = y - height/2
+        else:
+            # 从配置读取坐标
+            try:
+                platform = self.context.get_platform(self.context.platform)
+                board_region = platform.regions.get("board")
+                
+                if not board_region or 'x' not in board_region or 'y' not in board_region:
+                    print("棋盘区域配置无效，无法创建定位点")
+                    return
+                    
+                x = board_region['x']
+                y = board_region['y']
+                window_x = x - width/2
+                window_y = y - height/2
+            except Exception as e:
+                print(f"创建定位点失败: {e}")
+                return
+        
+        # 设置位置和显示
+        self.position_dot.setGeometry(window_x, window_y, width, height)
+        self.position_dot.setStyleSheet("background: transparent;")
+        self.position_dot.setPixmap(scaled_pixmap)
+        self.position_dot.show()
+        self.position_dot.raise_()
+        
+        # 临时定位点的特殊处理
+        if is_temp:
+            self.position_dot.setWindowState(Qt.WindowActive)
+    
+    def cleanup_position_dot(self):
+        """清理定位点"""
+        if self.position_dot:
+            try:
+                if hasattr(self.position_dot, 'removeEventFilter'):
+                    self.position_dot.removeEventFilter(self)
+                self.position_dot.hide()
+                self.position_dot.deleteLater()
+                self.position_dot = None
+            except Exception as e:
+                print(f"清理定位点时出错: {e}")
+    
+    def is_temp_position_dot(self):
+        """检查当前定位点是否为临时定位点"""
+        return (self.position_dot and 
+                hasattr(self.position_dot, 'property') and 
+                self.position_dot.property("is_temp") == True)
+    
+    def start_cursor_tracking(self):
+        """启动光标跟踪"""
+        if self.cursor_timer is None:
+            self.cursor_timer = QTimer()
+            self.cursor_timer.timeout.connect(self.update_dot_position)
+            self.cursor_timer.start(10)
+            
+        if not hasattr(self, 'raise_timer') or self.raise_timer is None:
+            self.raise_timer = QTimer()
+            self.raise_timer.timeout.connect(self.ensure_dot_on_top)
+            self.raise_timer.start(100)
+    
+    def stop_cursor_tracking(self):
+        """停止光标跟踪"""
+        if self.cursor_timer:
+            self.cursor_timer.stop()
+            self.cursor_timer = None
+        
+        if hasattr(self, 'raise_timer') and self.raise_timer:
+            self.raise_timer.stop()
+            self.raise_timer = None
+    
+    def ensure_dot_on_top(self):
+        """确保定位点保持在最前面"""
+        if self.position_dot and self.is_temp_position_dot() and self.is_positioning:
+            self.position_dot.raise_()
+            self.position_dot.setWindowState(Qt.WindowActive)
+    
+    def eventFilter(self, obj, event):
+        """事件过滤器，处理定位点的事件"""
+        if obj == self.position_dot and self.is_temp_position_dot():
+            if event.type() == QEvent.WindowActivate:
+                self.position_dot.raise_()
+                self.position_dot.setWindowState(Qt.WindowActive)
+                return True
+            elif event.type() == QEvent.WindowDeactivate:
+                self.position_dot.raise_()
+                self.position_dot.setWindowState(Qt.WindowActive)
+                return True
+            elif event.type() == QEvent.Show:
+                self.position_dot.raise_()
+                self.position_dot.setWindowState(Qt.WindowActive)
+                return True
+        return False
+    
+    def update_dot_position(self):
+        """更新定位点位置，使图片中心与光标重合"""
+        if self.position_dot and self.follow_cursor and self.is_temp_position_dot():
+            cursor_pos = QCursor.pos()
+            width = self.position_dot.width()
+            height = self.position_dot.height()
+            window_x = cursor_pos.x() - width/2
+            window_y = cursor_pos.y() - height/2
+            self.position_dot.move(window_x, window_y)
+            self.position_dot.raise_()
+            self.position_dot.setWindowState(Qt.WindowActive)
+    
+    def start_mouse_listener(self):
+        """启动全局鼠标监听"""
+        if self.mouse_listener:
+            self.stop_mouse_listener()
+        
+        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
+        self.mouse_listener.start()
+    
+    def stop_mouse_listener(self):
+        """停止全局鼠标监听"""
+        if self.mouse_listener and self.mouse_listener.is_alive():
+            self.mouse_listener.stop()
+            self.mouse_listener = None
+    
+    def on_mouse_click(self, x, y, button, pressed):
+        """处理全局鼠标点击事件"""
+        if not self.is_positioning:
+            return True
+            
+        if button == mouse.Button.left and pressed:
+            # 左键点击：确认位置
+            cursor_pos = QPoint(x, y)
+            # 将该操作切换到主线程执行
+            QApplication.instance().postEvent(self.main_window, QEvent(CONFIRM_POSITION_EVENT))
+            # 在事件处理函数中处理
+            self.main_window.cursor_pos_clicked = cursor_pos
+            return True
+        elif button == mouse.Button.right and pressed:
+            # 右键点击：取消定位
+            QApplication.instance().postEvent(self.main_window, QEvent(CANCEL_POSITION_EVENT))
+            return False
+        return True
+    
+    def confirm_position(self, cursor_pos):
+        """确认位置，处理2角定位逻辑"""
+        x = cursor_pos.x()
+        y = cursor_pos.y()
+        
+        if self.positioning_step == 1:
+            # 第1步：左上角
+            self.positioning_coords.append((x, y))
+            self.positioning_step = 2
+            self.main_window.move_display.setText('<span style="color: orange;">第2步：点击棋盘右下角顶点<br>右键点击可取消定位</span>')
+            
+            # 确保定位点继续跟随光标
+            if self.position_dot and self.follow_cursor:
+                self.start_cursor_tracking()
+            
+        elif self.positioning_step == 2:
+            # 第2步：右下角
+            self.positioning_coords.append((x, y))
+            
+            # 完成2角定位，计算棋盘区域
+            try:
+                success = self.process_two_corner_positioning()
+            except Exception as e:
+                print(f'2角定位处理失败: {e}')
+                success = False
+            
+            # 重置定位状态
+            self.is_positioning = False
+            self.follow_cursor = False
+            self.stop_cursor_tracking()
+            self.stop_mouse_listener()
+            
+            if success:
+                # 创建并显示定位点（使用左上角坐标）
+                left_top = self.positioning_coords[0]
+                self.create_position_dot(is_temp=False, x=left_top[0], y=left_top[1])
+                self.main_window.move_display.setText('<span style="color: green;">2角定位完成!</span>')
+            else:
+                # 定位失败，显示错误信息
+                self.main_window.move_display.setText('<span style="color: red;">2角定位失败，请重试</span>')
+                # 重置定位状态，允许重新开始
+                self.positioning_step = 0
+                self.positioning_coords = []
+    
+    def process_two_corner_positioning(self):
+        """处理2角定位，计算棋盘区域并更新配置"""
+        if len(self.positioning_coords) != 2:
+            print("2角定位坐标不足")
+            return False
+        
+        # 解包2个角的坐标
+        left_top = self.positioning_coords[0]
+        right_bottom = self.positioning_coords[1]
+        
+        # 计算棋盘区域
+        x = left_top[0]  # 左上角x坐标
+        y = left_top[1]  # 左上角y坐标
+        width = right_bottom[0] - left_top[0]  # 宽度
+        height = right_bottom[1] - left_top[1]  # 高度
+        
+        # 验证棋盘尺寸的合理性
+        if width < 100 or height < 100:
+            print(f"棋盘尺寸过小: {width}x{height}")
+            return False
+        
+        # 创建棋盘区域配置（使用x, y, width, height格式）
+        board_region = {
+            'x': x,
+            'y': y,
+            'width': width,
+            'height': height
+        }
+        
+        try:
+            # 更新当前平台的棋盘区域配置
+            platform = self.context.get_platform(self.context.platform)
+            platform.regions["board"] = board_region
+            
+            # 保存配置
+            self.context.save_config()
+            
+            print(f"2角定位成功，棋盘区域: {board_region}")
+            
+            # 调用截图模块的try_locate_board方法验证定位
+            try:
+                # 获取截图管理器实例
+                capture_manager = getattr(self.main_window, 'capture_manager', None)
+                if capture_manager:
+                    # 调用try_locate_board方法，传入手动坐标
+                    manual_coords = (x, y, width, height)
+                    success = capture_manager.try_locate_board(manual_coords=manual_coords)
+                    if success:
+                        print("截图模块验证定位成功")
+                    else:
+                        print("截图模块验证定位失败")
+                else:
+                    print("截图管理器未初始化，跳过验证")
+            except Exception as e:
+                print(f"调用截图模块验证失败: {e}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"更新棋盘区域配置失败: {e}")
+            return False
+    
+    def cleanup(self):
+        """清理资源"""
+        self.cancel_positioning()

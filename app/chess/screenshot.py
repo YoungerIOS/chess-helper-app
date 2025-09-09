@@ -42,19 +42,17 @@ class ChessCaptureManager:
         # 订阅重新定位消息
         self.context.subscribe("relocate_board", self.try_locate_board)
         
-        # 保存最近一次手动定位坐标，使手动定位结果可被后续自动调用复用
-        self._manual_coords = None
-        
         # 初始定位完成事件，用于通知截图主循环
         self._located_event = threading.Event()
 
-    def try_locate_board(self, message_type=None, data=None, manual_coords=None):
+    def try_locate_board(self, message_type=None, data=None, manual_coords=None, moved_coords=None):
         """
         尝试定位棋盘，处理各种异常情况
         Args:
             message_type: 消息类型（回调时使用）
             data: 消息数据（回调时使用）
-            manual_coords: 手动定位坐标 (x, y)，自动定位时为 None
+            manual_coords: 手动定位坐标四元组 (x, y, width, height)
+            moved_coords: 窗口移动时按移动距离计算的新坐标
         Returns:
             bool: 是否成功定位棋盘
         """
@@ -70,18 +68,18 @@ class ChessCaptureManager:
             if message_type is not None:
                 print(f"收到重新定位请求: {message_type} = {data}")
                 
-            # 优先使用本次传入的手动坐标；未提供时复用最近一次手动坐标
+            # 优先级：手动坐标 > 窗口移动临时坐标 > 自动
             if manual_coords is not None:
-                self._manual_coords = manual_coords
-            coords_to_use = manual_coords if manual_coords is not None else self._manual_coords
-
-            if coords_to_use is not None:
-                # 使用手动坐标更新棋盘和头像区域
-                self.board_locator.update_board_and_avatars_regions(manual_coords=coords_to_use)
-                print("棋盘定位成功(手动/复用手动)")
+                # 记录并使用手动坐标
+                self.board_locator.update_board_and_avatars_regions(coords=manual_coords)
+                print("棋盘定位成功(手动)")
+            elif moved_coords is not None:
+                # 仅使用本次窗口移动坐标，不记录为手动坐标
+                self.board_locator.update_board_and_avatars_regions(coords=moved_coords)
+                print("棋盘定位成功(窗口移动)")
             else:
                 # 使用自动检测更新棋盘和头像区域
-                self.board_locator.update_board_and_avatars_regions(manual_coords=None)
+                self.board_locator.update_board_and_avatars_regions(coords=None)
                 print("棋盘定位成功(自动)")
             
             # 发送成功消息到UI队列
@@ -151,64 +149,132 @@ class ChessCaptureManager:
         # 定位成功后，加载配置并开始截图
         self.context.load_config()
         platform = self.context.get_platform(self.context.platform)
-
-        if self.context.analysis_mode == "continuous":
-            print("Debug - 连续截图")
-
-        elif self.context.analysis_mode == "timer":
+        if self.context.analysis_mode == "timer":
             print("Debug - 倒计时截图")
-            # 启动上方头像监控线程
+            # 上方头像监控线程
             self.avatar_threads["upper"] = threading.Thread(
                 target=self._monitor_single_avatar,
-                args=("upper",),  # 截图参数会被动态获取
+                args=("upper",),  # 截图参数动态获取
                 daemon=True
             )
             self.avatar_threads["upper"].start()
             
-            # 启动下方头像监控线程
+            # 下方头像监控线程
             self.avatar_threads["lower"] = threading.Thread(
                 target=self._monitor_single_avatar,
-                args=("lower",),  # 截图参数会被动态获取
+                args=("lower",),  # 截图参数动态获取
                 daemon=True
             )
             self.avatar_threads["lower"].start()
             
-            # 窗口移动监控初始化
-            last_window_info = self.board_locator.find_game_window(self.context.platform)
-            last_window_bounds = last_window_info['region'] if last_window_info else None
-            check_interval_s = 2
-            next_check_time = time.monotonic()
-            move_threshold = 2  # 像素阈值
-            # 持续监控窗口移动, 用dx dy 推算出新的棋盘左上角坐标
-            while not self.stop_event.is_set():
-                now = time.monotonic()
-                if now >= next_check_time:
-                    next_check_time = now + check_interval_s
-                    try:
-                        win_info = self.board_locator.find_game_window(self.context.platform)
-                        if win_info and 'region' in win_info:
-                            current_bounds = win_info['region']
-                            if last_window_bounds is not None:
-                                dx = int(current_bounds['left']) - int(last_window_bounds['left'])
-                                dy = int(current_bounds['top']) - int(last_window_bounds['top'])
-                                if abs(dx) >= move_threshold or abs(dy) >= move_threshold:
-                                    platform = self.context.get_platform(self.context.platform)
-                                    board_region = platform.regions.get('board')
-                                    if board_region is not None:
-                                        new_top_left = (int(board_region['left']) + dx, int(board_region['top']) + dy)
-                                        success = self.try_locate_board(manual_coords=new_top_left)
-                                        if success:
-                                            # 窗口位置发生有效移动后，重置边框缓存
-                                            reset_border_cache(self.context.platform)
-                                            last_window_bounds = current_bounds
-                            else:
-                                last_window_bounds = current_bounds
-                    except Exception as e:
-                        print(f"窗口移动检测异常: {e}")
-                time.sleep(0.1)
+            # 窗口移动监控
+            self._check_window_move()
             return
+        elif self.context.analysis_mode == "continuous":
+            print("Debug - 连续截图")
         else:
             print(f"Debug - 未知的分析模式: {self.context.analysis_mode}")
+            
+    def _check_window_move(self):
+        """
+        检查窗口是否移动
+        """
+        # 初始化：记录基准窗口边界（最近一次成功定位时的窗口边界）
+        first_info = self.board_locator.find_game_window(self.context.platform)
+        baseline_bounds = first_info['region'] if first_info else None
+        last_seen_bounds = baseline_bounds
+        # 以定位时的棋盘区域为位移参考基准，避免累计漂移
+        baseline_board_region = None
+        platform_conf = self.context.get_platform(self.context.platform)
+        if platform_conf and platform_conf.regions.get('board'):
+            br = platform_conf.regions.get('board')
+            baseline_board_region = {
+                'left': int(br['left']),
+                'top': int(br['top']),
+                'width': int(br['width']),
+                'height': int(br['height'])
+            }
+
+        # 阈值与去抖动设置
+        move_threshold = 2   # 像素阈值：位移
+        size_threshold = 3   # 像素阈值：尺寸
+        stable_wait    = 1.0 # 稳定时间（秒）
+        check_interval = 2
+        next_check_time = time.monotonic() 
+        last_change_time = None
+        pending_move = False
+        pending_resize = False
+
+        while not self.stop_event.is_set():
+            now = time.monotonic()
+            if now >= next_check_time:
+                next_check_time = now + check_interval
+                try:
+                    win_info = self.board_locator.find_game_window(self.context.platform)
+                    if win_info and 'region' in win_info:
+                        current_bounds = win_info['region']
+                        if last_seen_bounds is None:
+                            last_seen_bounds = current_bounds
+                        # 与最近一次看到的边界比较，更新“是否变化”和最近变化时间
+                        dx_seen = int(current_bounds['left']) - int(last_seen_bounds['left'])
+                        dy_seen = int(current_bounds['top']) - int(last_seen_bounds['top'])
+                        dw_seen = int(current_bounds['width']) - int(last_seen_bounds['width'])
+                        dh_seen = int(current_bounds['height']) - int(last_seen_bounds['height'])
+                        win_moved = abs(dx_seen) >= move_threshold or abs(dy_seen) >= move_threshold
+                        size_changed = abs(dw_seen) >= size_threshold or abs(dh_seen) >= size_threshold
+
+                        if win_moved or size_changed:
+                            pending_move = pending_move or win_moved
+                            pending_resize = pending_resize or size_changed
+                            last_change_time = now
+                            last_seen_bounds = current_bounds
+                        else:
+                            # 没有新变化，检查是否已稳定超过阈值，若是则执行重定位
+                            if last_change_time is not None and (now - last_change_time) >= stable_wait and (pending_move or pending_resize):
+                                # 以基准边界为参考计算总位移
+                                dx_total = int(last_seen_bounds['left']) - int(baseline_bounds['left']) if baseline_bounds else 0
+                                dy_total = int(last_seen_bounds['top']) - int(baseline_bounds['top']) if baseline_bounds else 0
+
+                                if pending_resize:
+                                    # 尺寸变化：执行完整自动定位
+                                    success = self.try_locate_board(manual_coords=None)
+                                else:
+                                    # 仅移动：根据总位移平移棋盘左上角，复用原宽高，传入4元组
+                                    platform_conf = self.context.get_platform(self.context.platform)
+                                    current_board = platform_conf.regions.get('board') if platform_conf else None
+                                    # 使用基准棋盘区域做平移，避免逐次平移造成的误差累积
+                                    board_region = baseline_board_region or current_board
+                                    if board_region is not None:
+                                        new_left = int(board_region['left']) + dx_total
+                                        new_top = int(board_region['top']) + dy_total
+                                        new_width = int(board_region['width'])
+                                        new_height = int(board_region['height'])
+                                        move_region = (new_left, new_top, new_width, new_height)
+                                        success = self.try_locate_board(moved_coords=move_region)
+                                    else:
+                                        success = False
+
+                                if success:
+                                    reset_border_cache(self.context.platform)
+                                    # 成功后更新基准为当前稳定的窗口边界，并清空待处理标志
+                                    baseline_bounds = last_seen_bounds
+                                    # 成功后刷新基准棋盘区域
+                                    platform_conf2 = self.context.get_platform(self.context.platform)
+                                    if platform_conf2 and platform_conf2.regions.get('board'):
+                                        br2 = platform_conf2.regions.get('board')
+                                        baseline_board_region = {
+                                            'left': int(br2['left']),
+                                            'top': int(br2['top']),
+                                            'width': int(br2['width']),
+                                            'height': int(br2['height'])
+                                        }
+                                    pending_move = False
+                                    pending_resize = False
+                                    last_change_time = None
+                    # 若未找到窗口，跳过
+                except Exception as e:
+                    print(f"窗口移动检测异常: {e}")
+            time.sleep(0.1)
 
     def _check_avatar_state(self, screenshot, avatar):
         """
