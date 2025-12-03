@@ -1,31 +1,156 @@
 import numpy as np
 import os
 import sys
+import platform
 
 # 管理开发环境与打包环境下的路径
-def resource_path(relative_path):  
-    """ 获取资源文件的绝对路径 """  
-    if hasattr(sys, '_MEIPASS'):  
-        # 如果是打包后的应用，则使用 sys._MEIPASS  
-        return os.path.join(sys._MEIPASS, relative_path)  
+def resource_path(*path_parts):
+    """获取资源文件的绝对路径
     
-    # 尝试多种可能的路径
-    possible_paths = [
-        # 如果从项目根目录运行
-        os.path.join(os.path.abspath("./app/"), relative_path),
-        # 如果从app目录运行
-        os.path.join(os.path.abspath("./"), relative_path),
-        # 如果从其他目录运行，尝试相对路径
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", relative_path)
+    Args:
+        *path_parts: 路径组件，如 'images', 'media', 'chessboard1.png'
+                   或者单个字符串如 'json/game_config.json'
+        
+    Returns:
+        str: 资源文件的绝对路径
+        
+    Examples:
+        resource_path('json', 'game_config.json')
+        resource_path('images', 'media', 'chessboard1.png')
+        resource_path('json/game_config.json')  # 向后兼容
+    """
+    # 如果只有一个参数且包含路径分隔符，保持向后兼容
+    if len(path_parts) == 1 and ('/' in path_parts[0] or '\\' in path_parts[0]):
+        relative_path = path_parts[0]
+    else:
+        # 使用 os.path.join 构建路径
+        relative_path = os.path.join(*path_parts)
+    
+    return _resource_path_impl(relative_path)
+
+def _resource_path_impl(relative_path):
+    """获取资源文件的绝对路径
+    
+    Args:
+        relative_path: 相对于app目录的路径，如 'json/game_config.json'
+        
+    Returns:
+        str: 资源文件的绝对路径
+    """
+    # 打包环境处理
+    if hasattr(sys, '_MEIPASS'):
+        return _get_packaged_resource_path(relative_path)
+    
+    # 开发环境处理
+    return _get_development_resource_path(relative_path)
+
+def _get_packaged_resource_path(relative_path):
+    """获取打包环境下的资源路径"""
+    base = sys._MEIPASS
+    
+    # 标准打包路径
+    candidates = [
+        os.path.join(base, 'app', relative_path),
+        os.path.join(base, relative_path),
+    ]
+    
+    # macOS .app 特殊路径
+    if platform.system() == "Darwin":
+        try:
+            macos_dir = os.path.dirname(sys.executable)
+            resources_dir = os.path.abspath(os.path.join(macos_dir, '..', 'Resources'))
+            candidates.extend([
+                os.path.join(resources_dir, 'app', relative_path),
+                os.path.join(resources_dir, relative_path),
+            ])
+        except (OSError, ValueError):
+            pass
+    
+    # 返回第一个存在的路径
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    
+    # 如果都不存在，返回最可能的路径
+    return candidates[0]
+
+def _get_development_resource_path(relative_path):
+    """获取开发环境下的资源路径"""
+    # 获取当前文件所在目录（app/tools/）
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 获取项目根目录
+    project_root = os.path.dirname(os.path.dirname(current_dir))
+    # 构建app目录路径
+    app_dir = os.path.join(project_root, 'app')
+    
+    # 开发环境的候选路径
+    candidates = [
+        os.path.join(app_dir, relative_path),  # 标准路径
+        os.path.join(project_root, relative_path),  # 备用路径
     ]
     
     # 返回第一个存在的路径
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
     
-    # 如果都不存在，返回第一个路径（保持向后兼容）
-    return possible_paths[0]
+    # 如果都不存在，返回标准路径
+    return candidates[0]
+
+# 统一的路径管理方法
+def get_app_cache_dir():
+    """获取应用缓存目录"""
+    if platform.system() == "Darwin":  # macOS
+        # 使用 ~/Library/Caches/ChessHelper/
+        home_dir = os.path.expanduser("~")
+        cache_dir = os.path.join(home_dir, "Library", "Caches", "ChessHelper")
+    elif platform.system() == "Windows":  # Windows
+        # 使用 %LOCALAPPDATA%\ChessHelper\Cache\
+        localappdata = os.environ.get('LOCALAPPDATA', os.path.expanduser("~"))
+        cache_dir = os.path.join(localappdata, "ChessHelper", "Cache")
+    else:  # Linux
+        # 使用 ~/.cache/chess-helper/
+        home_dir = os.path.expanduser("~")
+        cache_dir = os.path.join(home_dir, ".cache", "chess-helper")
+    
+    # 确保目录存在
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+def get_app_data_dir():
+    """获取应用数据目录"""
+    if platform.system() == "Darwin":  # macOS
+        # 使用 ~/Library/Application Support/ChessHelper/
+        home_dir = os.path.expanduser("~")
+        data_dir = os.path.join(home_dir, "Library", "Application Support", "ChessHelper")
+    elif platform.system() == "Windows":  # Windows
+        # 使用 %APPDATA%\ChessHelper\
+        appdata = os.environ.get('APPDATA', os.path.expanduser("~"))
+        data_dir = os.path.join(appdata, "ChessHelper")
+    else:  # Linux
+        # 使用 ~/.local/share/chess-helper/
+        home_dir = os.path.expanduser("~")
+        data_dir = os.path.join(home_dir, ".local", "share", "chess-helper")
+    
+    # 确保目录存在
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
+
+def app_cache_path(filename):
+    """获取调试图片的完整路径"""
+    cache_dir = get_app_cache_dir()
+    full_path = os.path.join(cache_dir, filename)
+    # 确保子目录存在
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    return full_path
+
+def app_data_path(filename):
+    """获取配置文件的完整路径"""
+    data_dir = get_app_data_dir()
+    full_path = os.path.join(data_dir, filename)
+    # 确保子目录存在
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    return full_path
  
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  
@@ -166,7 +291,7 @@ def convert_array_to_fen(array, is_red):
 # 着法move转文字描述
 def convert_move_to_chinese(move, board_array, is_red): 
     if not move or len(move) != 4:
-        return "着法为空或格式错误"
+        raise ValueError("着法为空或格式错误")
     # 棋子代码与中文名称的对应关系  
     PIECE_CODES = {  
         'r': '车',  

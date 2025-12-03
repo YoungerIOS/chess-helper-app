@@ -26,25 +26,26 @@
        - 保存头像检测区域
        - 保存棋盘截图区域
 """
-import sys
-import mss
-import cv2
-import numpy as np
+import mss  # type: ignore
+import cv2  # type: ignore
+import numpy as np  # type: ignore
 import threading
-import queue
 import time
 import platform
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tools.utils import resource_path
-from chess.context import context as global_context
-from chess.recognizer import ChessRecognizer
+import logging
+from app.tools.utils import app_cache_path
+from app.chess.context import context as global_context
+from app.chess.recognizer import ChessRecognizer
+from app.chess.message import Message, MessageType
+from app.chess.message_bus import message_bus
+from app.chess.border_detector import reset_border_cache
 
 # 跨平台窗口检测
 WIN32GUI_AVAILABLE = False
 _win32gui_module = None
 
 if platform.system() == "Darwin":  # macOS
-    import Quartz
+    import Quartz  # type: ignore
 elif platform.system() == "Windows":  # Windows
     try:
         import importlib
@@ -55,17 +56,30 @@ elif platform.system() == "Windows":  # Windows
 else:  # Linux或其他系统
     print("警告: 当前系统不支持窗口检测，将使用全屏检测")
 
-class BoardLocatorError(Exception):
+class LocationError(Exception):
     """棋盘定位器异常类"""
+    pass
+
+class WindowError(LocationError):
+    """窗口检测错误"""
+    pass
+
+class PieceError(LocationError):
+    """棋子检测错误"""
+    pass
+
+class CombsError(LocationError):
+    """棋子组合错误"""
     pass
 
 class BoardLocator:
     def __init__(self, context=None):
-        self.num_workers = 3
         self.stop_event = threading.Event()
-        self.executor = None
         self.context = context or global_context
         self.recognizer = ChessRecognizer()
+        
+        # 设置日志记录器
+        self.logger = logging.getLogger(__name__)
         
         # 游戏窗口标题关键词
         self.game_titles = {
@@ -73,6 +87,11 @@ class BoardLocator:
             "TT": ["天天象棋"]
         }
         self.window_size = None
+        
+        # 定位状态管理
+        self._relocating = False
+        self._relocate_lock = threading.Lock()
+        self._located_event = threading.Event()
 
         # 棋盘和头像区域的基本参数
         # 这些值需要根据实际测量调整 (默认值在1440x900分辨率/窗口尺寸400x753下测得)
@@ -81,6 +100,14 @@ class BoardLocator:
         self.board_height = 416     # 棋盘高度
         self.square_size = 84       # 头像尺寸
     
+    def stop(self):
+        """停止检测"""
+        self.stop_event.set()
+    
+    def reset(self):
+        """重置状态，允许重新开始检测"""
+        self.stop_event.clear()
+
     def find_window_by_title_macos(self, keyword):
         """使用Quartz查找窗口（macOS）"""
         try:
@@ -198,8 +225,8 @@ class BoardLocator:
                         'confidence': 1.0
                     }
                     
-                    print(f"检测到窗口: {window_info['title']}")
-                    print(f"窗口尺寸: {window_info['region']['width']}x{window_info['region']['height']}")
+                    # print(f"检测到窗口: {window_info['title']}")
+                    # print(f"窗口尺寸: {window_info['region']['width']}x{window_info['region']['height']}")
                     
                     # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
                     if self.context and self.context.platform != p:
@@ -207,7 +234,6 @@ class BoardLocator:
                     
                     return window_info
         
-        print("未找到游戏窗口")
         return None
 
     def _find_pieces_in_window(self):
@@ -238,8 +264,7 @@ class BoardLocator:
                 search_region['height'] = int(search_region['height'] - 2 * shrink_h)
         else:
             print("未检测到游戏窗口")
-            return []
-            # return self._find_kings_fullscreen()
+            raise WindowError("未检测到游戏窗口")
 
         # 1. 截取搜索区域
         with mss.mss() as sct:
@@ -250,8 +275,9 @@ class BoardLocator:
         img_np = img_np[:, :, :3].copy()
         
         # 保存搜索区域截图
-        search_filename = f"search_region_{window_info['title'].replace(' ', '_')}.jpg"
-        cv2.imwrite(search_filename, img_np)
+        search_path = app_cache_path(f"search_region_{window_info['title'].replace(' ', '_')}.jpg")
+        cv2.imwrite(search_path, img_np)
+        print(f"已保存搜索区域截图: {search_path}")
         
         # 3. 根据平台选择不同的预处理策略
         gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
@@ -302,11 +328,15 @@ class BoardLocator:
         
         if circles is None:
             print("在游戏窗口内未检测到任何圆形")
-            cv2.imwrite("detected_circles.jpg", img_np)
-            return []
+            self.logger.warning("霍夫圆检测未发现任何圆形")
+            detected_circles_path = app_cache_path("detected_circles.jpg")
+            cv2.imwrite(detected_circles_path, img_np)
+            print(f"已保存检测结果图片: {detected_circles_path}")
+            raise PieceError("未检测到象棋棋子")
             
         circles = np.round(circles[0, :]).astype("int")
-        # print(f"游戏窗口内霍夫圆检测到 {len(circles)} 个圆形")
+        print(f"游戏窗口内霍夫圆检测到 {len(circles)} 个圆形")
+        self.logger.info(f"霍夫圆检测结果: 检测到{len(circles)}个圆形")
         
         # 6. 将检测到的圆坐标转换回原始图像尺寸
         original_circles = []
@@ -316,8 +346,8 @@ class BoardLocator:
             orig_r = int(r / scale_factor)
             original_circles.append((orig_x, orig_y, orig_r))
         
-        # 7. 使用线程池处理圆检测（使用原始尺寸的坐标）
-        piece_centers = self._process_circles_with_threadpool(original_circles, img_np)
+        # 7. 处理圆检测（使用原始尺寸的坐标）
+        piece_centers = self._process_circles(original_circles, img_np)
         
         # 8. 将相对坐标转换为绝对坐标
         absolute_piece_centers = []
@@ -326,60 +356,64 @@ class BoardLocator:
             abs_y = y + search_region['top']
             absolute_piece_centers.append((abs_x, abs_y, r, piece_type))
         
-        # 9. 筛选正确位置关系的(卒, 将, 卒)/(兵, 帅, 兵)组合
-        filtered_pieces = self._filter_pieces_by_position(absolute_piece_centers)
+        # 9. 筛选关键点位置的棋子组合(卒, 将, 卒)/(兵, 帅, 兵)
+        filtered_pieces = self._filter_keypoint_pieces(absolute_piece_centers)
         
-        if not getattr(sys, "frozen", False):
-            # 10. 保存可视化结果
-            # 在全屏图像上绘制检测结果
-            with mss.mss() as sct:
-                full_screenshot = sct.grab(sct.monitors[1])
-                full_img = np.frombuffer(full_screenshot.bgra, np.uint8).reshape(full_screenshot.height, full_screenshot.width, 4)
-                full_img = full_img[:, :, :3].copy()
+        # 10. 检测是否为缩小棋盘（JJ的游戏结算界面）
+        if filtered_pieces and platform == "JJ":
+            self._eliminate_mini_board(absolute_piece_centers, search_region)
+        
+        # 10. 保存可视化结果（在开发环境和打包环境都保存）
+        # 在全屏图像上绘制检测结果
+        with mss.mss() as sct:
+            full_screenshot = sct.grab(sct.monitors[1])
+            full_img = np.frombuffer(full_screenshot.bgra, np.uint8).reshape(full_screenshot.height, full_screenshot.width, 4)
+            full_img = full_img[:, :, :3].copy()
+        
+        # 绘制搜索区域
+        cv2.rectangle(full_img, 
+                    (search_region['left'], search_region['top']), 
+                    (search_region['left'] + search_region['width'], search_region['top'] + search_region['height']), 
+                    (0, 255, 0), 2)
+        
+        # 绘制检测到的所有棋子组合
+        for combination in filtered_pieces:
+            # 绘制将/帅
+            king_x, king_y, king_r, king_type = combination['king']
+            cv2.circle(full_img, (king_x, king_y), king_r, (0, 255, 0), 2)
+            cv2.circle(full_img, (king_x, king_y), 2, (0, 0, 255), 3)
             
-            # 绘制搜索区域
-            cv2.rectangle(full_img, 
-                        (search_region['left'], search_region['top']), 
-                        (search_region['left'] + search_region['width'], search_region['top'] + search_region['height']), 
-                        (0, 255, 0), 2)
-            
-            # 绘制检测到的所有棋子组合
-            for combination in filtered_pieces:
-                # 绘制将/帅
-                king_x, king_y, king_r, king_type = combination['king']
-                cv2.circle(full_img, (king_x, king_y), king_r, (0, 255, 0), 2)
-                cv2.circle(full_img, (king_x, king_y), 2, (0, 0, 255), 3)
+            # 绘制兵/卒（如果存在）
+            if combination['pawns'] and len(combination['pawns']) >= 2:
+                # 绘制左兵/卒
+                left_x, left_y, left_r, left_type = combination['pawns'][0]
+                cv2.circle(full_img, (left_x, left_y), left_r, (0, 255, 255), 2)
+                cv2.circle(full_img, (left_x, left_y), 2, (255, 255, 0), 3)
                 
-                # 绘制兵/卒（如果存在）
-                if combination['pawns'] and len(combination['pawns']) >= 2:
-                    # 绘制左兵/卒
-                    left_x, left_y, left_r, left_type = combination['pawns'][0]
-                    cv2.circle(full_img, (left_x, left_y), left_r, (0, 255, 255), 2)
-                    cv2.circle(full_img, (left_x, left_y), 2, (255, 255, 0), 3)
-                    
-                    # 绘制右兵/卒
-                    right_x, right_y, right_r, right_type = combination['pawns'][1]
-                    cv2.circle(full_img, (right_x, right_y), right_r, (0, 255, 255), 2)
-                    cv2.circle(full_img, (right_x, right_y), 2, (255, 255, 0), 3)
+                # 绘制右兵/卒
+                right_x, right_y, right_r, right_type = combination['pawns'][1]
+                cv2.circle(full_img, (right_x, right_y), right_r, (0, 255, 255), 2)
+                cv2.circle(full_img, (right_x, right_y), 2, (255, 255, 0), 3)
                 
-                # 绘制车（如果存在）
-                if combination['rooks'] and len(combination['rooks']) >= 2:
-                    # 绘制左车
-                    left_x, left_y, left_r, left_type = combination['rooks'][0]
-                    cv2.circle(full_img, (left_x, left_y), left_r, (255, 0, 255), 2)
-                    cv2.circle(full_img, (left_x, left_y), 2, (255, 0, 255), 3)
-                    
-                    # 绘制右车
-                    right_x, right_y, right_r, right_type = combination['rooks'][1]
-                    cv2.circle(full_img, (right_x, right_y), right_r, (255, 0, 255), 2)
-                    cv2.circle(full_img, (right_x, right_y), 2, (255, 0, 255), 3)
-            
-            cv2.imwrite("detected_circles.jpg", full_img)
-            print("已保存区域检测结果图片为 detected_circles.jpg")
+            # 绘制车（如果存在）
+            if combination['rooks'] and len(combination['rooks']) >= 2:
+                # 绘制左车
+                left_x, left_y, left_r, left_type = combination['rooks'][0]
+                cv2.circle(full_img, (left_x, left_y), left_r, (255, 0, 255), 2)
+                cv2.circle(full_img, (left_x, left_y), 2, (255, 0, 255), 3)
+                
+                # 绘制右车
+                right_x, right_y, right_r, right_type = combination['rooks'][1]
+                cv2.circle(full_img, (right_x, right_y), right_r, (255, 0, 255), 2)
+                cv2.circle(full_img, (right_x, right_y), 2, (255, 0, 255), 3)
+        
+        detected_circles_path = app_cache_path("detected_circles.jpg")
+        cv2.imwrite(detected_circles_path, full_img)
+        print(f"已保存区域检测结果图片: {detected_circles_path}")
         
         return filtered_pieces
     
-    def _filter_pieces_by_position(self, piece_centers):
+    def _filter_keypoint_pieces(self, piece_centers):
         """
         筛选出位置关系正确的将/帅和兵卒组合
         
@@ -421,24 +455,28 @@ class BoardLocator:
         print(f"  黑卒: {len(black_pawns)} 个, 红兵: {len(red_pawns)} 个")
         print(f"  黑车: {len(black_rooks)} 个, 红车: {len(red_rooks)} 个")
         
-        # 先检查必要条件：将帅存在，各自兵卒数量充足，车各2
-        king_ok = len(kings_black) == 1 and len(kings_red) == 1
-        rook_ok = len(black_rooks) == 2 and len(red_rooks) == 2
-        pawn_ok = len(black_pawns) >= 2 and len(red_pawns) >= 2
-        if not king_ok:
-            print("条件不满足：初始位置将帅数量不足")
-            return []
-        if not (rook_ok or pawn_ok):
-            print("条件不满足：初始位置车或兵数量不足")
-            return []
+        # 记录到日志
+        self.logger.info(f"棋子检测统计: 黑将={len(kings_black)}, 红帅={len(kings_red)}, 黑卒={len(black_pawns)}, 红兵={len(red_pawns)}, 黑车={len(black_rooks)}, 红车={len(red_rooks)}")
         
-        # 选择第一枚黑将和红帅
+        # 1.将帅组合
+        king_ok = len(kings_black) == 1 and len(kings_red) == 1
+        if not king_ok:
+            error_msg = f"将帅数量错误"
+            raise PieceError(error_msg)
+        king_x_diff = abs(kings_black[0][0] - kings_red[0][0])
+        king_y_diff = abs(kings_black[0][1] - kings_red[0][1])
+        mean_diameter = kings_black[0][2] + kings_red[0][2]
+        if king_x_diff > 3 * mean_diameter or king_y_diff < 5 * mean_diameter:
+            error_msg = f"将帅位置错误"
+            raise PieceError(error_msg)
+
+
         black_king = kings_black[0]
         red_king = kings_red[0]
         
         filtered_combinations = []
         
-        # 黑方组合
+        # 2.黑方组合
         black_combination = self._filter_combination(
             king=black_king,
             pawns=black_pawns,
@@ -446,10 +484,12 @@ class BoardLocator:
         )
         if black_combination:
             filtered_combinations.append(black_combination)
+            self.logger.info(f"黑方组合筛选成功: 将={black_combination['king'][3]}, 兵/卒={len(black_combination.get('pawns', []))}, 车={len(black_combination.get('rooks', []))}")
         else:
             print("黑方组合筛选失败")
+            self.logger.warning("黑方组合筛选失败")
         
-        # 红方组合
+        # 3.红方组合
         red_combination = self._filter_combination(
             king=red_king,
             pawns=red_pawns,
@@ -457,10 +497,32 @@ class BoardLocator:
         )
         if red_combination:
             filtered_combinations.append(red_combination)
+            self.logger.info(f"红方组合筛选成功: 将={red_combination['king'][3]}, 兵/卒={len(red_combination.get('pawns', []))}, 车={len(red_combination.get('rooks', []))}")
         else:
             print("红方组合筛选失败")
+            self.logger.warning("红方组合筛选失败")
         
         return filtered_combinations
+    
+    def _eliminate_mini_board(self, piece_centers, search_region):
+        """
+        排除缩小的棋盘（游戏结算界面）
+        """
+        if not piece_centers:
+            return
+            
+        # 找出x坐标最小的棋子
+        leftmost_piece = min(piece_centers, key=lambda piece: piece[0])
+        leftmost_x, leftmost_y, leftmost_r, leftmost_type = leftmost_piece
+        
+        # 计算该棋子与搜索区域左边界的距离
+        distance_to_left = leftmost_x - search_region['left']
+        
+        # 判断：如果距离超过3倍棋子半径，说明是缩小棋盘
+        if distance_to_left > 3 * leftmost_r:
+            error_msg = f"检测到缩小棋盘（游戏结算界面），最左棋子距离边界: {distance_to_left:.1f}px，棋子半径: {leftmost_r:.1f}px"
+            print(error_msg)
+            raise PieceError("检测到游戏结算界面，等待开始对局")
     
     def _filter_combination(self, king, pawns, rooks):
         """
@@ -508,7 +570,7 @@ class BoardLocator:
                 y_ok_pawn = abs(left_y - right_y) <= 2 * mean_r
                 left_x_diff = abs(left_x - king_x)
                 right_x_diff = abs(right_x - king_x)
-                x_diff_ok_pawn = abs(left_x_diff - right_x_diff) <= 2 * mean_r
+                x_diff_ok_pawn = abs(left_x_diff - right_x_diff) <= 2 * mean_r and left_x_diff > 6 * mean_r and right_x_diff > 6 * mean_r
                 if y_ok_pawn and x_diff_ok_pawn:
                     selected_pawns = [left_pawn, right_pawn]
         
@@ -523,14 +585,18 @@ class BoardLocator:
             # x对称
             left_x_diff_rook = abs(left_rook[0] - king_x)
             right_x_diff_rook = abs(right_rook[0] - king_x)
-            x_diff_ok_rook = abs(left_x_diff_rook - right_x_diff_rook) <= 2 * mean_r
+            x_diff_ok_rook = abs(left_x_diff_rook - right_x_diff_rook) <= 2 * mean_r and left_x_diff_rook > 6 * mean_r and right_x_diff_rook > 6 * mean_r
             if y_ok_rook and x_diff_ok_rook:
                 selected_rooks = [left_rook, right_rook]
+                
+        if not selected_rooks and not selected_pawns:
+            error_msg = "缺少定位棋子组合"
+            raise CombsError(error_msg)
         
         return {
             'king': king,
-            'rooks': selected_rooks if len(selected_rooks) == 2 else [],
-            'pawns': selected_pawns if len(selected_pawns) == 2 else []
+            'rooks': selected_rooks,
+            'pawns': selected_pawns
         }
     
     def _locate_board_from_combs(self):
@@ -551,11 +617,13 @@ class BoardLocator:
                 red_combination = combination
     
         if not black_combination or not red_combination:
-            raise BoardLocatorError("需要同时检测到黑卒组合和红兵组合")
+            error_msg = "缺少定位棋子组合"
+            self.logger.error(f"棋盘定位失败: {error_msg}")
+            raise CombsError(error_msg)
     
         # 提取棋子信息
-        black_king = black_combination['king']
-        red_king = red_combination['king']
+        black_king = black_combination.get('king', [])
+        red_king = red_combination.get('king', [])
         black_pawns = black_combination.get('pawns', [])
         red_pawns = red_combination.get('pawns', [])
         black_rooks = black_combination.get('rooks', [])
@@ -575,18 +643,18 @@ class BoardLocator:
                 all_radii.extend([r[2] for r in black_rooks])
             if red_rooks:
                 all_radii.extend([r[2] for r in red_rooks])
-            mean_r = sum(all_radii) / len(all_radii)
+            mean_r = sum(all_radii) / max(1, len(all_radii))
 
         # 2. 计算每侧的"王+车"y平均值
         black_y_candidates = [black_king[1]]
         if black_rooks:
             black_y_candidates.extend([r[1] for r in black_rooks])
-        black_y_avg = sum(black_y_candidates) / len(black_y_candidates)
+        black_y_avg = sum(black_y_candidates) / max(1, len(black_y_candidates))
 
         red_y_candidates = [red_king[1]]
         if red_rooks:
             red_y_candidates.extend([r[1] for r in red_rooks])
-        red_y_avg = sum(red_y_candidates) / len(red_y_candidates)
+        red_y_avg = sum(red_y_candidates) / max(1, len(red_y_candidates))
 
         # 3. 计算board_y（取较高侧的平均y）
         higher_side_y = min(black_y_avg, red_y_avg)  # y坐标向下为正
@@ -615,11 +683,12 @@ class BoardLocator:
             red_rook_span = abs(red_rooks[1][0] - red_rooks[0][0])
             spans.append(red_rook_span)
         
-        if spans:
-            avg_span = sum(spans) / len(spans)
-        else:
-            print(f"无法计算棋盘宽度: 未找到可用的水平跨度")
-            
+        avg_span = sum(spans) / max(1, len(spans))
+        
+        # 如果spans为空，使用默认值
+        if not spans:
+            raise CombsError("缺少定位棋子, 无法确定棋盘宽度")
+
         # 6. 计算board_x（最左兵/车x的平均值）
         x_candidates = []
         if black_pawns:
@@ -630,11 +699,8 @@ class BoardLocator:
             x_candidates.append(min(r[0] for r in black_rooks))
         if red_rooks:
             x_candidates.append(min(r[0] for r in red_rooks))
-        
-        if not x_candidates:
-            raise BoardLocatorError("未找到可用的兵/卒或车来计算board_x")
-        
-        leftmost_x = sum(x_candidates) / len(x_candidates)
+        # 最左x坐标
+        leftmost_x = sum(x_candidates) / max(1, len(x_candidates))
         
         # 计算并在计算时保留一位小数
         board_x = round(leftmost_x - avg_span / 16, 1)
@@ -645,14 +711,6 @@ class BoardLocator:
         self.base_width = avg_span
         self.base_radius = mean_r
         print(f"已保存参考距离 - 将帅垂直距离: {king_vertical_distance:.1f}, 平均跨度: {self.base_width:.1f}")
-
-        # 计算棋盘9列10行线条坐标
-        # board_coords = self._calculate_board_coordinates(
-        #     black_y_avg, red_y_avg,
-        #     black_pawns, red_pawns,
-        #     black_rooks, red_rooks,
-        #     board_x, board_y, board_width
-        # )
 
         # 输出调试信息
         print(f"棋盘定位计算结果:")
@@ -671,7 +729,8 @@ class BoardLocator:
         # 添加可视化：在detected_circles.jpg上画出棋盘矩形和网格线
         try:
             # 读取现有的detected_circles.jpg图片
-            detected_img = cv2.imread("detected_circles.jpg")
+            detected_circles_path = app_cache_path("detected_circles.jpg")
+            detected_img = cv2.imread(detected_circles_path)
             if detected_img is not None:
                 # 绘制棋盘矩形
                 board_left = int(board_x)
@@ -685,104 +744,59 @@ class BoardLocator:
                              (board_right, board_bottom), 
                              (0, 0, 255), 1)
                 # 保存更新后的图片
-                cv2.imwrite("detected_circles.jpg", detected_img)
+                cv2.imwrite(detected_circles_path, detected_img)
+                print(f"已更新检测结果图片（添加棋盘矩形）: {detected_circles_path}")
         except Exception as e:
             print(f"可视化过程中出错: {e}")
 
         return (board_x, board_y, board_width, board_height)
 
-    def _process_circles_with_threadpool(self, circles, img_np):
-        """使用线程池处理圆检测"""
+    def _process_circles(self, circles, img_np):
+        """处理圆检测（单线程版本，避免模型访问冲突）"""
         piece_centers = []
-        piece_centers_lock = threading.Lock()
         
-        # 将圆分成多个批次，每个线程处理一部分
-        batch_size = max(1, len(circles) // self.num_workers)
-        batches = [circles[i:i + batch_size] for i in range(0, len(circles), batch_size)]
-        
-        def process_batch(batch):
-            """处理一批圆"""
-            batch_pieces = []
-            for x, y, r in batch:
-                if self.stop_event.is_set():
-                    break
-                    
-                # 截取圆形区域
-                x1, y1, x2, y2 = x - r, y - r, x + r, y + r
-                x1 = max(0, x1)
-                y1 = max(0, y1)
-                x2 = min(img_np.shape[1] - 1, x2)
-                y2 = min(img_np.shape[0] - 1, y2)
-                piece_img = img_np[y1:y2+1, x1:x2+1]
+        # 单线程处理，避免PyTorch模型在多线程环境中的访问冲突
+        for x, y, r in circles:
+            if self.stop_event.is_set():
+                break
                 
-                # 识别棋子类型
-                piece_type, confidence = self.recognizer.recognize_piece_type(piece_img)
-                
-                # 先画所有检测到的圆（用蓝色）
-                cv2.circle(img_np, (x, y), r, (255, 0, 0), 2)  # 蓝色圆圈
-                cv2.circle(img_np, (x, y), 2, (255, 0, 0), 3)  # 蓝色圆心
-                
-                # 如果是将帅或兵卒且置信度高，添加到结果中
-                if piece_type in ('k', 'K', 'p', 'P', 'r', 'R') and confidence > 0.9:
-                    batch_pieces.append((x, y, r, piece_type))
-                    # 将帅用绿色重新标记，兵卒用黄色标记
-                    if piece_type in ('k', 'K'):
-                        cv2.circle(img_np, (x, y), r, (0, 255, 0), 1)  # 绿色圆圈
-                        cv2.circle(img_np, (x, y), 2, (0, 0, 255), 3)  # 红色圆心
-                    elif piece_type in ('p', 'P'):
-                        cv2.circle(img_np, (x, y), r, (0, 255, 255), 1)  # 黄色圆圈（兵卒）
-                        cv2.circle(img_np, (x, y), 2, (255, 255, 0), 3)  # 青色圆心
-                    else:  # 车R/r
-                        cv2.circle(img_np, (x, y), r, (255, 0, 255), 1)  # 品红色圆圈（车）
-                        cv2.circle(img_np, (x, y), 2, (255, 0, 255), 3)  # 品红色圆心
+            # 截取圆形区域
+            x1, y1, x2, y2 = x - r, y - r, x + r, y + r
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(img_np.shape[1] - 1, x2)
+            y2 = min(img_np.shape[0] - 1, y2)
+            piece_img = img_np[y1:y2+1, x1:x2+1]
             
-            return batch_pieces
-        
-        # 启动线程池
-        self.executor = ThreadPoolExecutor(max_workers=self.num_workers)
-        futures = []
-        
-        try:
-            # 提交任务
-            for batch in batches:
-                if self.stop_event.is_set():
-                    break
-                future = self.executor.submit(process_batch, batch)
-                futures.append(future)
+            # 识别棋子类型
+            result = self.recognizer.recognize_piece_type(piece_img)
+            if result is None:
+                # 识别失败，跳过这个圆
+                self.logger.debug(f"棋子识别失败: 位置({x}, {y}), 半径{r}")
+                continue
             
-            # 收集结果
-            for future in as_completed(futures):
-                if self.stop_event.is_set():
-                    break
-                    
-                try:
-                    batch_pieces = future.result(timeout=30)  # 30秒超时
-                    with piece_centers_lock:
-                        for x, y, r, piece_type in batch_pieces:
-                            piece_centers.append((x, y, r, piece_type))
-                except Exception as e:
-                    print(f"处理批次时出错: {e}")
-                    
-        finally:
-            # 优雅关闭线程池
-            self._shutdown_executor()
+            piece_type, confidence = result
+            self.logger.debug(f"棋子识别: 位置({x}, {y}), 类型={piece_type}, 置信度={confidence:.3f}")
+            
+            # 先画所有检测到的圆（用蓝色）
+            cv2.circle(img_np, (x, y), r, (255, 0, 0), 2)  # 蓝色圆圈
+            cv2.circle(img_np, (x, y), 2, (255, 0, 0), 3)  # 蓝色圆心
+            
+            # 如果是将帅或兵卒且置信度高，添加到结果中
+            if piece_type in ('k', 'K', 'p', 'P', 'r', 'R') and confidence > 0.9:
+                piece_centers.append((x, y, r, piece_type))
+                # 将帅用绿色重新标记，兵卒用黄色标记
+                if piece_type in ('k', 'K'):
+                    cv2.circle(img_np, (x, y), r, (0, 255, 0), 1)  # 绿色圆圈
+                    cv2.circle(img_np, (x, y), 2, (0, 0, 255), 3)  # 红色圆心
+                elif piece_type in ('p', 'P'):
+                    cv2.circle(img_np, (x, y), r, (0, 255, 255), 1)  # 黄色圆圈（兵卒）
+                    cv2.circle(img_np, (x, y), 2, (255, 255, 0), 3)  # 青色圆心
+                else:  # 车R/r
+                    cv2.circle(img_np, (x, y), r, (255, 0, 255), 1)  # 品红色圆圈（车）
+                    cv2.circle(img_np, (x, y), 2, (255, 0, 255), 3)  # 品红色圆心
         
         return piece_centers
-    
-    def _shutdown_executor(self):
-        """优雅关闭线程池"""
-        if self.executor:
-            self.executor.shutdown(wait=True)
-            self.executor = None
-    
-    def stop(self):
-        """停止检测"""
-        self.stop_event.set()
-        self._shutdown_executor()
-    
-    def reset(self):
-        """重置状态，允许重新开始检测"""
-        self.stop_event.clear()
 
     def update_board_and_avatars_regions(self, coords=None):   
         """
@@ -792,8 +806,6 @@ class BoardLocator:
             coords: 可选的手动坐标 (x, y, width, height)，如果提供则使用手动坐标，否则自动检测
         Returns:
             dict: 包含 board, avatar_upper, avatar_lower
-        Raises:
-            BoardLocatorError: 棋盘定位相关错误
         """
         if coords is not None:
             # 手动定位模式：使用提供的坐标
@@ -801,17 +813,9 @@ class BoardLocator:
             print(f"使用手动坐标: ({x}, {y}, {width}, {height})")
         else:
             # 自动定位模式：检测棋盘位置
-            try:
-                board_pos = self._locate_board_from_combs()
-                x, y, width, height = board_pos
-                print(f"自动检测到棋盘坐标: ({x}, {y}, {width}, {height})")
-            except BoardLocatorError:
-                # 重新抛出棋盘定位错误
-                raise
-            except Exception as e:
-                # 捕获其他异常并转换为BoardLocatorError
-                raise BoardLocatorError(f"棋盘定位失败: {e}")
-        
+            board_pos = self._locate_board_from_combs()
+            x, y, width, height = board_pos
+            print(f"自动检测到棋盘坐标: ({x}, {y}, {width}, {height})")
         
         # 棋盘区域
         board_region = {'left': x, 'top': y, 'width': width, 'height': height}
@@ -823,7 +827,7 @@ class BoardLocator:
             board_screenshot = sct.grab(board_region)
             board_img = np.frombuffer(board_screenshot.bgra, np.uint8).reshape(board_screenshot.height, board_screenshot.width, 4)
             board_img = board_img[:, :, :3]
-            cv2.imwrite(resource_path('images/board/board.png'), board_img)
+            cv2.imwrite(app_cache_path('board/board.png'), board_img)
             
             # 将棋盘图片按宽度800缩放
             target_width = 800
@@ -834,7 +838,7 @@ class BoardLocator:
             # 在缩放后的棋盘图片上绘制网格线
             self._draw_grid_on_board_image(scaled_board_img)
             # 保存带网格线的缩放棋盘图片
-            cv2.imwrite(resource_path('images/board/board_with_grid.png'), scaled_board_img)
+            cv2.imwrite(app_cache_path('board/board_with_grid.png'), scaled_board_img)
 
         # 平台判断
         platform_type = self.context.platform
@@ -856,7 +860,7 @@ class BoardLocator:
                     ref_w, ref_h = info['region']['width'], info['region']['height']
                     self.window_size = (ref_w, ref_h)
             if not ref_w or not ref_h:
-                raise BoardLocatorError("棋盘定位失败: 无法获取窗口尺寸")
+                raise LocationError("棋盘定位失败: 无法获取窗口尺寸")
             # 使用窗口尺寸作为参考
             if platform_type == "JJ":
                 ref_width, ref_height = 0.86 * ref_w, 0.497 * ref_h
@@ -867,9 +871,13 @@ class BoardLocator:
             ref_width, ref_height = self.base_width, self.base_height
         
         # 根据平台设置头像位置计算逻辑（统一使用 ref_width, ref_height）
+        # 防止除零错误
+        if ref_width <= 0 or ref_height <= 0:
+            raise LocationError(f"无效的参考尺寸: ref_width={ref_width}, ref_height={ref_height}")
+            
         if platform_type == "JJ":
             # JJ平台：基于参考尺寸计算头像位置
-            square_size = ref_width // 4
+            square_size = max(1, ref_width // 4)  # 防止除零
             upper_x = round(x, 1)
             upper_y = round(y - (0.36 * ref_height), 1)
             lower_x = round(x + (0.90 * ref_width), 1)
@@ -877,9 +885,9 @@ class BoardLocator:
                
         elif platform_type == "TT":  # TT平台
             # TT平台：基于参考尺寸计算头像位置
-            square_size = ref_width // 5
+            square_size = max(1, ref_width // 5)  # 防止除零
             upper_x = round(x - (0.30 * ref_width), 1)
-            upper_y = round(y - (0.04 * ref_width), 1)
+            upper_y = round(y + (0.03 * ref_width), 1)
             lower_x = round(x + (1.22 * ref_width), 1)
             lower_y = round(y + (0.88 * ref_width), 1)
             print(f"TT平台 - 使用参考距离计算头像位置:")
@@ -915,7 +923,7 @@ class BoardLocator:
                     rect_img = sct.grab(rect)
                     rect_img_np = np.frombuffer(rect_img.bgra, np.uint8).reshape(rect_img.height, rect_img.width, 4)
                     rect_img_np = rect_img_np[:, :, :3]
-                    cv2.imwrite(resource_path(f'images/board/avatar_{pos}_rect.png'), rect_img_np)
+                    cv2.imwrite(app_cache_path(f'board/avatar_{pos}_rect.png'), rect_img_np)
 
             # 统一更新当前平台的区域配置（绝对坐标）
             platform = self.context.get_platform(self.context.platform)
@@ -927,6 +935,173 @@ class BoardLocator:
             self.context.save_config()
             return board_region
 
+    def handle_locating_board_tasks(self, message_type=None, data=None, moved_coords=None):
+        """
+        尝试定位棋盘
+        Args:
+            message_type: 消息类型（回调时使用）
+            data: 消息数据（回调时使用）
+            moved_coords: 窗口移动时按移动距离计算的新坐标
+        Returns:
+            bool: 是否成功定位棋盘
+        """
+        # 检查是否正在定位中
+        with self._relocate_lock:
+            if self._relocating:
+                print("定位正在进行中，跳过重复请求")
+                raise LocationError("定位正在进行中，跳过重复请求")
+            self._relocating = True
+
+        try:
+            # 如果是作为回调函数被调用，打印消息信息
+            if message_type is not None:
+                print(f"收到重新定位请求: {message_type} = {data}")
+            
+            # 优先级：自动定位 > 保存的手动坐标 > 窗口移动坐标
+            if moved_coords is not None:
+                # 使用本次窗口移动坐标，清除手动坐标记录
+                # self.context.manual_coords = None
+                self.update_board_and_avatars_regions(coords=moved_coords)
+                print("棋盘定位成功(窗口移动)")
+                msg = "已重新计算棋盘位置"
+            else:
+                # 优先尝试自动定位
+                try:
+                    self.update_board_and_avatars_regions(coords=None)
+                    print("棋盘定位成功(自动)")
+                    msg = "棋盘定位完成"
+                except LocationError:
+                    # 自动定位失败，检查是否有保存的手动坐标
+                    saved_manual_coords = self.context.manual_coords
+                    if saved_manual_coords is not None:
+                        # 使用保存的手动坐标
+                        self.update_board_and_avatars_regions(coords=saved_manual_coords)
+                        print("棋盘定位成功(使用保存的手动坐标)")
+                        msg = "棋盘定位成功"
+                    else:
+                        # 没有手动坐标，重新抛出异常
+                        raise
+            
+            # 发送成功消息
+            message_bus.publish_status(msg)
+            # 设置定位成功事件（唤醒等待）
+            self._located_event.set()
+            return True
+        finally:
+            # 重置定位状态
+            with self._relocate_lock:
+                self._relocating = False
+
+    def monitor_window_movement(self, stop_event):
+        """
+        监控窗口移动，检测到移动时调用回调
+        Args:
+            stop_event: 停止事件
+            callback: 移动检测到时的回调函数
+        """
+        # 初始化：记录基准窗口边界（最近一次成功定位时的窗口边界）
+        first_info = self.find_game_window(self.context.platform)
+        baseline_bounds = first_info['region'] if first_info else None
+        last_seen_bounds = baseline_bounds
+        # 以定位时的棋盘区域为位移参考基准，避免累计漂移
+        baseline_board_region = None
+        platform_conf = self.context.get_platform(self.context.platform)
+        if platform_conf and platform_conf.regions.get('board'):
+            br = platform_conf.regions.get('board')
+            baseline_board_region = {
+                'left': int(br['left']),
+                'top': int(br['top']),
+                'width': int(br['width']),
+                'height': int(br['height'])
+            }
+
+        # 阈值与去抖动设置
+        move_threshold = 2   # 像素阈值：位移
+        size_threshold = 3   # 像素阈值：尺寸
+        check_interval = 1   # 检查间隔（秒）
+        stable_wait    = 1.0 # 稳定时间（秒）
+        
+        next_check_time = time.monotonic() 
+        last_change_time = None
+        pending_move = False
+        pending_resize = False
+
+        while not stop_event.is_set():
+            now = time.monotonic()
+            if now >= next_check_time:
+                next_check_time = now + check_interval
+                win_info = self.find_game_window(self.context.platform)
+                if win_info and 'region' in win_info:
+                    current_bounds = win_info['region']
+                    if last_seen_bounds is None:
+                        last_seen_bounds = current_bounds
+                    # 与最近一次看到的边界比较，更新"是否变化"和最近变化时间
+                    dx_seen = int(current_bounds['left']) - int(last_seen_bounds['left'])
+                    dy_seen = int(current_bounds['top']) - int(last_seen_bounds['top'])
+                    dw_seen = int(current_bounds['width']) - int(last_seen_bounds['width'])
+                    dh_seen = int(current_bounds['height']) - int(last_seen_bounds['height'])
+                    win_moved = abs(dx_seen) >= move_threshold or abs(dy_seen) >= move_threshold
+                    size_changed = abs(dw_seen) >= size_threshold or abs(dh_seen) >= size_threshold
+
+                    if win_moved or size_changed:
+                        pending_move = pending_move or win_moved
+                        pending_resize = pending_resize or size_changed
+                        last_change_time = now
+                        last_seen_bounds = current_bounds
+                    else:
+                        # 没有新变化，检查是否已稳定超过阈值，若是则执行重定位
+                        if last_change_time is not None and (now - last_change_time) >= stable_wait and (pending_move or pending_resize):
+                            # 以基准边界为参考计算总位移
+                            dx_total = int(last_seen_bounds['left']) - int(baseline_bounds['left']) if baseline_bounds else 0
+                            dy_total = int(last_seen_bounds['top']) - int(baseline_bounds['top']) if baseline_bounds else 0
+
+                            try:
+                                if pending_resize:
+                                    # 尺寸变化：执行完整自动定位
+                                    self.handle_locating_board_tasks()
+                                else:
+                                    # 仅移动：根据总位移平移棋盘左上角，复用原宽高，传入4元组
+                                    platform_conf = self.context.get_platform(self.context.platform)
+                                    current_board = platform_conf.regions.get('board') if platform_conf else None
+                                    # 使用基准棋盘区域做平移，避免逐次平移造成的误差累积
+                                    board_region = baseline_board_region or current_board
+                                    if board_region is not None:
+                                        new_left = int(board_region['left']) + dx_total
+                                        new_top = int(board_region['top']) + dy_total
+                                        new_width = int(board_region['width'])
+                                        new_height = int(board_region['height'])
+                                        move_region = (new_left, new_top, new_width, new_height)
+                                        self.handle_locating_board_tasks(moved_coords=move_region)
+
+                                reset_border_cache(self.context.platform)
+                                # 重置检查器状态，确保重新定位后能正常分析新局面
+                                self.context.reset_checker()
+                                # 成功后更新基准为当前稳定的窗口边界，并清空待处理标志
+                                baseline_bounds = last_seen_bounds
+                                # 成功后刷新基准棋盘区域
+                                platform_conf2 = self.context.get_platform(self.context.platform)
+                                if platform_conf2 and platform_conf2.regions.get('board'):
+                                    br2 = platform_conf2.regions.get('board')
+                                    baseline_board_region = {
+                                        'left': int(br2['left']),
+                                        'top': int(br2['top']),
+                                        'width': int(br2['width']),
+                                        'height': int(br2['height'])
+                                    }
+                                pending_move = False
+                                pending_resize = False
+                                last_change_time = None
+                            except (WindowError, PieceError, CombsError, LocationError) as e:
+                                print(f"窗口移动后重新定位失败: {e}")
+                                # 立即设置停止事件，避免时间差问题
+                                stop_event.set()
+                                # 重新抛出异常，让截图模块处理
+                                raise
+                            except Exception as e:
+                                print(f"窗口移动监控异常: {e}")
+                                # 其他异常继续监控，不中断循环
+                # 若未找到窗口，跳过
+            time.sleep(0.1)
 
     def _draw_grid_on_board_image(self, board_img):
         """
@@ -1013,7 +1188,6 @@ class BoardLocator:
             
         except Exception as e:
             print(f"在棋盘图片上绘制网格线时出错: {e}")
-
 
 if __name__ == "__main__":
     # 测试代码

@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
 import os
-from tools.utils import filter_vertical_lines, filter_horizontal_lines, resource_path
-from chess.context import context as global_context
-import uuid
+from app.tools.utils import app_cache_path
+from app.chess.context import context as global_context
 
 class ChessRecognizer:
     class RecognitionError(Exception):
@@ -90,10 +89,16 @@ class ChessRecognizer:
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
         
         # 创建保存目录
-        save_dir = "tests/pieces"
-        os.makedirs(save_dir, exist_ok=True)
+        save_dir = app_cache_path("pieces")
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except OSError:
+            # 如果无法创建目录，跳过保存调试图片
+            save_dir = None
         
-        # 遍历棋盘格点，切割并识别棋子
+        # 批量收集所有待识别格子的裁剪图片
+        crops = []
+        positions = []  # 与 crops 对应，存 (i, j)
         for i in range(len(y_array)):
             for j in range(len(x_array)):
                 center_x = x_array[j]
@@ -112,35 +117,30 @@ class ChessRecognizer:
                 else:
                     y_radius = min((y_array[i] - y_array[i-1]) // 2, (y_array[i+1] - y_array[i]) // 2)
                 cut_radius = int((x_radius + y_radius) // 2 * 0.95)
-                
-                # 当棋盘边界空间小于切割半径时,将棋子中心点向棋盘内部偏移
-                # min保证末行(列)切割半径不变且范围不超出棋盘边界
-                # max保证首行(列)切割半径不变且范围不超出棋盘边界
                 adjusted_center_x = max(cut_radius, min(resized_img.shape[1] - 1 - cut_radius, center_x))
                 adjusted_center_y = max(cut_radius, min(resized_img.shape[0] - 1 - cut_radius, center_y))
-                
                 x1 = adjusted_center_x - cut_radius
                 y1 = adjusted_center_y - cut_radius
                 x2 = adjusted_center_x + cut_radius
                 y2 = adjusted_center_y + cut_radius
                 piece_img = resized_img[y1:y2, x1:x2]
-                
-                # 识别棋子类型
-                piece_type, confidence = self.recognize_piece_type(piece_img)
-                if piece_type and confidence > 0.7:  # 降低置信度阈值
-                    if piece_type == 'covered':
-                        raise self.RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
-                    pieceArray[i][j] = piece_type
-                    # 保存识别的棋子图片
-                    # result_filename = f"piece_{i:02d}_{j:02d}_{piece_type}_{confidence:.2f}.jpg"
-                    # result_path = os.path.join(save_dir, result_filename)
-                    # cv2.imwrite(result_path, piece_img)
-                else:
-                    # 保存无法识别的图片
-                    # error_filename = f"piece_{i:02d}_{j:02d}_unknown_{confidence:.2f}.jpg"
-                    # error_path = os.path.join(save_dir, error_filename)
-                    # cv2.imwrite(error_path, piece_img)
-                    raise self.RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
+                crops.append(piece_img)
+                positions.append((i, j))
+
+        # 一次批量推理
+        batch_results = self.context.piece_recognizer.recognize_batch(crops)
+        for idx, res in enumerate(batch_results):
+            i, j = positions[idx]
+            if res is None:
+                raise self.RecognitionError("批量识别失败: 结果为None")
+            piece_type = res['class_name']
+            confidence = res['confidence']
+            if piece_type and confidence > 0.6:
+                if piece_type == 'covered':
+                    raise self.RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
+                pieceArray[i][j] = piece_type
+            else:
+                raise self.RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
         return pieceArray
 
     # 计算棋子坐标
@@ -245,25 +245,12 @@ class ChessRecognizer:
         :param piece_img: 棋子图片
         :return: 棋子类型, 置信度或None
         """
-        # 保存唯一临时图片
-        temp_path = f"temp_piece_{uuid.uuid4().hex}.jpg"
-        cv2.imwrite(temp_path, piece_img)
-        # 使用模型识别
-        result = self.context.piece_recognizer.recognize(temp_path)
-        if result is None:
-            print(f"无法识别棋子: {temp_path}")
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-            return None
-        # 使用识别结果
-        piece_type = result['class_name']
-        confidence = result['confidence']
-        # 删除临时文件
         try:
-            os.remove(temp_path)
-        except Exception:
-            pass
-        return piece_type, confidence
+            result = self.context.piece_recognizer.recognize_from_array(piece_img)
+            if result is None:
+                return None
+            return result['class_name'], result['confidence']
+        except Exception as e:
+            print(f"棋子识别过程中出错: {e}")
+            return None
 

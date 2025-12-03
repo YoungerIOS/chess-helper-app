@@ -350,7 +350,7 @@ class BorderDetector:
             # 查找轮廓
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
-                print("TT矩形: 未找到任何绿色轮廓，返回False")
+                # print("TT矩形: 未找到任何绿色轮廓，返回False")
                 return False, None
 
             # 选择外接矩形高度最大的轮廓

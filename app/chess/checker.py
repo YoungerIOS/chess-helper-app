@@ -53,11 +53,13 @@ class PositionChecker:
         self.is_red = True
         self.last_board = None  # 上一次的棋盘数组
         self.last_counts = None  # 上一次的棋子数量统计
+        self.red_start_count = 0  # 红方开局局面连续出现次数 
         
-    def reset_state(self):
+    def reset(self):
         """重置检查器状态，用于手动刷新时清除历史状态"""
         self.last_board = None
         self.last_counts = None
+        self.red_start_count = 0  # 重置红方开局触发计数
         print("Debug - 检查器状态已重置")
 
     def is_red_at_bottom(self, board_array):
@@ -401,6 +403,9 @@ class PositionChecker:
         Returns:
             BoardStatus: 检查结果
         """
+        if current_board is None:
+            return None
+        
         self.is_red = self.is_red_at_bottom(current_board)
 
         # 首次初始化
@@ -413,9 +418,15 @@ class PositionChecker:
         
         # 1. 检测初始局面
         if result.is_red_start:
-            self.last_board = [row[:] for row in self.START_RED]
-            self.last_counts = self.START_COUNTS.copy()
-            return result
+            if self.red_start_count < 1: # 开局帧最大允许连续出现次数(决定开局时会显示几次开局走法)
+                # 允许前两次返回红方开局
+                self.red_start_count += 1
+                self.last_board = [row[:] for row in self.START_RED]
+                self.last_counts = self.START_COUNTS.copy()
+                return result
+            else:
+                # 超过两次则视为相同画面
+                return BoardStatus(is_same_board=True, message="红方开局（>2次）相同画面")
         if result.is_black_start:
             self.last_board = [row[:] for row in self.START_BLACK]
             self.last_counts = self.START_COUNTS.copy()
@@ -432,6 +443,8 @@ class PositionChecker:
             p = result.step_info['captured_piece']
             if result.step_info and p:
                 self.last_counts[p] = max(0, self.last_counts.get(p, 1) - 1) # 下限保护，避免减到负数
+            # 检测到真实走子，重置红方开局计数，为下一局做准备
+            self.red_start_count = 0
             return result
         
         # 4. 过滤其他非法局面
@@ -446,8 +459,10 @@ class PositionChecker:
         # 5. 多步移动或残局，更新状态
         if result.is_multi_step:
             self.last_board = [row[:] for row in current_board]
-            # self.last_counts = current_counts.copy()
+            self.last_counts = current_counts.copy()
             result.is_new_game = True
+            # 多步移动通常意味着新对局，重置红方开局计数
+            self.red_start_count = 0
             return result
         
         # 如果全都没有命中, 返回未知非法局面

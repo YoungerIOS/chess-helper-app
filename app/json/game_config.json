@@ -27,22 +27,22 @@
         },
         "regions": {
             "board": {
-                "left": 703.4,
-                "top": 124.8,
-                "width": 447.2,
-                "height": 497.0
+                "left": 721.4,
+                "top": 141.1,
+                "width": 479.2,
+                "height": 531.9
             },
             "avatar_upper": {
-                "left": 584.1,
-                "top": 108.9,
-                "width": 79.0,
-                "height": 79.0
+                "left": 593.6,
+                "top": 153.9,
+                "width": 85.0,
+                "height": 85.0
             },
             "avatar_lower": {
-                "left": 1188.3,
-                "top": 474.6,
-                "width": 79.0,
-                "height": 79.0
+                "left": 1241.1,
+                "top": 516.0,
+                "width": 85.0,
+                "height": 85.0
             }
         }
     },
@@ -74,31 +74,31 @@
         },
         "regions": {
             "board": {
-                "left": 722.5,
-                "top": 234.8,
-                "width": 405.4,
-                "height": 430.7
+                "left": 870,
+                "top": 223,
+                "width": 406,
+                "height": 432
             },
             "avatar_upper": {
-                "left": 722.5,
-                "top": 95.2,
+                "left": 870,
+                "top": 83.0,
                 "width": 90.0,
                 "height": 90.0
             },
             "avatar_lower": {
-                "left": 1046.8,
-                "top": 719.4,
+                "left": 1194.9,
+                "top": 709.2,
                 "width": 90.0,
                 "height": 90.0
             }
         }
     },
     "platform": "JJ",
-    "analysis_mode": "timer",
+    "analysis_mode": "continuous",
     "board_index": 4,
     "engine_params": {
         "movetime": "3000",
-        "depth": "21",
+        "depth": "23",
         "goParam": "depth"
     }
 }

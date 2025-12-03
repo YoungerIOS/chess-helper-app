@@ -6,8 +6,12 @@ from typing import List, Optional
 class LogViewer:
     """日志查看器工具类"""
     
-    def __init__(self, log_dir: str = "logs"):
-        self.log_dir = log_dir
+    def __init__(self, log_dir: str = None):
+        if log_dir is None:
+            # 使用系统标准日志目录
+            self.log_dir = os.path.expanduser("~/Library/Logs/chess-helper-app")
+        else:
+            self.log_dir = log_dir
     
     def get_log_files(self) -> List[str]:
         """获取所有日志文件"""

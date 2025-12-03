@@ -1,9 +1,10 @@
 import os
+import math
 from PySide6.QtWidgets import QLabel
-from chess.context import context
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF, QTransform, QPainterPath
 from PySide6.QtCore import Qt, QRect, QPointF, QTimer
-import math
+from app.tools.utils import resource_path
+from app.chess.context import context
 
 class BoardDisplay(QLabel):
     def __init__(self, parent=None):
@@ -22,11 +23,11 @@ class BoardDisplay(QLabel):
         
         # 棋盘底图选项
         self.board_options = [
-            os.path.join('app', 'images', 'media', 'chessboard1.png'),
-            os.path.join('app', 'images', 'media', 'chessboard2.png'),
-            os.path.join('app', 'images', 'media', 'chessboard3.png'),
-            os.path.join('app', 'images', 'media', 'chessboard4.png'),
-            os.path.join('app', 'images', 'media', 'chessboard5.png')
+            resource_path('images', 'media', 'chessboard1.png'),
+            resource_path('images', 'media', 'chessboard2.png'),
+            resource_path('images', 'media', 'chessboard3.png'),
+            resource_path('images', 'media', 'chessboard4.png'),
+            resource_path('images', 'media', 'chessboard5.png')
         ]
         # 当前使用的棋盘索引（从上下文读取）
         self.current_board_index = getattr(context, 'board_index', 0)
@@ -39,10 +40,10 @@ class BoardDisplay(QLabel):
         self._load_piece_images()
         
         # 加载边框图片
-        self.border_image = QPixmap(os.path.join('app', 'images', 'media', 'white_border.png'))
+        self.border_image = QPixmap(resource_path('images', 'media', 'piece_border.png'))
         
         # 加载变化标记图片
-        self.bullseye_image = QPixmap(os.path.join('app', 'images', 'media', 'bullseye.png'))
+        self.bullseye_image = QPixmap(resource_path('images', 'media', 'bullseye.png'))
         
         # 存储移动信息
         self.move_from = None  # 起始位置 (row, col)
@@ -67,7 +68,7 @@ class BoardDisplay(QLabel):
         }
         
         for piece, filename in piece_types.items():
-            path = os.path.join('app', 'images', 'media', filename)
+            path = resource_path('images', 'media', filename)
             self.piece_images[piece] = QPixmap(path)
     
     def resizeEvent(self, event):

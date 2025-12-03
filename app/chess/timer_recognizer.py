@@ -1,12 +1,12 @@
+import os
+import glob
 import torch
+import torch.nn as nn
 import torchvision.transforms as transforms
 from torchvision import models
 from torchvision.models import MobileNet_V2_Weights
-import torch.nn as nn
 from PIL import Image
-import os
-import glob
-from tools.utils import resource_path
+from app.tools.utils import resource_path
 
 class ChessTimerPredictor:
     def __init__(self, platform="TT"):
@@ -24,9 +24,9 @@ class ChessTimerPredictor:
         
         # 根据平台选择模型路径
         if platform == "TT":
-            model_path = resource_path("models/tt_countdown_model.pth")
+            model_path = resource_path("models", "tt_countdown_model.pth")
         else:  # JJ
-            model_path = resource_path("models/jj_countdown_model.pth")
+            model_path = resource_path("models", "jj_countdown_model.pth")
         
         # 加载模型
         self.model = self._load_model(model_path)

@@ -1,18 +1,21 @@
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QApplication, QMenu)
-from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject
-from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 import os
 import queue
 import threading
 import sys
-from chess.screenshot import ChessCaptureManager
-from chess.engine import ChessEngine
-from chess.history import MoveHistory
-from chess.message import Message, MessageType
-from chess.context import context
-from ui.board_display import BoardDisplay
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QLabel, QPushButton, QApplication, QMenu)
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject
+from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 from pynput import mouse
+from app.tools.utils import resource_path
+from app.chess.screenshot import ChessCaptureManager
+from app.chess.engine import ChessEngine
+from app.chess.checker import PositionChecker
+from app.chess.history import MoveHistory
+from app.chess.message import Message, MessageType
+from app.chess.message_bus import message_bus
+from app.chess.context import context
+from app.ui.board_display import BoardDisplay
 
 
 class MainWindow(QMainWindow):
@@ -29,10 +32,13 @@ class MainWindow(QMainWindow):
         context.screen_size = (screen_width, screen_height)
         
         # 加载棋盘图片并计算其宽高比
-        board_img = QPixmap(os.path.join('app', 'images', 'media', 'chessboard1.png'))
-        board_ratio = board_img.width() / board_img.height()
+        board_img = QPixmap(resource_path('images', 'media', 'chessboard1.png'))
+        if board_img.isNull():
+            board_ratio = 1.0
+        else:
+            board_ratio = board_img.width() / board_img.height()
         
-        # 使用屏幕高度 x 80% x 0.56 计算窗口宽度, 不为什么, 就是觉得协调,
+        # 使用屏幕高度 x 80% x 0.56 作为窗口宽度, 看着更协调些,
         nice_height = int(screen_height * 0.8)
         width = int(nice_height * 0.56)
         
@@ -75,7 +81,7 @@ class MainWindow(QMainWindow):
         self.engine_params = context.get_engine_params()
         
         # 顶部文本显示区域
-        self.move_display = QLabel('<span style="color: red;">等待获取棋局...</span>')
+        self.move_display = QLabel()
         self.move_display.setAlignment(Qt.AlignCenter)
         self.move_display.setFont(QFont("Arial", 18, QFont.Bold))
         self.move_display.setFixedHeight(100)  # 设置固定高度
@@ -100,7 +106,7 @@ class MainWindow(QMainWindow):
         self.game_btn.setFixedSize(75, 35) 
         self.game_btn.setFont(QFont("Arial", 11))
         # 加载并设置箭头图标
-        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
         self.game_btn.setIcon(arrow_icon)
         self.game_btn.setIconSize(QSize(12, 12))
         self.game_btn.setStyleSheet("""
@@ -260,7 +266,7 @@ class MainWindow(QMainWindow):
         self.board_btn.setFixedSize(75, 35)  
         self.board_btn.setFont(QFont("Arial", 11))
         # 加载并设置箭头图标
-        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
         self.board_btn.setIcon(arrow_icon)
         self.board_btn.setIconSize(QSize(12, 12))
         self.board_btn.setStyleSheet("""
@@ -313,7 +319,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setFixedSize(75, 35)  
         self.settings_btn.setFont(QFont("Arial", 11))
         # 加载并设置箭头图标
-        arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
         self.settings_btn.setIcon(arrow_icon)
         self.settings_btn.setIconSize(QSize(12, 12))
         self.settings_btn.setStyleSheet("""
@@ -505,12 +511,18 @@ class MainWindow(QMainWindow):
         control_layout.addLayout(param_layout)
         main_layout.addLayout(control_layout)
         
-        # 初始化线程和队列
+        # 初始化UI消息队列和定时器（保持一直运行）
         self.ui_message_queue = queue.Queue()
+        # 设置全局消息总线
+        message_bus.set_ui_queue(self.ui_message_queue)
+        self.check_timer = QTimer()
+        self.check_timer.timeout.connect(self.check_queue)
+        self.check_timer.start(100)  # 100ms间隔，性能开销极小
+
+        # 初始化线程和队列
         self.capture_thread = None
-        self.check_timer = None
         # 初始化截图管理器
-        self.capture_manager = ChessCaptureManager(self.ui_message_queue)
+        self.capture_manager = ChessCaptureManager()
         # 初始化手动定位器
         self.manual_positioner = ManualPositioner(self)
 
@@ -518,6 +530,7 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
         self.lines = ["", "", ""]
+        self.update_text("等待获取棋局...", MessageType.STATUS)
 
     
     def on_engine_param_changed(self, param):
@@ -572,92 +585,85 @@ class MainWindow(QMainWindow):
             self.create_queue()
         else:
             self.on_stop()
-            self.is_running = False
-            self.start_btn.setText("开始")
  
     def on_stop(self):
         """停止事件"""
         if self.is_stopping: 
             return
         self.is_stopping = True
+        # 立即更新UI状态
+        self.is_running = False
+        self.start_btn.setText("开始")
         
-        self.close_queue()
-        if context.engine:
-            context.engine.stop()
-            context.engine = None
-        context.clear_checker() #清理局面检查器
-        context.history.clear()  # 停止时清空历史
+        # 异步执行停止操作，避免阻塞UI
+        def stop_worker():
+            try:
+                # 只停止非Qt对象
+                if self.capture_manager is not None:
+                    self.capture_manager.stop_capture()  # 停止截图和工作线程
+                context.quit_engine()  # 线程安全地退出引擎
+                context.reset_checker() # 线程安全地重置检查器
+                context.history.clear()  # 停止时清空历史
+            except Exception as e:
+                print(f"停止操作失败: {e}")
+            finally:
+                self.is_stopping = False
         
-        self.is_stopping = False 
-
+        # 在后台线程中执行停止操作
+        import threading
+        stop_thread = threading.Thread(target=stop_worker, daemon=True)
+        stop_thread.start() 
+        
     def create_queue(self):
         """创建队列和启动分析线程"""
-        # 首先停止旧线程（如果有的话）  
-        if self.capture_thread is not None and self.capture_thread.is_alive():  
-            self.capture_manager.stop_capture()  # 调用截图模块的方法停止
-            self.capture_thread.join()  # 等待线程结束  
-        if self.check_timer:
-            self.check_timer.stop()
-            self.check_timer = None
-        if self.capture_manager is not None:
-            self.capture_manager = None
+        # 异步执行所有耗时操作，避免阻塞UI
+        def start_worker():
+            try:
+                # 强制停止旧实例，确保消息订阅被清理
+                if self.capture_manager is not None:
+                    self.capture_manager.stop_capture()  # 调用截图模块的方法停止
+                    self.capture_manager = None
 
-        # 创建队列
-        self.ui_message_queue = queue.Queue()
-
-        # 关键：每次都new新的ChessCaptureManager，保证识别线程能重启
-        self.capture_manager = ChessCaptureManager(self.ui_message_queue)
-        # 启动截图任务
-        self.capture_manager.start_capture()
-        # 创建截图线程
-        self.capture_thread = threading.Thread(target=self.capture_func)
-        self.capture_thread.start()
-        # UI消息队列检查定时器
-        self.check_timer = QTimer()
-        self.check_timer.timeout.connect(self.check_queue)
-        self.check_timer.start(100)
-
-        # 初始化局面检查器和历史记录
-        context.init_checker()
-        context.history = MoveHistory()
-
-    def capture_func(self):
-        """截图和分析函数"""
-        # 启动引擎
-        try:
-            if context.engine is None:
-                context.engine = ChessEngine()
-                context.engine.start()
-            if not context.engine.is_initialized:
-                print("引擎启动失败")
-                self.ui_message_queue.put(Message(MessageType.STATUS, "引擎启动失败"))
-                return
-        except Exception as e:
-            print(f"capture_func error: {e}")
-
-        # 使用已创建的ChessCaptureManager实例
-        self.capture_manager.capture_region()
+                # 关键：每次都new新的ChessCaptureManager，保证识别线程能重启
+                self.capture_manager = ChessCaptureManager()
+                self.capture_manager.start_capture()
+                
+                # 启动引擎
+                context.set_engine(ChessEngine())
+                if context.engine.start():
+                    print("引擎已启动")
+                else:
+                    print("引擎启动失败")
+                
+                # 初始化局面检查器和历史记录
+                context.set_checker(PositionChecker())
+                context.history = MoveHistory()
+                
+                # 执行主处理流程（阻塞调用）
+                self.capture_manager.main_process_flow()
+            except Exception as e:
+                print(f"开始操作发生错误: {e}")
+        
+        # 在后台线程中执行所有操作
+        start_thread = threading.Thread(target=start_worker, daemon=True)
+        start_thread.start()
 
     def check_queue(self):
         """检查结果队列"""
         if not self.ui_message_queue.empty():
             result = self.ui_message_queue.get()
-            # 自动检测识别线程超时停止信号
-            if result == "STOP":
-                if not self.is_stopping:  # 防止手动停止与自动停止冲突
-                    print("检测到自动停止信号，执行停止操作")
-                    self.on_stop()
-                    self.is_running = False
-                    self.start_btn.setText("开始")
-                return
+
             if isinstance(result, Message):
+                if result.type == MessageType.STOP:
+                    if not self.is_stopping:  # 防止手动停止与自动停止冲突
+                        self.on_stop()
+                    return
                 if result.type == MessageType.CHANGE:
-                    # 更新棋局变化
                     self.board_display.update_board(
                         result.kwargs['array'], 
                         step_info=result.kwargs.get('step_info')
                     )
-                    self.update_text(result.content)
+                    self.update_text(result.content, result.type)
                 elif result.type == MessageType.PIECES:
                     # 更新棋子位置
                     self.board_display.update_pieces(result.kwargs['array'])
@@ -666,86 +672,90 @@ class MainWindow(QMainWindow):
                     self.board_display.update_arrow(result.content, result.kwargs['is_red'])
                 elif result.type == MessageType.MOVE_TEXT:
                     # 显示着法文本
-                    self.update_text(result.content)
+                    self.update_text(result.content, result.type)
                 elif result.type == MessageType.STATUS:
                     # 显示状态消息
-                    self.update_text(result.content)
+                    self.update_text(result.content, result.type)
+                elif result.type == MessageType.ERROR:
+                    # 显示错误消息
+                    self.update_text(result.content, result.type)
     
     def close_queue(self):
-        """销毁截图线程和定时器"""
-        if self.capture_thread and self.capture_thread.is_alive():
+        """销毁截图线程"""
+        if self.capture_manager is not None:
             self.capture_manager.stop_capture()  # 停止截图和工作线程
-            self.capture_thread.join()
-        if self.check_timer:
-            self.check_timer.stop()
-            self.check_timer = None
 
-    def update_text(self, text):
-        """更新显示文本"""
-        if len(text) == 4:
-            self.lines = ["", "", text]  # 只保留第一行和第三行
-        else:
-            self.lines = [text, "", self.lines[2]]
+    def update_text(self, text, message_type=None):
+        """
+        更新显示文本
+        Args:
+            text: 要显示的文本内容
+            message_type: 消息类型，用于确定显示颜色和样式
+        """
+        # 定义不同消息类型的颜色和样式
+        message_styles = {
+            MessageType.MOVE_TEXT: {
+                'color': '#2C3E50',  # 深蓝灰色，更易读
+                'font_size': '45pt',
+                'is_move': True
+            },
+            MessageType.STATUS: {
+                'color': '#3498DB',  # 明亮蓝色
+                'font_size': '18pt',
+                'is_move': False
+            },
+            MessageType.ERROR: {
+                'color': '#E74C3C',  # 明亮红色
+                'font_size': '18pt',
+                'is_move': False
+            },
+            MessageType.CHANGE: {
+                'color': '#27AE60',  # 明亮绿色
+                'font_size': '18pt',
+                'is_move': False
+            }
+        }
         
-        # 更新显示
+        # 默认样式
+        default_style = {
+            'color': '#3498DB',  # 明亮蓝色
+            'font_size': '18pt',
+            'is_move': False
+        }
+        
+        # 获取样式配置
+        style = message_styles.get(message_type, default_style)
+        
+        # 处理多行文本
+        lines = text.split('\n') if '\n' in text else [text]
+        
+        # 限制最多显示2行
+        if len(lines) > 2:
+            lines = lines[:2]
+        
+        # 根据消息类型更新显示内容
+        if style['is_move']:
+            # 着法消息：显示在第3行（大字体）
+            self.lines = ["", "", lines[0]]
+        else:
+            # 状态消息：显示在第1行和第2行
+            if len(lines) == 1:
+                self.lines = [lines[0], "", self.lines[2]]  # 保留第3行的着法
+            else:
+                self.lines = [lines[0], lines[1], ""] 
+        
+        # 生成HTML显示文本
         display_text = ""
         for i, line in enumerate(self.lines):
-            if i == 0:
-                display_text += f'<span style="color: red; font-size: 18pt; line-height: 1;">{line}</span><br>'
-            elif i == 2:
+            if i == 0 and line:  # 第1行
+                display_text += f'<span style="color: {style["color"]}; font-size: {style["font_size"]}; line-height: 1;">{line}</span><br>'
+            elif i == 1 and line:  # 第2行
+                display_text += f'<span style="color: {style["color"]}; font-size: {style["font_size"]}; line-height: 1;">{line}</span><br>'
+            elif i == 2 and line:  # 第3行（着法）
                 display_text += f'<span style="color: black; font-size: 45pt; line-height: 1;">{line}</span>'
         
         self.move_display.setText(display_text)
-        
-        # 如果是着法，闪烁显示
-        if len(text) == 4:
-            self.flash_text()
-    
-    def flash_text(self):
-        """闪烁显示文本"""
-        # 保存原始文本
-        original_text = self.move_display.text()
-        
-        # 闪烁三次
-        for i in range(3):
-            # 红色
-            self.move_display.setStyleSheet("""
-                QLabel {
-                    background-color: #f0f0f0;
-                    border: 1px solid #ccc;
-                    border-radius: 5px;
-                    padding: 10px;
-                    min-height: 45px;
-                    color: red;
-                }
-            """)
-            QApplication.processEvents()
-            QTimer.singleShot(200, lambda: None)
-            
-            # 白色
-            self.move_display.setStyleSheet("""
-                QLabel {
-                    background-color: #f0f0f0;
-                    border: 1px solid #ccc;
-                    border-radius: 5px;
-                    padding: 10px;
-                    min-height: 45px;
-                    color: white;
-                }
-            """)
-            QApplication.processEvents()
-            QTimer.singleShot(200, lambda: None)
-        
-        # 恢复原始样式
-        self.move_display.setStyleSheet("""
-            QLabel {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 3px;
-            }
-        """)
-        self.move_display.setText(original_text)
+
     
     def create_position_dot(self, is_temp=False, x=None, y=None):
         """
@@ -793,7 +803,7 @@ class MainWindow(QMainWindow):
         self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
         
         # 加载定位点图片
-        pixmap = QPixmap('app/images/dingwei.png')
+        pixmap = QPixmap(resource_path('images', 'dingwei.png'))
         scaled_pixmap = pixmap.scaledToHeight(25, Qt.SmoothTransformation)
         width = scaled_pixmap.width()
         height = scaled_pixmap.height()
@@ -879,6 +889,12 @@ class MainWindow(QMainWindow):
 
     def on_reposition(self):
         """处理重新定位选项"""
+        # 手动定位前先停止当前运行的任务
+        if self.is_running:
+            self.on_stop()
+            self.is_running = False
+            self.start_btn.setText("开始")
+        
         # 使用手动定位器开始定位
         self.manual_positioner.start_positioning()
     
@@ -901,17 +917,18 @@ class MainWindow(QMainWindow):
 
     def on_manual_capture(self):
         """手动触发一次完整的监控与截图流程"""
-        if self.capture_manager:
+        if self.capture_manager and self.is_running:
             # 设置手动触发标志
             self.capture_manager.manual_trigger = True
             # 执行一次完整的监控与截图流程
             success = self.capture_manager.manually_capture_once()
             if success:
-                self.update_text("手动触发截图完成")
+                self.update_text("手动截图分析完成", MessageType.STATUS)
             else:
-                self.update_text("手动触发失败，请检查棋盘定位")
+                self.update_text("手动截图分析失败", MessageType.ERROR)
         else:
-            self.update_text("截图管理器未初始化")
+            self.update_text("请先点击开始按钮", MessageType.STATUS)
+
 
     def show_param_menu(self):
         """显示参数菜单"""
@@ -940,7 +957,11 @@ class MainWindow(QMainWindow):
         # 停止所有线程和监听器
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
+
         self.close_queue()
+        
+        # 完全退出引擎
+        context.quit_engine()
         
         # 保存配置
         context.save_config()
@@ -968,6 +989,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
         self.close_queue()
+        
+        # 完全退出引擎
+        context.quit_engine()
+        
         super().closeEvent(event)
 
 def main():
@@ -1056,7 +1081,6 @@ class ManualPositioner(QObject):
     
     def cancel_positioning(self):
         """取消定位过程"""
-        print("取消定位过程")
         self.positioning_step = 0
         self.positioning_coords = []
         self.is_positioning = False
@@ -1105,7 +1129,7 @@ class ManualPositioner(QObject):
         self.position_dot.setAttribute(Qt.WA_TranslucentBackground)
         
         # 加载定位点图片
-        pixmap = QPixmap('app/images/dingwei.png')
+        pixmap = QPixmap(resource_path('images', 'dingwei.png'))
         scaled_pixmap = pixmap.scaledToHeight(25, Qt.SmoothTransformation)
         width = scaled_pixmap.width()
         height = scaled_pixmap.height()
@@ -1318,7 +1342,7 @@ class ManualPositioner(QObject):
         height = right_bottom[1] - left_top[1]  # 高度
         
         # 验证棋盘尺寸的合理性
-        if width < 100 or height < 100:
+        if width < 200 or height < 200:
             print(f"棋盘尺寸过小: {width}x{height}")
             return False
         
@@ -1335,28 +1359,12 @@ class ManualPositioner(QObject):
             platform = self.context.get_platform(self.context.platform)
             platform.regions["board"] = board_region
             
+            manual_coords = (x, y, width, height)
+            self.context.manual_coords = manual_coords
             # 保存配置
             self.context.save_config()
             
             print(f"2角定位成功，棋盘区域: {board_region}")
-            
-            # 调用截图模块的try_locate_board方法验证定位
-            try:
-                # 获取截图管理器实例
-                capture_manager = getattr(self.main_window, 'capture_manager', None)
-                if capture_manager:
-                    # 调用try_locate_board方法，传入手动坐标
-                    manual_coords = (x, y, width, height)
-                    success = capture_manager.try_locate_board(manual_coords=manual_coords)
-                    if success:
-                        print("截图模块验证定位成功")
-                    else:
-                        print("截图模块验证定位失败")
-                else:
-                    print("截图管理器未初始化，跳过验证")
-            except Exception as e:
-                print(f"调用截图模块验证失败: {e}")
-            
             return True
             
         except Exception as e:

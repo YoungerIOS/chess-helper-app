@@ -1,12 +1,12 @@
-from dataclasses import dataclass, field
-from typing import Dict, Optional, List
-from tools import utils
 import json
 import os
 import logging
+from dataclasses import dataclass, field
+from typing import Dict, Optional, List
 from datetime import datetime
 from threading import Lock
-from chess.history import MoveHistory 
+from app.tools import utils
+from app.chess.history import MoveHistory 
 
 def setup_logging():
     """初始化日志系统"""
@@ -14,12 +14,11 @@ def setup_logging():
     if hasattr(setup_logging, '_initialized'):
         return logging.getLogger('chess')
     
-    # 创建logs目录
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+    # 创建日志目录
+    log_dir = os.path.expanduser("~/Library/Logs/chess-helper-app")
+    os.makedirs(log_dir, exist_ok=True)
     
-    # 尝试读取日志配置文件
+    # 读取日志配置
     log_config = {
         "log_level": "INFO",
         "log_to_file": True,
@@ -31,44 +30,25 @@ def setup_logging():
     }
     
     try:
-        log_config_path = utils.resource_path("json/log_config.json")
+        log_config_path = utils.resource_path("json", "log_config.json")
         if os.path.exists(log_config_path):
             with open(log_config_path, "r", encoding="utf-8") as f:
                 user_config = json.load(f)
                 log_config.update(user_config)
-    except Exception as e:
-        # 如果读取配置文件失败，使用默认配置
-        pass
+    except Exception:
+        pass  # 使用默认配置
     
-    # 生成日志文件名（按日期）
+    # 生成日志文件名
     log_file = os.path.join(log_dir, f"chess_helper_{datetime.now().strftime('%Y%m%d')}.log")
-    
-    # 配置日志格式
-    log_format = log_config["log_format"]
-    date_format = log_config["date_format"]
-    
-    # 设置日志级别
-    log_level = getattr(logging, log_config["log_level"].upper(), logging.INFO)
-    
-    # 检查根日志记录器是否已经配置
-    if not logging.getLogger().handlers:
-        # 配置根日志记录器
-        logging.basicConfig(
-            level=log_level,
-            format=log_format,
-            datefmt=date_format,
-            handlers=[]
-        )
     
     # 创建chess模块的日志记录器
     chess_logger = logging.getLogger('chess')
-    chess_logger.setLevel(log_level)
+    chess_logger.setLevel(getattr(logging, log_config["log_level"].upper(), logging.INFO))
     
-    # 避免重复输出 - 清除所有现有处理器
-    for handler in chess_logger.handlers[:]:
-        chess_logger.removeHandler(handler)
+    # 清除现有处理器
+    chess_logger.handlers.clear()
     
-    # 添加文件处理器（支持日志轮转）
+    # 添加文件处理器
     if log_config["log_to_file"]:
         from logging.handlers import RotatingFileHandler
         max_bytes = log_config["max_log_size_mb"] * 1024 * 1024
@@ -78,13 +58,13 @@ def setup_logging():
             backupCount=log_config["backup_count"],
             encoding='utf-8'
         )
-        file_handler.setFormatter(logging.Formatter(log_format, date_format))
+        file_handler.setFormatter(logging.Formatter(log_config["log_format"], log_config["date_format"]))
         chess_logger.addHandler(file_handler)
     
     # 添加控制台处理器
     if log_config["log_to_console"]:
         console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format, date_format))
+        console_handler.setFormatter(logging.Formatter(log_config["log_format"], log_config["date_format"]))
         chess_logger.addHandler(console_handler)
     
     # 标记为已初始化
@@ -112,7 +92,7 @@ class Platform:
     def piece_recognizer(self) -> object:
         """获取棋子识别器"""
         if self._piece_recognizer is None:
-            from chess.piece_recognizer import ChessPieceRecognizer
+            from app.chess.piece_recognizer import ChessPieceRecognizer
             self._piece_recognizer = ChessPieceRecognizer(platform=self.name)
         return self._piece_recognizer
     
@@ -120,7 +100,7 @@ class Platform:
     def timer_recognizer(self) -> object:
         """获取倒计时识别器"""
         if self._timer_recognizer is None:
-            from chess.timer_recognizer import ChessTimerPredictor
+            from app.chess.timer_recognizer import ChessTimerPredictor
             self._timer_recognizer = ChessTimerPredictor(platform=self.name)
         return self._timer_recognizer
 
@@ -133,10 +113,13 @@ class ChessContext:
     _platforms: Dict[str, Platform] = field(default_factory=dict)
     _analysis_mode: str = field(default="timer")  
     engine: Optional[object] = None  # 当前引擎实例
+    _engine_lock: Lock = field(default_factory=Lock)  # 引擎访问锁
     checker: Optional[object] = None  # 局面检查器
+    _checker_lock: Lock = field(default_factory=Lock)  # 检查器访问锁
     history: MoveHistory = field(default_factory=MoveHistory)
     screen_size: Optional[tuple] = None  # 屏幕尺寸
     _board_index: int = 0  # 棋盘皮肤索引（私有存储）
+    _manual_coords: Optional[tuple] = None  # 手动定位坐标 (x, y, width, height)
     
     
     def __post_init__(self):
@@ -160,7 +143,7 @@ class ChessContext:
         """从配置文件加载所有设置"""
         try:
             logger.info("开始加载配置文件...")
-            with open(utils.resource_path("json/game_config.json"), "r") as f:
+            with open(utils.resource_path("json", "game_config.json"), "r") as f:
                 config = json.load(f)
                 
             # 初始化平台
@@ -253,7 +236,7 @@ class ChessContext:
             config = utils.convert_to_builtin_type(config)
             
             # 使用原子写入避免文件损坏
-            path = utils.resource_path("json/game_config.json")
+            path = utils.resource_path("json", "game_config.json")
             tmp_path = path + ".tmp"
             with open(tmp_path, "w") as f:
                 json.dump(config, f, indent=4)
@@ -325,34 +308,12 @@ class ChessContext:
         self._analysis_mode = mode
         self.save_config()  # 保存配置
     
-    def init_checker(self):
-        """初始化局面检查器"""
-        from .checker import PositionChecker
-        self.checker = PositionChecker()
 
-    def clear_checker(self):
-        """清理局面检查器"""
-        self.checker = None
-
-    def send_message(self, message_type, data=None):
-        """发送消息"""
-        from chess.message import message_manager
-        message_manager.send_message(message_type, data)
-    
-    def subscribe(self, message_type, callback):
-        """订阅消息"""
-        from chess.message import message_manager
-        message_manager.subscribe(message_type, callback)
-    
-    def unsubscribe(self, message_type, callback):
-        """取消订阅"""
-        from chess.message import message_manager
-        message_manager.unsubscribe(message_type, callback)
     
     def get_log_info(self) -> dict:
         """获取日志系统信息"""
         try:
-            from tools.log_viewer import LogViewer
+            from app.tools.log_viewer import LogViewer
             viewer = LogViewer()
             log_files = viewer.get_log_files()
             
@@ -380,6 +341,49 @@ class ChessContext:
         """设置棋盘皮肤索引并持久化"""
         self._board_index = int(value)
         self.save_config()
+
+    @property
+    def manual_coords(self) -> Optional[tuple]:
+        """获取手动定位坐标"""
+        return self._manual_coords
+
+    @manual_coords.setter
+    def manual_coords(self, coords: Optional[tuple]) -> None:
+        """设置手动定位坐标"""
+        self._manual_coords = coords
+
+    def get_checker(self) -> Optional[object]:
+        """线程安全地获取检查器"""
+        with self._checker_lock:
+            return self.checker
+
+    def set_checker(self, checker: Optional[object]) -> None:
+        """线程安全地设置检查器"""
+        with self._checker_lock:
+            self.checker = checker
+
+    def reset_checker(self) -> None:
+        """线程安全地重置检查器状态"""
+        with self._checker_lock:
+            if self.checker:
+                self.checker.reset()
+
+    def get_engine(self) -> Optional[object]:
+        """线程安全地获取引擎"""
+        with self._engine_lock:
+            return self.engine
+
+    def set_engine(self, engine: Optional[object]) -> None:
+        """线程安全地设置引擎"""
+        with self._engine_lock:
+            self.engine = engine
+
+    def quit_engine(self) -> None:
+        """线程安全地完全退出引擎"""
+        with self._engine_lock:
+            if self.engine:
+                self.engine.quit()
+                self.engine = None
 
 
 # 创建全局上下文实例
