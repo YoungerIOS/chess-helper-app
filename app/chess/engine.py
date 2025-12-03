@@ -4,8 +4,9 @@ import sys
 import subprocess
 import threading
 from typing import Optional, Tuple, List, Callable
-from chess.message import Message, MessageType, MessageContent
-from chess.context import context
+from app.chess.message import Message, MessageType, MessageContent
+from app.chess.context import context, logger
+from app.tools.utils import resource_path
 
 class ChessEngine:
     """中国象棋引擎类，封装了与Pikafish引擎的交互"""
@@ -28,13 +29,20 @@ class ChessEngine:
         
     def _get_default_engine_path(self) -> str:
         """获取默认引擎路径"""
-        return self._resource_path("Pikafish/src/pikafish")
-    
-    def _resource_path(self, relative_path: str) -> str:
-        """获取资源文件的绝对路径"""
-        if hasattr(sys, '_MEIPASS'):
-            return os.path.join(sys._MEIPASS, relative_path)
-        return os.path.join(os.path.abspath("./app/"), relative_path)
+        from app.tools.utils import app_data_path
+        
+        # 优先使用用户数据目录中的引擎文件
+        user_engine_path = app_data_path("Pikafish/pikafish")
+        if os.path.exists(user_engine_path) and os.access(user_engine_path, os.X_OK):
+            return user_engine_path
+        
+        # 备用：使用打包后的资源
+        fallback_path = resource_path("Pikafish", "src", "pikafish")
+        if os.path.exists(fallback_path):
+            return fallback_path
+        
+        # 如果都不存在，返回用户数据目录路径（用于首次复制）
+        return user_engine_path
     
     def start(self) -> bool:
         """启动引擎"""
@@ -44,6 +52,18 @@ class ChessEngine:
                     print("引擎已经在运行")
                     return True
                 
+                # 检查引擎文件是否存在
+                if not os.path.exists(self.engine_path):
+                    logger.error(f"引擎文件不存在: {self.engine_path}")
+                    return False
+                
+                # 确保可执行权限
+                try:
+                    if os.path.exists(self.engine_path) and not os.access(self.engine_path, os.X_OK):
+                        os.chmod(self.engine_path, 0o755)
+                except Exception:
+                    pass
+
                 self.process = subprocess.Popen(
                     self.engine_path,
                     stdin=subprocess.PIPE,
@@ -54,11 +74,11 @@ class ChessEngine:
                 
                 self._initialize_engine()
                 self.is_initialized = True
-                print("引擎启动成功")
+                logger.info("引擎启动成功")
                 return True
                 
             except Exception as e:
-                print(f"启动引擎时出错：{e}")
+                logger.error(f"启动引擎时出错：{e}")
                 self.process = None
                 self.is_initialized = False
                 return False
@@ -75,27 +95,43 @@ class ChessEngine:
         self._send_command('isready')
         self._wait_for_response('readyok', timeout=1)
     
-    def stop(self):
+    def quit(self):
         """停止引擎"""
         with self.lock:
             if self.process and self.process.poll() is None:
                 try:
-                    self.process.terminate()
-                    self.process.wait(timeout=3)
+                    # 先尝试发送quit命令让引擎优雅退出
+                    self._send_command('quit')
+                    # 等待引擎进程自然结束
+                    self.process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
+                    # 如果1秒内没结束，强制终止
+                    self.process.terminate()
+                    self.process.wait(timeout=2)
+                except Exception:
+                    # 如果发送命令失败，直接终止进程
+                    self.process.terminate()
+                    self.process.wait(timeout=2)
                 finally:
+                    # 如果进程仍然存在，强制杀死
+                    if self.process and self.process.poll() is None:
+                        self.process.kill()
+                        self.process.wait(timeout=1)
                     self.process = None
                     self.is_initialized = False
-                    print("引擎已停止")
+                    logger.info("引擎已停止")
     
     def _send_command(self, command: str):
         """发送命令到引擎"""
         if not self.process:
             raise RuntimeError("引擎未启动")
-        print(f"[ENGINE CMD] {command}")  # 调试用，打印实际发给引擎的命令
-        self.process.stdin.write(f'{command}\n')
-        self.process.stdin.flush()
+        # print(f"[ENGINE CMD] {command}")  # 调试用，打印实际发给引擎的命令
+        try:
+            self.process.stdin.write(f'{command}\n')
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            # 如果进程已经退出，忽略错误
+            pass
     
     def _wait_for_response(self, keyword: str, timeout: float = 1.0) -> List[str]:
         """等待引擎响应，直到包含指定关键字"""
@@ -140,7 +176,7 @@ class ChessEngine:
         发送go命令和读取结果
         """
         self._send_command(f"go {param} {value}")
-        return self._read_output_with_timeout(60)
+        return self._read_output_with_timeout(30)
 
     def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None) -> Tuple[str, str]:
         """获取最佳走法
@@ -154,6 +190,8 @@ class ChessEngine:
         """
         if not self.is_initialized:
             raise RuntimeError("引擎未初始化")
+        self._send_command('stop')
+        
         fen_string = ''
         if fen:
             fen_string = fen + ' ' + ('w' if side else 'b')
@@ -229,11 +267,11 @@ class ChessEngine:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """上下文管理器出口"""
-        self.stop()
+        self.quit()
     
     def __del__(self):
         """析构函数，确保资源被正确释放"""
-        self.stop()
+        self.quit()
 
 
 
