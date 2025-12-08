@@ -425,8 +425,8 @@ class PositionChecker:
                 self.last_counts = self.START_COUNTS.copy()
                 return result
             else:
-                # 超过两次则视为相同画面
-                return BoardStatus(is_same_board=True, message="红方开局（>2次）相同画面")
+                # 超过1次则视为相同画面
+                return BoardStatus(is_same_board=True, message="红方开局（>1次）相同画面")
         if result.is_black_start:
             self.last_board = [row[:] for row in self.START_BLACK]
             self.last_counts = self.START_COUNTS.copy()
