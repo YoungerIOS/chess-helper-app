@@ -185,14 +185,14 @@ class ChessCaptureManager:
         #     print(f"[{avatar}] 哈希检测: {'计时' if result else '空闲'} - {reason}")
         return avatar_state
 
-    def _capture_and_enqueue(self, current_turn, region):
+    def _capture_and_enqueue(self, current_turn, region, force_output=False):
         """截取棋盘区域，使用纳秒级时间戳作为排序依据"""
         capture_time = time.time_ns()
         with mss.mss() as sct:
             board_screenshot = sct.grab(region)
         
         # 使用全局函数处理截图
-        stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[capture]")
+        stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[capture]", force_output=force_output)
         
         # 如果检测到稳定帧，则入队
         if stable_frame is not None:
@@ -226,7 +226,7 @@ class ChessCaptureManager:
                 
                 # 如果检测到稳定帧，则入队
                 if stable_frame is not None:
-                    current_turn = TurnState.OUR_SIDE
+                    current_turn = None # 连续模式下的轮次由 processor 结合 marker 动态推断
                     self.process_queue.put((capture_time, current_turn, board_screenshot))
                     self.last_capture_time = time.time()
                 
@@ -380,7 +380,7 @@ class ChessCaptureManager:
             current_turn = TurnState.OUR_SIDE
         
         print(f"执行重试截图任务，轮次: {current_turn}")
-        self._capture_and_enqueue(current_turn, board_region)
+        self._capture_and_enqueue(current_turn, board_region, force_output=True)
     
     def manually_capture_once(self):
         """

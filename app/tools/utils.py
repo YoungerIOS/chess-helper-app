@@ -334,7 +334,20 @@ def convert_move_to_chinese(move, board_array, is_red):
     # print(f'起始列{start_col}, 起始行{start_row}, 最终列{end_col}, 最终行{end_row}') 
       
     # 从棋局数组中获取棋子类型  
-    piece_type = board_array[9 - start_row][start_col]  # 棋子row索引总是从上到下0到9,而引擎纵坐标是9到0
+    if is_red:
+        # 红方在下: Row 0=Rank 9, Row 9=Rank 0
+        # Rank r -> Row 9-r
+        # Col c(a=0) -> Col c
+        row_idx = 9 - start_row
+        col_idx = start_col
+    else:
+        # 黑方在下: Row 0=Rank 0, Row 9=Rank 9
+        # Rank r -> Row r
+        # Col c(a=0) -> Col 8-c
+        row_idx = start_row
+        col_idx = 8 - start_col
+        
+    piece_type = board_array[row_idx][col_idx]
     piece_name = PIECE_CODES[piece_type]  
   
     # 判断移动类型（进、退、平）和构建棋谱描述

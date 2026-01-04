@@ -54,13 +54,21 @@ class PositionChecker:
         self.last_board = None  # 上一次的棋盘数组
         self.last_counts = None  # 上一次的棋子数量统计
         self.red_start_count = 0  # 红方开局局面连续出现次数 
+        self.consecutive_drops = 0 # 连续丢帧计数(防卡死) 
         
     def reset(self):
         """重置检查器状态，用于手动刷新时清除历史状态"""
         self.last_board = None
         self.last_counts = None
+
+    def force_sync_board(self, board_array):
+        """强制同步棋盘状态（用于处理连续非法帧导致的卡死）"""
+        self.last_board = [row[:] for row in board_array]
+        # 获取当前棋子数量统计（忽略合法性检查结果，只取计数）
+        _, _, self.last_counts = self.check_pieces_count(board_array)
+        self.consecutive_drops = 0
         self.red_start_count = 0  # 重置红方开局触发计数
-        print("Debug - 检查器状态已重置")
+        print("Debug - 检查器状态已重置 (Force Sync)")
 
     def is_red_at_bottom(self, board_array):
         """通过黑王的位置判断红方是否在棋盘底部"""
@@ -136,7 +144,9 @@ class PositionChecker:
             if piece.lower() == 'k':
                 continue
             if count > self.last_counts.get(piece, 0):
-                return False, f"非法棋子数量：检测到{count}个{piece}，上一局面{self.last_counts.get(piece, 0)}个", counts
+                # 棋子数量变多是不可能的（除非是新对局/悔棋/上一帧识别错了）
+                # 为了避免死锁（上一帧识别少了个子，这一帧恢复了，结果一直报非法），这里视为"多步变化/重置"
+                return True, f"棋子{piece}数量增加（{self.last_counts.get(piece, 0)}->{count}），视为重置", counts
         
         return True, "棋子数量合理", counts
 
@@ -395,11 +405,12 @@ class PositionChecker:
         # 默认返回多步移动
         return BoardStatus(is_illegal=True, message='非法或未知局面')
 
-    def  check_board(self, current_board):
+    def check_board(self, current_board, marker_coords=None):
         """
         检查当前局面是否合法
         Args:
             current_board: 当前局面数组
+            marker_coords: 标记坐标列表 (可选)
         Returns:
             BoardStatus: 检查结果
         """
@@ -416,6 +427,16 @@ class PositionChecker:
         # 全面分析局面变化
         result = self.check_position_changes(self.last_board, current_board, self.is_red)
         
+        # 0. 强制检查标记 (如果对局已开始)
+        # 如果有上一次的局面记录，说明对局正在进行中。
+        # 此时如果画面发生了变化（不是SameBoard），却没检测到标记，说明截图可能截到了中间态（比如棋子飞在半空，或者动画遮挡）
+        # 此时应直接视为非法（丢弃并重试），而不是尝试瞎猜。
+        if self.last_board is not None and not result.is_same_board and not marker_coords:
+            # 特殊情况：如果是开局重置（Red/Black Start），可能没有标记
+            # 同样，如果是明确的单步移动（is_my_step 或 is_opponent_step），也允许通过（视为标记检测漏检，但移动本身合法）
+            if not (result.is_red_start or result.is_black_start or result.is_my_step or result.is_opponent_step):
+                return BoardStatus(is_illegal=True, message="检测到局面变化但未检测到标记，丢弃帧")
+
         # 1. 检测初始局面
         if result.is_red_start:
             if self.red_start_count < 1: # 开局帧最大允许连续出现次数(决定开局时会显示几次开局走法)
@@ -436,34 +457,84 @@ class PositionChecker:
         if result.is_same_board:
             return result
         
-        # 3. 判断合法单步移动
+        # 3. 核心逻辑：利用标记判定归属 (优先级最高)
+        # 如果检测到了标记，直接根据标记位置判定是谁走了棋
+        if self.last_board and marker_coords:
+            is_my_step = None
+            
+            for r, c in marker_coords:
+                # 坐标越界检查
+                if not (0 <= r < len(self.last_board) and 0 <= c < len(self.last_board[0])):
+                    continue
+                
+                piece_last = self.last_board[r][c]
+                piece_curr = current_board[r][c]
+                
+                # 寻找"移动源头"：上一帧有棋子，且当前帧该棋子已离开（变为空）
+                # 注意：如果是吃子，目标位置在 last_board 也有子，但 curr_board 也有子（攻击者），所以不会误判
+                # 只有 "上一帧有子 -> 当前帧无子" 才能唯一确定这是 From_Pos
+                if piece_last != '-' and piece_curr == '-':
+                    is_red_piece = piece_last.isupper()
+                    # 判断该棋子是否归属我方
+                    is_your_piece = (self.is_red and is_red_piece) or (not self.is_red and not is_red_piece)
+                    
+                    if is_your_piece:
+                        # 我方棋子离开了 -> 我走了这步棋
+                        is_my_step = True
+                    else:
+                        # 对方棋子离开了 -> 对方走了这步棋
+                        is_my_step = False
+                    
+                    break 
+            
+            # 只有当确实找到了符合条件的标记时才覆盖结果
+            if is_my_step is not None:
+                result.is_my_step = is_my_step
+                result.is_opponent_step = not is_my_step
+                result.is_multi_step = False
+                result.is_new_game = False
+                result.is_illegal = False 
+                result.message = f"标记判定: {'我方' if is_my_step else '对方'}走棋"
+                
+                # 更新状态
+                self.last_board = [row[:] for row in current_board]
+                
+                # 尝试简单维护棋子数量，避免后续校验报错
+                # (稍微粗糙点，直接统计当前数量即可，因为已经通过标记确认了合法性，数量校验只是辅助)
+                _, _, current_counts_check = self.check_pieces_count(current_board)
+                self.last_counts = current_counts_check
+
+                self.red_start_count = 0
+                return result
+
+        # 4. 如果没有标记（通常被上面的 check 0 拦截，但为了代码健壮性保留旧逻辑作为 Fallback，或处理特殊情况）
+        # 判断合法单步移动
         if result.is_my_step or result.is_opponent_step:
             self.last_board = [row[:] for row in current_board]
-            # 用吃子信息更新数量变化
             p = result.step_info['captured_piece']
             if result.step_info and p:
-                self.last_counts[p] = max(0, self.last_counts.get(p, 1) - 1) # 下限保护，避免减到负数
-            # 检测到真实走子，重置红方开局计数，为下一局做准备
+                self.last_counts[p] = max(0, self.last_counts.get(p, 1) - 1)
             self.red_start_count = 0
             return result
         
-        # 4. 过滤其他非法局面
+        # 5. 过滤其他非法局面
         count_valid, count_msg, current_counts = self.check_pieces_count(current_board)
         if not count_valid:
             return BoardStatus(is_illegal=True, message=count_msg)
-
+        
+        if "重置" in count_msg:
+             return BoardStatus(is_multi_step=True, step_info={}, message=count_msg)
+        
         position_valid, position_msg = self.check_pieces_position(current_board, self.is_red)
         if not position_valid:
             return BoardStatus(is_illegal=True, message=position_msg)
         
-        # 5. 多步移动或残局，更新状态
+        # 6. 多步移动或残局
         if result.is_multi_step:
             self.last_board = [row[:] for row in current_board]
             self.last_counts = current_counts.copy()
             result.is_new_game = True
-            # 多步移动通常意味着新对局，重置红方开局计数
             self.red_start_count = 0
             return result
         
-        # 如果全都没有命中, 返回未知非法局面
         return result

@@ -152,7 +152,7 @@ class StableFrameDetector:
         
         self.last_log_hash = None  # 仅用于打印相邻帧哈希差
 
-    def update(self, frame: Image.Image):
+    def update(self, frame: Image.Image, force_output=False):
         """
         传入一帧图像，返回：
         - None : 还不稳定，不输出新局面
@@ -177,15 +177,17 @@ class StableFrameDetector:
         if len(self.buffer) == self.stable_count:
             # 检查 buffer 内是否都相同
             if all((self.buffer[0] - h) <= self.diff_threshold for h in self.buffer):
-                # 如果是新局面，才输出
-                if (self.last_confirmed_hash is None or
-                        (self.last_confirmed_hash - curr_hash) > self.diff_threshold):
+                # 如果是新局面，或者强制输出，才输出
+                if (force_output or 
+                    self.last_confirmed_hash is None or
+                    (self.last_confirmed_hash - curr_hash) > self.diff_threshold):
+                    
                     self.last_confirmed_hash = curr_hash
                     return frame  # 输出稳定帧
 
         return None
 
-    def process_screenshot(self, board_screenshot, log_prefix="[board]"):
+    def process_screenshot(self, board_screenshot, log_prefix="[board]", force_output=False):
         """
         将 MSS 截图转换为 PIL.Image，打印与上一帧的哈希差，并通过稳定帧检测返回稳定帧。
         Returns: (stable_frame: PIL.Image | None, curr_hash)
@@ -201,12 +203,12 @@ class StableFrameDetector:
             curr_hash = imagehash.dhash(pil_img, hash_size=self.hash_size)
             if self.last_log_hash is not None:
                 diff = (self.last_log_hash - curr_hash)
-                print(f"{log_prefix} board hash diff: {diff}")
+                # print(f"{log_prefix} board hash diff: {diff}")
             else:
                 print(f"{log_prefix} first board frame (no previous hash)")
             self.last_log_hash = curr_hash
 
-            stable_frame = self.update(pil_img)
+            stable_frame = self.update(pil_img, force_output=force_output)
             return stable_frame, curr_hash
         except Exception as e:
             print(f"{log_prefix} hash diff calc failed: {e}")
@@ -221,6 +223,6 @@ def has_border(screenshot, platform: str, avatar: str) -> tuple[bool, str]:
     """便捷函数，使用全局检测器实例，返回(结果, 说明)"""
     return _detector.analyse_hashs(screenshot, platform, avatar)
 
-def filter_stable_frame(board_screenshot, log_prefix="[board]"):
+def filter_stable_frame(board_screenshot, log_prefix="[board]", force_output=False):
     """便捷函数，使用全局稳定帧检测器实例，处理棋盘截图"""
-    return _stable_detector.process_screenshot(board_screenshot, log_prefix)
+    return _stable_detector.process_screenshot(board_screenshot, log_prefix, force_output)

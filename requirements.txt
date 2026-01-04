@@ -57,3 +57,6 @@ pytesseract>=0.3.8
 # 仅如有需要再加
 # playwright==1.42.0
 # mitmproxy==11.0.2
+
+# 图像哈希
+ImageHash==4.3.1

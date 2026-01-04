@@ -27,22 +27,22 @@
         },
         "regions": {
             "board": {
-                "left": 721.4,
-                "top": 141.1,
-                "width": 479.2,
-                "height": 531.9
+                "left": 701.1,
+                "top": 150.1,
+                "width": 448.0,
+                "height": 498.9
             },
             "avatar_upper": {
-                "left": 593.6,
-                "top": 153.9,
-                "width": 85.0,
-                "height": 85.0
+                "left": 581.6,
+                "top": 162.0,
+                "width": 79.0,
+                "height": 79.0
             },
             "avatar_lower": {
-                "left": 1241.1,
-                "top": 516.0,
-                "width": 85.0,
-                "height": 85.0
+                "left": 1187.0,
+                "top": 500.6,
+                "width": 79.0,
+                "height": 79.0
             }
         }
     },
@@ -74,22 +74,22 @@
         },
         "regions": {
             "board": {
-                "left": 600.4,
-                "top": 236.6,
-                "width": 406.7,
-                "height": 428.9
+                "left": 685.0,
+                "top": 218.4,
+                "width": 404.7,
+                "height": 433.0
             },
             "avatar_upper": {
-                "left": 600.4,
-                "top": 97.6,
-                "width": 90.0,
-                "height": 90.0
+                "left": 685.0,
+                "top": 78.1,
+                "width": 89.0,
+                "height": 89.0
             },
             "avatar_lower": {
-                "left": 925.8,
-                "top": 719.1,
-                "width": 90.0,
-                "height": 90.0
+                "left": 1008.8,
+                "top": 705.5,
+                "width": 89.0,
+                "height": 89.0
             }
         }
     },
@@ -98,7 +98,7 @@
     "board_index": 4,
     "engine_params": {
         "movetime": "3000",
-        "depth": "23",
+        "depth": "22",
         "goParam": "depth"
     }
 }

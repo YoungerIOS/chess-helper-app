@@ -3,6 +3,7 @@ import numpy as np
 import os
 from app.tools.utils import app_cache_path
 from app.chess.context import context as global_context
+from app.chess.marker_detector import MarkerDetector
 
 class ChessRecognizer:
     class RecognitionError(Exception):
@@ -11,6 +12,7 @@ class ChessRecognizer:
     def __init__(self, context=None):
         # 支持依赖注入，默认使用全局context
         self.context = context or global_context
+        self.marker_detector = MarkerDetector()
 
     def preprocess_image(self, img_origin):
         # img = cv2.imread(img_path)  
@@ -82,10 +84,16 @@ class ChessRecognizer:
             x_array: 棋盘横线坐标数组
             y_array: 棋盘纵线坐标数组
         Returns:
-            pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
+            (pieceArray, marker_coords): 
+                pieceArray: 9x10的二维数组，表示棋盘状态
+                marker_coords: 检测到的标记坐标列表
         """
         # 预处理
-        resized_img, _ = self.preprocess_image(img)
+        resized_img, gray = self.preprocess_image(img)
+        
+        # 顺便检测走棋标记 (复用预处理后的灰度图)
+        marker_coords = self.marker_detector.detect_markers(gray, x_array, y_array)
+        
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
         
         # 创建保存目录
@@ -141,7 +149,7 @@ class ChessRecognizer:
                 pieceArray[i][j] = piece_type
             else:
                 raise self.RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
-        return pieceArray
+        return pieceArray, marker_coords
 
     # 计算棋子坐标
     def get_piece_position(self, point, x_array, y_array):

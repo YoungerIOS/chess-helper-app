@@ -83,8 +83,8 @@ class BoardLocator:
         
         # 游戏窗口标题关键词
         self.game_titles = {
-            "JJ": ["JJ象棋"],
-            "TT": ["天天象棋"]
+            "JJ": ["JJ象棋", "微信"],
+            "TT": ["天天象棋", "微信"]
         }
         self.window_size = None
         
@@ -117,7 +117,11 @@ class BoardLocator:
 
             for win in window_list:
                 title = win.get('kCGWindowName', '')
-                if title and keyword.lower() in title.lower():
+                owner = win.get('kCGWindowOwnerName', '')
+                
+                # Check match in Title OR Owner
+                if (title and keyword.lower() in title.lower()) or \
+                   (owner and keyword.lower() in owner.lower()):
                     bounds = win.get('kCGWindowBounds', {})
                     matches.append({
                         "title": title,
