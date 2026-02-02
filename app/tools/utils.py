@@ -2,6 +2,8 @@ import numpy as np
 import os
 import sys
 import platform
+from PIL import Image
+import imagehash
 
 # 管理开发环境与打包环境下的路径
 def resource_path(*path_parts):
@@ -348,6 +350,15 @@ def convert_move_to_chinese(move, board_array, is_red):
         col_idx = 8 - start_col
         
     piece_type = board_array[row_idx][col_idx]
+    
+    # 验证起点是否有棋子，以及是否属于我方（防止空着法和对方着法）
+    if piece_type == '-':
+        return None
+    
+    is_my_piece = (is_red and piece_type.isupper()) or (not is_red and piece_type.islower())
+    if not is_my_piece:
+        return None
+    
     piece_name = PIECE_CODES[piece_type]  
   
     # 判断移动类型（进、退、平）和构建棋谱描述
@@ -434,3 +445,32 @@ def convert_to_builtin_type(obj):
         return obj.item()
     else:
         return obj
+        
+def compute_image_hash(image_array):
+    """
+    计算图像哈希值 (dHash)
+    Args:
+        image_array: numpy 数组 (BGR or RGB) 或 PIL Image
+    Returns:
+        hash string
+    """
+    try:
+        if isinstance(image_array, np.ndarray):
+            # 转换为 PIL Image
+            if image_array.ndim == 3 and image_array.shape[2] == 3:
+                # 假设是 BGR (OpenCV default)，需要转 RGB
+                # 但 dHash 对灰度也行，转 RGB 比较保险
+                img_rgb = image_array[..., ::-1] # BGR to RGB
+                pil_img = Image.fromarray(img_rgb)
+            elif image_array.ndim == 2:
+                 pil_img = Image.fromarray(image_array)
+            else:
+                 return None
+        elif isinstance(image_array, Image.Image):
+            pil_img = image_array
+        else:
+            return None
+            
+        return str(imagehash.dhash(pil_img))
+    except Exception:
+        return None

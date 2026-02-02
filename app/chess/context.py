@@ -116,10 +116,15 @@ class ChessContext:
     _engine_lock: Lock = field(default_factory=Lock)  # 引擎访问锁
     checker: Optional[object] = None  # 局面检查器
     _checker_lock: Lock = field(default_factory=Lock)  # 检查器访问锁
+    recognizer: Optional[object] = None  # 棋盘识别器(High Level)
+    _recognizer_lock: Lock = field(default_factory=Lock) # 识别器访问锁
     history: MoveHistory = field(default_factory=MoveHistory)
     screen_size: Optional[tuple] = None  # 屏幕尺寸
     _board_index: int = 0  # 棋盘皮肤索引（私有存储）
     _manual_coords: Optional[tuple] = None  # 手动定位坐标 (x, y, width, height)
+    base_fen: Optional[str] = None # 用于历史中断时的锚点FEN (持久化存储)
+    analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
+    discard_before_timestamp: float = 0.0  # RETRY时设置，过滤在此时间之前截图的帧
     
     
     def __post_init__(self):
@@ -367,6 +372,22 @@ class ChessContext:
         with self._checker_lock:
             if self.checker:
                 self.checker.reset()
+
+    def get_recognizer(self) -> Optional[object]:
+        """线程安全地获取识别器"""
+        with self._recognizer_lock:
+            return self.recognizer
+
+    def set_recognizer(self, recognizer: Optional[object]) -> None:
+        """线程安全地设置识别器"""
+        with self._recognizer_lock:
+            self.recognizer = recognizer
+    
+    def reset_recognizer(self) -> None:
+        """线程安全地重置识别器状态"""
+        with self._recognizer_lock:
+            if self.recognizer and hasattr(self.recognizer, 'reset'):
+                self.recognizer.reset()
 
     def get_engine(self) -> Optional[object]:
         """线程安全地获取引擎"""

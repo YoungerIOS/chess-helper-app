@@ -11,6 +11,7 @@ class MessageType(Enum):
     ERROR = auto()          # 错误消息
     STOP = auto()           # 停止消息
     RETRY_CAPTURE = auto()  # 重试截图消息
+    NON_GAME_SCREEN = auto()  # 非棋局画面（结算画面等）
 
 
 
@@ -24,6 +25,7 @@ class TurnState(Enum):
     """轮次状态枚举"""
     OUR_SIDE = 1       # 我方回合
     OPPONENT = 0       # 对方回合
+    MANUAL = 2         # 手动强制分析
 
 
 class Platform(Enum):
@@ -55,4 +57,7 @@ class MessageContent:
     
     # 错误消息
     RECOGNITION_FAILED = "识别失败，请重试"
-    ENGINE_ERROR = "引擎错误，请重试" 
+    ENGINE_ERROR = "引擎错误，请重试"
+    
+    # 非棋局画面
+    NON_GAME_SCREEN = "非棋局画面"

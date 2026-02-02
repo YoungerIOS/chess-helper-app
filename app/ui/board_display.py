@@ -364,23 +364,34 @@ class BoardDisplay(QLabel):
             end_row = 9 - end_row
         
         self.move_arrow = (start_col, start_row, end_col, end_row)
+        self.update()
 
     def update_pieces(self, array):
         """更新棋盘所有棋子位置
         Args:
             array: 与显示坐标完全相同的二维数组
         """
-        # 清除箭头
-        self.move_arrow = None
-        self.move_from = None
-        self.move_to = None
-        
-        self.pieces.clear()
+        # 构建新的棋子列表
+        new_pieces = []
         for y in range(10):
             for x in range(9):
                 piece = array[y][x]
                 if piece and piece != '-':
-                    self.pieces.append((piece, x, y))
+                    new_pieces.append((piece, x, y))
+        
+        # 检查棋子是否发生变化
+        # 如果棋子列表内容一致（排序后比较，或者直接比较因为顺序是固定的），则不更新
+        # 这里顺序是固定的（按行列扫描），可以直接比较
+        if self.pieces == new_pieces:
+            return
+
+        # 如果有变化，则更新并清除旧的箭头/标记
+        self.move_arrow = None
+        self.move_from = None
+        self.move_to = None
+        
+        self.pieces = new_pieces
+        self.update()
 
     def update_board(self, array, step_info=None):
         """更新棋盘(包括棋子位置和移动标记)
@@ -415,3 +426,11 @@ class BoardDisplay(QLabel):
         context.board_index = self.current_board_index
         context.save_config()
         self.update()  # 立即重绘 
+    
+    def clear_board(self):
+        """清空棋盘显示（用于非棋局画面）"""
+        self.pieces = []  # 清空所有棋子
+        self.move_arrow = None  # 清空箭头
+        self.move_from = None  # 清空移动标记
+        self.move_to = None
+        self.update()  # 触发重绘

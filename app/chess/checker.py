@@ -1,9 +1,13 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
+from app.tools.log_config import get_logger
+
+logger = get_logger(__name__)
 
 @dataclass
 class BoardStatus:
-    is_illegal: bool = False
+    is_illegal_board: bool = False  # 非法局面：棋子数量或位置非法
+    is_illegal_change: bool = False   # 非法变化：变化无法解析
     is_same_board: bool = False
     is_my_step: bool = False
     is_opponent_step: bool = False
@@ -11,8 +15,21 @@ class BoardStatus:
     is_new_game: bool = False 
     is_red_start: bool = False
     is_black_start: bool = False
+    is_history_mismatch: bool = False # 历史校验是否不一致
     step_info: Optional[Dict[str, Any]] = field(default_factory=dict)
     message: str = ""
+    
+    @property
+    def is_active(self) -> bool:
+        """
+        判断是否为有效的活跃状态
+        Active includes: Valid moves, New Game, Same Board (Thinking)
+        Excluded: Illegal boards, Illegal changes, Mismatches, Multi-step
+        """
+        return not (self.is_illegal_board or 
+                    self.is_illegal_change or 
+                    self.is_history_mismatch or 
+                    self.is_multi_step)
     
 
 class PositionChecker:
@@ -53,13 +70,87 @@ class PositionChecker:
         self.is_red = True
         self.last_board = None  # 上一次的棋盘数组
         self.last_counts = None  # 上一次的棋子数量统计
-        self.red_start_count = 0  # 红方开局局面连续出现次数 
-        self.consecutive_drops = 0 # 连续丢帧计数(防卡死) 
+        self.red_start_count = 0  # 红方开局帧连续出现次数 
+        self.consecutive_drops = 0 # 连续丢帧重拍计数(防卡死)
+        self.consecutive_mismatches = 0 # 连续历史校验不一致计数
+        self.in_settlement_screen = False  # 是否处于结算画面状态
+        
+        # 优化：模拟状态缓存
+        self._sim_cache = {
+            'base_fen': None,
+            'moves_str': None, 
+            'board': None # 上一次推演出的fen
+        }
+        
+        # 备份状态 (用于 Undo)
+        self._backup_last_board = None
+        self._backup_last_counts = None 
         
     def reset(self):
         """重置检查器状态，用于手动刷新时清除历史状态"""
         self.last_board = None
         self.last_counts = None
+        self.red_start_count = 0
+        self.consecutive_drops = 0
+        self.consecutive_mismatches = 0
+        self.in_settlement_screen = False  # 重置结算状态
+        
+        # 清空备份
+        self._backup_last_board = None 
+        self._backup_last_counts = None
+
+        # 清空缓存
+        self._sim_cache = { 'base_fen': None, 'moves_str': None, 'board': None }
+    
+    def check_settlement(self, board_array, is_massive_change):
+        """
+        检测是否为结算画面
+        Args:
+            board_array: 棋盘数组（可为 None，表示识别失败）
+            is_massive_change: 是否检测到巨大变化
+        Returns:
+            bool: True 表示是结算画面，需要发送 NON_GAME_SCREEN 消息
+        """
+        # 识别失败时，如果已在结算状态，保持结算状态
+        if board_array is None:
+            if self.in_settlement_screen:
+                logger.debug("识别失败，保持结算画面状态")
+                return True
+            return False
+        
+        # 快速路径：既没有巨大变化，也不在结算状态，无需检测
+        if not is_massive_change and not self.in_settlement_screen:
+            return False
+        
+        # 需要检测时才统计将帅数量
+        king_count = sum(1 for row in board_array for piece in row if piece == 'k')
+        general_count = sum(1 for row in board_array for piece in row if piece == 'K')
+        kings_missing = (king_count != 1 or general_count != 1)
+        
+        if kings_missing:
+            # 将帅丢失
+            if is_massive_change:
+                # 巨大变化 + 将帅丢失 = 进入结算状态
+                self.in_settlement_screen = True
+                logger.debug(f"进入结算画面 (巨大变化 + 将{king_count}个/帅{general_count}个)")
+            
+            if self.in_settlement_screen:
+                # 已在结算状态
+                logger.debug("保持结算画面状态")
+                self.consecutive_drops = 0  # 重置丢帧计数
+                return True
+        else:
+            # 将帅存在
+            if self.in_settlement_screen:
+                # 从结算状态恢复（新对局开始）
+                logger.debug("将帅恢复，退出结算状态")
+                self.in_settlement_screen = False
+            
+            if is_massive_change:
+                # 巨大变化 + 将帅存在 = 可能是新对局
+                logger.debug("检测到巨大变化但将帅存在，可能是新对局")
+        
+        return False
 
     def force_sync_board(self, board_array):
         """强制同步棋盘状态（用于处理连续非法帧导致的卡死）"""
@@ -67,16 +158,34 @@ class PositionChecker:
         # 获取当前棋子数量统计（忽略合法性检查结果，只取计数）
         _, _, self.last_counts = self.check_pieces_count(board_array)
         self.consecutive_drops = 0
-        self.red_start_count = 0  # 重置红方开局触发计数
-        print("Debug - 检查器状态已重置 (Force Sync)")
+        logger.debug("检查器状态已重置 (Force Sync)")
 
-    def is_red_at_bottom(self, board_array):
-        """通过黑王的位置判断红方是否在棋盘底部"""
-        for r in range(3):  # 上方九宫格是前3行
+    def update_side_detection(self, board_array):
+        """
+        更新红黑方判断 (Latch Logic / 状态保持)
+        仅当明确检测到上方将帅时才更新状态，避免因检测失败导致的误判
+        """
+        # 扫描上方九宫格 (前3行, 中间3列)
+        has_black_king = False
+        has_red_king = False
+        
+        for r in range(3):
             for c in range(3, 6):
                 if board_array[r][c] == 'k':
-                    return True
-        return False
+                    has_black_king = True
+                elif board_array[r][c] == 'K':
+                    has_red_king = True
+        
+        # 状态更新逻辑
+        if has_black_king and not has_red_king:
+            if not self.is_red:
+                logger.info("Side Detection: Detected Black King at top -> I am RED")
+            self.is_red = True
+        elif has_red_king and not has_black_king:
+            if self.is_red:
+                logger.info("Side Detection: Detected Red King at top -> I am BLACK")
+            self.is_red = False
+        # else: 如果都没检测到，或都检测到了(异常)，保持 is_red 不变
 
     def is_position_valid(self, piece_type, x, y, is_red_at_bottom):
         """
@@ -128,23 +237,49 @@ class PositionChecker:
         return True
 
     def check_pieces_count(self, array):
+        """
+        检查棋子数量是否合法
+        1. 先检查绝对上限（如马最多2个），超限返回非法
+        2. 再检查相对变化（比上一帧增多视为重置）
+        
+        Args:
+            array: 棋盘数组
+        """
         counts = {}
         for row in array:
             for piece in row:
                 if piece != '-':
                     counts[piece] = counts.get(piece, 0) + 1
         
+        # 1. 检查绝对上限（中国象棋规则：各棋子的初始数量）
+        # 任何棋子数量超过初始数量都是非法的（不可能通过正常走棋产生）
+        for piece, count in counts.items():
+            max_count = self.START_COUNTS.get(piece, 0)
+            if count > max_count:
+                piece_names = {
+                    'r': '黑车', 'n': '黑马', 'b': '黑象', 'a': '黑士', 'k': '黑将', 'c': '黑炮', 'p': '黑卒',
+                    'R': '红车', 'N': '红马', 'B': '红相', 'A': '红士', 'K': '红帅', 'C': '红炮', 'P': '红兵'
+                }
+                name = piece_names.get(piece, piece)
+                return False, f"非法棋子数量: {name}{count}个 (上限{max_count})", counts
+        
+        # 2. 检查将帅是否都存在
+        king_count = counts.get('k', 0)
+        general_count = counts.get('K', 0)
+        if king_count != 1 or general_count != 1:
+            return False, f"非法将帅数量: 检测到{king_count}个将,{general_count}个帅", counts
+        
+        # 3. 首次初始化时，直接返回成功
         if self.last_counts is None:
             return True, "重置局面", counts
         
-        if counts.get('k', 0) != 1 or counts.get('K', 0) != 1:
-            return False, f"非法将帅数量: 检测到{counts.get('k', 0)}个将,{counts.get('K', 0)}个帅", counts
-        
+        # 4. 检查相对变化（比上一帧增多）
         for piece, count in counts.items():
             if piece.lower() == 'k':
                 continue
             if count > self.last_counts.get(piece, 0):
                 # 棋子数量变多是不可能的（除非是新对局/悔棋/上一帧识别错了）
+                # 但仅凭此无法判断局面是否合法，因为可能没有超出棋子数量上限
                 # 为了避免死锁（上一帧识别少了个子，这一帧恢复了，结果一直报非法），这里视为"多步变化/重置"
                 return True, f"棋子{piece}数量增加（{self.last_counts.get(piece, 0)}->{count}），视为重置", counts
         
@@ -360,7 +495,7 @@ class PositionChecker:
 
             # 检查解析结果
             if not src or not dst:
-                return BoardStatus(is_illegal=True, message='非法变化：无法解析为单步移动')
+                return BoardStatus(is_illegal_change=True, message='非法变化：无法解析为单步移动')
 
             # 检查移动合法性
             step_info = {
@@ -373,7 +508,7 @@ class PositionChecker:
             is_legal = self.is_step_legal(a1, a2, is_red_at_bottom, step_info)
             
             if not is_legal:
-                return BoardStatus(is_illegal=True, message='非法的移动')
+                return BoardStatus(is_illegal_change=True, message='非法的移动')
 
             # 判断移动归属
             side_of_move = step_info.get('side')
@@ -400,43 +535,42 @@ class PositionChecker:
 
         # 只有一个格子变化
         if len(changed_positions) == 1:
-            return BoardStatus(is_illegal=True, message='非法移动：只有一个格子变化')
+            return BoardStatus(is_illegal_change=True, message='非法移动：只有一个格子变化')
         
         # 默认返回多步移动
-        return BoardStatus(is_illegal=True, message='非法或未知局面')
+        return BoardStatus(is_illegal_change=True, message='非法或未知局面')
 
-    def check_board(self, current_board, marker_coords=None):
+    def check_board(self, current_board, marker_coords=None, base_fen=None, history_moves=None):
         """
         检查当前局面是否合法
         Args:
             current_board: 当前局面数组
             marker_coords: 标记坐标列表 (可选)
+            base_fen: 历史基准FEN (可选)
+            history_moves: 历史着法字符串 (可选)
         Returns:
             BoardStatus: 检查结果
         """
+        
         if current_board is None:
             return None
         
-        self.is_red = self.is_red_at_bottom(current_board)
+        self.update_side_detection(current_board)
 
         # 首次初始化
         if self.last_board is None:
             self.last_board = [row[:] for row in (self.START_RED if self.is_red else self.START_BLACK)]
             self.last_counts = self.START_COUNTS.copy()
+            # 注意: 这里无法初始化 last_grid_hashes，因为是硬编码的局面，没有图片哈希
+            # 但不影响，后续第一次识别时会全是 cache miss，从而全量识别
         
-        # 全面分析局面变化
+        # 0. 全面分析局面变化
         result = self.check_position_changes(self.last_board, current_board, self.is_red)
         
-        # 0. 强制检查标记 (如果对局已开始)
-        # 如果有上一次的局面记录，说明对局正在进行中。
-        # 此时如果画面发生了变化（不是SameBoard），却没检测到标记，说明截图可能截到了中间态（比如棋子飞在半空，或者动画遮挡）
-        # 此时应直接视为非法（丢弃并重试），而不是尝试瞎猜。
-        if self.last_board is not None and not result.is_same_board and not marker_coords:
-            # 特殊情况：如果是开局重置（Red/Black Start），可能没有标记
-            # 同样，如果是明确的单步移动（is_my_step 或 is_opponent_step），也允许通过（视为标记检测漏检，但移动本身合法）
-            if not (result.is_red_start or result.is_black_start or result.is_my_step or result.is_opponent_step):
-                return BoardStatus(is_illegal=True, message="检测到局面变化但未检测到标记，丢弃帧")
-
+        # 在应用任何更新前，先备份当前状态
+        self._backup_last_board = [row[:] for row in self.last_board]
+        self._backup_last_counts = self.last_counts.copy() if self.last_counts else None
+        
         # 1. 检测初始局面
         if result.is_red_start:
             if self.red_start_count < 1: # 开局帧最大允许连续出现次数(决定开局时会显示几次开局走法)
@@ -457,84 +591,189 @@ class PositionChecker:
         if result.is_same_board:
             return result
         
-        # 3. 核心逻辑：利用标记判定归属 (优先级最高)
-        # 如果检测到了标记，直接根据标记位置判定是谁走了棋
-        if self.last_board and marker_coords:
-            is_my_step = None
+        # 3. 核心逻辑：先通过棋盘变化推断走棋，标记仅作为辅助验证
+        # （新设计：视觉棋盘为真相源，标记为辅助验证）
+        if result.is_my_step or result.is_opponent_step:
+            # 3.1 棋盘变化已成功推断出走棋
+            inferred_side = result.step_info.get('side')  # 'red' or 'black'
+            inferred_is_my_step = result.is_my_step
             
-            for r, c in marker_coords:
-                # 坐标越界检查
-                if not (0 <= r < len(self.last_board) and 0 <= c < len(self.last_board[0])):
-                    continue
+            # 3.2 如果有标记，用标记验证推断结果
+            if self.last_board and marker_coords:
+                marker_side = self._infer_side_from_marker(marker_coords, current_board)
                 
-                piece_last = self.last_board[r][c]
-                piece_curr = current_board[r][c]
-                
-                # 寻找"移动源头"：上一帧有棋子，且当前帧该棋子已离开（变为空）
-                # 注意：如果是吃子，目标位置在 last_board 也有子，但 curr_board 也有子（攻击者），所以不会误判
-                # 只有 "上一帧有子 -> 当前帧无子" 才能唯一确定这是 From_Pos
-                if piece_last != '-' and piece_curr == '-':
-                    is_red_piece = piece_last.isupper()
-                    # 判断该棋子是否归属我方
-                    is_your_piece = (self.is_red and is_red_piece) or (not self.is_red and not is_red_piece)
+                if marker_side is not None:
+                    # 标记存在且可解析
+                    marker_is_my_step = (self.is_red and marker_side == 'red') or \
+                                        (not self.is_red and marker_side == 'black')
                     
-                    if is_your_piece:
-                        # 我方棋子离开了 -> 我走了这步棋
-                        is_my_step = True
+                    if marker_is_my_step != inferred_is_my_step:
+                        # 标记与推断不一致，视为非法帧（可能是动画过渡帧）
+                        logger.debug(f"标记验证失败: 推断={inferred_side}, 标记={marker_side}")
+                        return BoardStatus(
+                            is_illegal_change=True, 
+                            message=f"标记验证失败: 推断为{inferred_side}走棋，但标记指示{marker_side}"
+                        )
                     else:
-                        # 对方棋子离开了 -> 对方走了这步棋
-                        is_my_step = False
-                    
-                    break 
+                        # 标记与推断一致，增强可信度
+                        result.message += " (标记验证通过)"
+                # 标记无法解析时（marker_side is None），继续使用推断结果
             
-            # 只有当确实找到了符合条件的标记时才覆盖结果
-            if is_my_step is not None:
-                result.is_my_step = is_my_step
-                result.is_opponent_step = not is_my_step
-                result.is_multi_step = False
-                result.is_new_game = False
-                result.is_illegal = False 
-                result.message = f"标记判定: {'我方' if is_my_step else '对方'}走棋"
-                
-                # 更新状态
-                self.last_board = [row[:] for row in current_board]
-                
-                # 尝试简单维护棋子数量，避免后续校验报错
-                # (稍微粗糙点，直接统计当前数量即可，因为已经通过标记确认了合法性，数量校验只是辅助)
-                _, _, current_counts_check = self.check_pieces_count(current_board)
-                self.last_counts = current_counts_check
-
-                self.red_start_count = 0
+            # 3.3 历史校验 (在更新状态之前！)
+            # Verify First: 只有通过历史校验，才认为这步棋是安全的，允许更新内部状态
+            self._verify_history_consistency(result, current_board, base_fen, history_moves)
+            
+            if result.is_history_mismatch:
+                # 校验失败：拒绝更新 last_board
+                # 这会导致下一帧检测到"Persistent Change" (持续变化)，
+                # 从而产生连续的 Update Rejection (Drop Frame)，触发 Processor 的 Force Reset
+                logger.debug("历史校验失败，拒绝更新 checker 状态")
                 return result
 
-        # 4. 如果没有标记（通常被上面的 check 0 拦截，但为了代码健壮性保留旧逻辑作为 Fallback，或处理特殊情况）
-        # 判断合法单步移动
-        if result.is_my_step or result.is_opponent_step:
+            # 3.4 更新状态（仅当校验通过时）
             self.last_board = [row[:] for row in current_board]
-            p = result.step_info['captured_piece']
-            if result.step_info and p:
+            p = result.step_info.get('captured_piece')
+            if p:
                 self.last_counts[p] = max(0, self.last_counts.get(p, 1) - 1)
             self.red_start_count = 0
+            
             return result
         
-        # 5. 过滤其他非法局面
+        # 4. 过滤其他非法局面
         count_valid, count_msg, current_counts = self.check_pieces_count(current_board)
         if not count_valid:
-            return BoardStatus(is_illegal=True, message=count_msg)
+            return BoardStatus(is_illegal_board=True, message=count_msg)
         
         if "重置" in count_msg:
              return BoardStatus(is_multi_step=True, step_info={}, message=count_msg)
         
         position_valid, position_msg = self.check_pieces_position(current_board, self.is_red)
         if not position_valid:
-            return BoardStatus(is_illegal=True, message=position_msg)
+            return BoardStatus(is_illegal_board=True, message=position_msg)
         
-        # 6. 多步移动或残局
+        # 5. 多步移动或残局
         if result.is_multi_step:
-            self.last_board = [row[:] for row in current_board]
-            self.last_counts = current_counts.copy()
-            result.is_new_game = True
-            self.red_start_count = 0
+            # [unified] 拒绝立即更新，交由 Processor 防抖确认 (Unified Anomaly Handling)
+            # 只有当连续几帧都检测到 Multi-Step (Drop Frame) 时，Processor 才会触发 Force Sync
             return result
         
         return result
+    
+    def _infer_side_from_marker(self, marker_coords, current_board):
+        """
+        辅助方法：从标记位置推断走棋方
+        通过检查标记位置在上一帧是否有棋子离开来判断
+        
+        Returns:
+            'red' | 'black' | None (无法判断)
+        """
+        for r, c in marker_coords:
+            if not (0 <= r < len(self.last_board) and 0 <= c < len(self.last_board[0])):
+                continue
+            piece_last = self.last_board[r][c]
+            piece_curr = current_board[r][c]
+            
+            # 找到棋子离开的位置（起点）
+            if piece_last != '-' and piece_curr == '-':
+                return 'red' if piece_last.isupper() else 'black'
+        
+        return None  # 无法从标记判断
+
+    def _verify_history_consistency(self, result, current_board, base_fen, history_moves):
+        """
+        辅助方法：校验历史一致性 (In-Place Modification)
+        """
+        if result.is_my_step or result.is_opponent_step:
+            # 1. 提取本次移动
+            step_info = result.step_info
+            if not step_info:
+                return
+
+            from app.tools import utils
+            move_str = utils.convert_coords_to_move(
+                step_info.get('from_pos'),
+                step_info.get('to_pos'),
+                self.is_red
+            )
+            
+            # --- 增量模拟核心逻辑 ---
+            from app.chess.simulation import ChessSimulation
+            
+            sim_board = None
+            
+            # A. 尝试使用/更新缓存
+            cache = self._sim_cache
+            
+            # 规范化 base_fen & history (防止 None), 并检查 cache['board'] 是否存在
+            norm_base_fen = base_fen if base_fen else 'startpos'
+            norm_cache_fen = cache['base_fen'] if cache['base_fen'] else 'startpos'
+            norm_history = history_moves if history_moves else ""
+            cached_moves = cache['moves_str'] if cache['moves_str'] else ""
+
+            # 只有当:
+            # 1. 缓存中有有效的 board 对象 (关键! 防止初次进入迭代 None)
+            # 2. base_fen 一致 (处理 None/startpos 等价)
+            # 3. history_moves 是 cache 的延续
+            if cache['board'] and \
+               norm_cache_fen == norm_base_fen and \
+               norm_history.startswith(cached_moves):
+                
+                # 缓存命中：计算增量部分
+                cached_len = len(cached_moves)
+                new_part = norm_history[cached_len:].strip()
+                
+                logger.debug(f"History Cache Hit! Incremental: '{new_part}' (Base: {len(cache['moves_str'] if cache['moves_str'] else '')} chars)")
+
+                sim_board = [row[:] for row in cache['board']] # 复制一份缓存作为起点
+                
+                if new_part:
+                    for mv in new_part.split():
+                        ChessSimulation.apply_uci_move(sim_board, mv)
+                    
+                    # 这样下一次校验就能基于这个新起点
+                    cache['moves_str'] = norm_history
+                    cache['board'] = [row[:] for row in sim_board]
+            
+
+            # B. 缓存失效，全量重算
+            if sim_board is None:
+                if norm_base_fen == 'startpos':
+                    sim_board = [row[:] for row in ChessSimulation.START_RED_BOTTOM]
+                    move_list = history_moves.split() if history_moves else []
+                    for mv in move_list:
+                         ChessSimulation.apply_uci_move(sim_board, mv)
+                else:
+                    # 使用 simulate 方法的逻辑手动展开，为了拿到 board 对象
+                    sim_board, _ = ChessSimulation.fen_to_board(norm_base_fen)
+                    move_list = history_moves.split() if history_moves else []
+                    for mv in move_list:
+                         ChessSimulation.apply_uci_move(sim_board, mv)
+                
+                #重建缓存
+                cache['base_fen'] = norm_base_fen
+                cache['moves_str'] = norm_history
+                cache['board'] = [row[:] for row in sim_board]
+
+            # 2. 在同步到当前 history_moves 的棋盘上，执行【当前这一步】
+            # 注意：不能修改 sim_board，因为 sim_board 代表的是 confirmed history
+            # 我们需要在一个临时副本上应用 pending move
+            verify_board = [row[:] for row in sim_board]
+            ChessSimulation.apply_uci_move(verify_board, move_str)
+            
+            # 3. 计算视觉FEN
+            visual_fen, _ = utils.convert_array_to_fen(current_board, self.is_red)
+            
+            # 4. 计算推演FEN
+            sim_fen = ChessSimulation.board_to_fen(verify_board)
+            
+            # 5. 比对
+            if sim_fen and sim_fen != visual_fen:
+                # 再次确认：如果是开局阶段，可能存在误判，放宽标准？
+                # 暂时保持严格校验
+                logger.warning(f"History Mismatch! Sim: {sim_fen} vs Visual: {visual_fen}")
+                logger.warning(f"  Pending Move: {move_str}")
+                logger.warning(f"  History Base: {base_fen}")
+                logger.warning(f"  History Moves: {history_moves}")
+                
+                result.is_history_mismatch = True
+                result.message += " (历史不一致)"

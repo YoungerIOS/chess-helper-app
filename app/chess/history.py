@@ -43,7 +43,7 @@ class MoveHistory:
             record = MoveRecord(fen, move, move_text, is_red)
             self._history.append(record)
             self._current_index += 1
-
+ 
     def undo(self) -> Optional[MoveRecord]:
         with self._lock:
             if self._current_index > 0:
@@ -95,5 +95,19 @@ class MoveHistory:
 
     def add_and_get_all(self, fen: str, move: str, move_text: str, is_red: bool) -> str:
         self.add_move(fen, move, move_text, is_red)
-        all_move_strings = [rec.move for rec in self.all_moves() if rec.move.strip()]
-        return ' '.join(all_move_strings) 
+        return self.get_moves_str()
+
+    def pop_last(self) -> Optional[MoveRecord]:
+        """移除最后一步记录"""
+        with self._lock:
+            if self._history:
+                record = self._history.pop()
+                self._current_index = len(self._history) - 1
+                return record
+            return None
+
+    def get_moves_str(self) -> str:
+        """获取所有着法字符串"""
+        with self._lock:
+            all_move_strings = [rec.move for rec in self._history if rec.move.strip()]
+            return ' '.join(all_move_strings) 

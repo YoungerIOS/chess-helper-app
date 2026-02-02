@@ -5,8 +5,11 @@ import subprocess
 import threading
 from typing import Optional, Tuple, List, Callable
 from app.chess.message import Message, MessageType, MessageContent
-from app.chess.context import context, logger
+from app.chess.context import context
 from app.tools.utils import resource_path
+from app.tools.log_config import get_logger
+
+logger = get_logger(__name__)
 
 class ChessEngine:
     """中国象棋引擎类，封装了与Pikafish引擎的交互"""
@@ -25,6 +28,7 @@ class ChessEngine:
         self.hash_size = hash_size
         self.process: Optional[subprocess.Popen] = None
         self.lock = threading.Lock()
+        self.analysis_lock = threading.Lock()
         self.is_initialized = False
         
     def _get_default_engine_path(self) -> str:
@@ -132,6 +136,14 @@ class ChessEngine:
         except (BrokenPipeError, OSError):
             # 如果进程已经退出，忽略错误
             pass
+
+    def stop_analysis(self):
+        """发送停止分析命令(用于超时强制停止)"""
+        try:
+            self._send_command('stop')
+            logger.info("Sent 'stop' command to engine")
+        except Exception as e:
+            logger.error(f"Failed to send stop command: {e}")
     
     def _wait_for_response(self, keyword: str, timeout: float = 1.0) -> List[str]:
         """等待引擎响应，直到包含指定关键字"""
@@ -169,96 +181,150 @@ class ChessEngine:
                 cmd += f" moves {moves}"
         else:
             cmd = f"position fen {fen_string}"
+            if moves:
+                cmd += f" moves {moves}"
         self._send_command(cmd)
 
-    def _go(self, param: str, value: str) -> Tuple[List[str], str]:
+    def _go(self, param: str, value: str) -> Tuple[List[str], str, List[dict]]:
         """
         发送go命令和读取结果
         """
         self._send_command(f"go {param} {value}")
-        return self._read_output_with_timeout(30)
+        return self._read_output_with_timeout(35)
 
-    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None) -> Tuple[str, str]:
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1) -> Tuple[str, str, List[str]]:
         """获取最佳走法
-        参数:
-        - fen: FEN字符串
-        - side: 当前轮到哪一方（True为红方，False为黑方）
-        - display_callback: 显示回调函数
-        - is_startpos: 是否用startpos（否则用fen）
-        - is_newgame: 是否新局
-        - moves: 历史走法字符串
+        Returns:
+            (best_move, fen_string, pvs_list)
         """
         if not self.is_initialized:
             raise RuntimeError("引擎未初始化")
-        self._send_command('stop')
         
-        fen_string = ''
-        if fen:
-            fen_string = fen + ' ' + ('w' if side else 'b')
-        engine_params = context.get_engine_params()
-        param = engine_params.get('goParam', 'depth')
-        value = engine_params.get(param, '20')
-        if not param or not value:
-            param = 'depth'
-            value = '20'
+        # 尝试获取分析锁
+        # 如果获取失败，说明有其他线程正在分析，发送stop尝试中断它
+        if not self.analysis_lock.acquire(blocking=False):
+            # print("Debug - 引擎正忙，尝试通过发送 stop 中断...")
+            self._send_command('stop')
+            # 阻塞等待，直到上一个任务释放锁
+            self.analysis_lock.acquire()
+            
+        try:
+            # 此时我们拥有独占锁 且 （如果有前任务）前任务已结束
+            # 再次发送 stop 确保引擎状态 (对于某些情况可能多余，但比较稳妥)
+            self._send_command('stop')
+            
+            # 设置 MultiPV
+            if multipv > 1:
+                self._send_command(f'setoption name MultiPV value {multipv}')
+            
+            fen_string = ''
+            if fen:
+                fen_string = fen + ' ' + ('w' if side else 'b')
+            engine_params = context.get_engine_params()
+            param = engine_params.get('goParam', 'depth')
+            value = engine_params.get(param, '20')
+            if not param or not value:
+                param = 'depth'
+                value = '20'
 
-        if display_callback:
-            display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))
+            if display_callback:
+                display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))
 
-        if is_newgame:
-            self.new_game()
+            if is_newgame:
+                self.new_game()
 
-        self._position(fen_string, use_startpos=use_startpos, moves=moves)
-        lines, best_move = self._go(param, value)
+            self._position(fen_string, use_startpos=use_startpos, moves=moves)
+            lines, best_move, pvs = self._go(param, value)
 
-        if not lines:
-            best_move = "No output received within 40 seconds"
-        else:
-            if not best_move:
-                best_move = ' '.join(lines)
+            # 恢复 MultiPV 为 1 (以免影响后续正常思考)
+            if multipv > 1:
+                self._send_command('setoption name MultiPV value 1')
+
+            if not lines:
+                best_move = None
+                # logger.warning("No output received from engine (timeout)")
             else:
-                start_index = best_move.find('bestmove') + len('bestmove') + 1
-                best_move = best_move[start_index:start_index + 4]
-        return best_move, fen_string
-    
-    def verify_history(self, moves: str) -> str:
-        """
-        用历史moves复盘并用d命令获取FEN, 校验历史记录是否有误.
-        """
-        if not self.is_initialized:
-            raise RuntimeError("引擎未初始化")
-        self._send_command('position startpos moves ' + moves)
-        self._send_command('d')
-        # 读取输出直到出现Fen: ...
-        fen = None
-        start_time = time.time()
-        while time.time() - start_time < 2.0:  # 最多等2秒
-            output = self.process.stdout.readline()
-            if not output:
-                continue
-            output = output.strip()
-            if output.startswith('Fen:'):
-                fen = output.split('Fen:')[1].strip()
-                if fen:
-                    fen = fen.split(' ')[0]
-                break
-        return fen or ""
+                if not best_move:
+                     # [FIX] Fallback removal
+                     logger.error(f"Engine timeout without bestmove! Raw output len: {len(lines)}")
+                     best_move = None
+                else:
+                    # 调试：打印原始 bestmove 响应
+                    print(f"Debug - Engine raw response: {best_move}")
+                    start_index = best_move.find('bestmove') + len('bestmove') + 1
+                    best_move = best_move[start_index:start_index + 4]
+                    
+                    # 检查是否为无效着法（如 "(none)" 或 "0000"）
+                    if best_move.startswith('(') or best_move == '0000' or not best_move[0].isalpha():
+                        print(f"Debug - Engine returned invalid move: {best_move}")
+                        best_move = ""  # 返回空，让调用者处理
+            
+            # 提取 PV 中的第一个着法
+            pv_moves = []
+            for pv_info in pvs:
+                # pv_info is a dict like {'multipv': 1, 'pv_str': 'h2e2 ...', 'score': ...}
+                if 'pv_str' in pv_info:
+                    moves_list = pv_info['pv_str'].split()
+                    if moves_list:
+                        pv_moves.append(moves_list[0])
 
-    def _read_output_with_timeout(self, timeout: float = 1.0) -> Tuple[List[str], str]:
-        """读取引擎输出，带超时控制"""
+            return best_move, fen_string, pv_moves
+            
+        finally:
+            # 确保释放锁
+            self.analysis_lock.release()
+    
+
+
+    def _read_output_with_timeout(self, timeout: float = 1.0) -> Tuple[List[str], str, List[dict]]:
+        """读取引擎输出，带超时控制
+        Returns:
+            lines: 所有输出行
+            best_move: bestmove 行
+            pvs: 解析出的 pv 信息列表 [{'multipv': 1, 'score': ..., 'pv_str': ...}, ...]
+        """
         lines = []
         best_move = ''
+        pvs = {} # Key: multipv_id, Value: info_dict
+        
         start_time = time.time()
         
         while time.time() - start_time < timeout:
             output = self.process.stdout.readline().strip()
             if output:
                 lines.append(output)
+                if output.startswith('info') and ' multipv ' in output and ' pv ' in output:
+                    # 解析 info 行
+                    try:
+                        parts = output.split()
+                        
+                        # 提取 multipv ID
+                        multipv_idx = -1
+                        if 'multipv' in parts:
+                            multipv_idx = int(parts[parts.index('multipv') + 1])
+                        
+                        # 提取 pv 字符串 (从 pv 之后所有内容)
+                        pv_str = ""
+                        if 'pv' in parts:
+                            pv_start = parts.index('pv') + 1
+                            pv_str = " ".join(parts[pv_start:])
+                        
+                        # 存入字典 (后续的更新会覆盖前面的，保证保留同一 depth 最新的)
+                        # 注意：info 行可能很多，我们只关心最后出现的
+                        if multipv_idx != -1:
+                            pvs[multipv_idx] = {'multipv': multipv_idx, 'pv_str': pv_str}
+                            
+                    except Exception:
+                        pass
+                        
                 if "bestmove" in output:
                     best_move = output
                     break
         
-        return lines, best_move
+        # 将 pvs 字典转为按 multipv 排序的列表
+        sorted_pvs = [pvs[k] for k in sorted(pvs.keys())]
+        
+        return lines, best_move, sorted_pvs
     
     def __enter__(self):
         """上下文管理器入口"""

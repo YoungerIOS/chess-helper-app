@@ -2,24 +2,45 @@ import cv2
 import numpy as np
 import os
 from app.tools.utils import app_cache_path
+from app.tools.log_config import get_logger
 from app.chess.context import context as global_context
 from app.chess.marker_detector import MarkerDetector
+from dataclasses import dataclass
+from enum import Enum, auto
+
+logger = get_logger(__name__)
+
+class RecognitionErrorType(Enum):
+    COVERED = auto()          # 动画遮挡
+    LOW_CONFIDENCE = auto()   # 置信度低
+    MARKER_MISSING = auto()   # 未检测到标记
+    MASSIVE_CHANGE = auto()   # 巨大变化(可能是结算画面)
+    UNKNOWN = auto()          # 未知错误
+
+@dataclass
+class RecognitionDetail:
+    type: RecognitionErrorType
+    position: tuple  # (row, col)
+    message: str
+    confidence: float = 0.0
+    piece_type: str = None
 
 class ChessRecognizer:
-    class RecognitionError(Exception):
-        pass
-
     def __init__(self, context=None):
         # 支持依赖注入，默认使用全局context
         self.context = context or global_context
         self.marker_detector = MarkerDetector()
+        # 缓存上一帧的哈希和棋盘状态，用于增量识别
+        self.last_grid_hashes = None
+        self.last_board_array = None
+        self.last_marker_coords = []  # 缓存标记位置
 
     def preprocess_image(self, img_origin):
         # img = cv2.imread(img_path)  
         img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
         img_np = img_np[:, :, :3]  # 去掉 alpha 通道
         if img_np is None:  
-            print("Error: npImage is None.")  
+            logger.error("npImage is None.")
             return  None, None 
         new_width = 800  
         scale_factor = new_width / img_np.shape[1]  # 注意使用宽度来计算缩放因子  
@@ -58,7 +79,7 @@ class ChessRecognizer:
             circles = np.round(circles[0, :]).astype("int")
             # 识别黑将并获取计算好坐标的棋盘数组
             pieceArray, is_red = self.recognize_black_king(circles, resized_img, x_array, y_array)
-            print(f"\n当前方为{'红方' if is_red else '黑方'}")
+            logger.info(f"当前方为{'红方' if is_red else '黑方'}")
             # 识别所有棋子
             for i in range(len(pieceArray)):
                 for j in range(len(pieceArray[0])):
@@ -84,17 +105,30 @@ class ChessRecognizer:
             x_array: 棋盘横线坐标数组
             y_array: 棋盘纵线坐标数组
         Returns:
-            (pieceArray, marker_coords): 
-                pieceArray: 9x10的二维数组，表示棋盘状态
-                marker_coords: 检测到的标记坐标列表
+            (pieceArray, marker_coords, current_grid_hashes): 
+                pieceArray: 9x10的二维数组
+                marker_coords: 标记坐标 (由CNN识别的 '.' 类型)
+                current_grid_hashes: 哈希
         """
+        from app.tools.utils import compute_image_hash
+
+        # 使用内部缓存
+        last_grid_hashes = self.last_grid_hashes
+        last_board_array = self.last_board_array
+        last_marker_coords = self.last_marker_coords or []
+
         # 预处理
         resized_img, gray = self.preprocess_image(img)
         
-        # 顺便检测走棋标记 (复用预处理后的灰度图)
-        marker_coords = self.marker_detector.detect_markers(gray, x_array, y_array)
-        
+        # 初始化结果数组
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
+        current_grid_hashes = [([None] * len(x_array)) for _ in range(len(y_array))]
+        
+        # CNN检测到的标记位置 (替代 marker_detector)
+        marker_coords = []
+        
+        # 收集识别过程中的错误/警告
+        details = []
         
         # 创建保存目录
         save_dir = app_cache_path("pieces")
@@ -104,9 +138,14 @@ class ChessRecognizer:
             # 如果无法创建目录，跳过保存调试图片
             save_dir = None
         
-        # 批量收集所有待识别格子的裁剪图片
+        # 准备批量识别
         crops = []
         positions = []  # 与 crops 对应，存 (i, j)
+        
+        # 统计增量识别效果
+        cached_count = 0
+        predicted_count = 0
+        
         for i in range(len(y_array)):
             for j in range(len(x_array)):
                 center_x = x_array[j]
@@ -132,24 +171,112 @@ class ChessRecognizer:
                 x2 = adjusted_center_x + cut_radius
                 y2 = adjusted_center_y + cut_radius
                 piece_img = resized_img[y1:y2, x1:x2]
-                crops.append(piece_img)
-                positions.append((i, j))
+                
+                # 计算当前格子的哈希
+                curr_hash = compute_image_hash(piece_img)
+                current_grid_hashes[i][j] = curr_hash
+                
+                # 检查缓存命中
+                is_hit = False
+                if last_grid_hashes and last_board_array and curr_hash:
+                    last_h = last_grid_hashes[i][j]
+                    if last_h == curr_hash:
+                        pieceArray[i][j] = last_board_array[i][j]
+                        # 如果上一帧该位置是标记，继续保留标记状态
+                        if (i, j) in last_marker_coords:
+                            marker_coords.append((i, j))
+                        is_hit = True
+                        cached_count += 1
+                
+                # 未命中缓存，加入待识别队列
+                if not is_hit:
+                    crops.append(piece_img)
+                    positions.append((i, j))
+                    predicted_count += 1
+        
+        if crops:
+            logger.debug(f"增量识别: 缓存命中 {cached_count} 格, 哈希变动(重算) {predicted_count} 格")
+            batch_results = self.context.piece_recognizer.recognize_batch(crops)
+            for idx, res in enumerate(batch_results):
+                i, j = positions[idx]
+                if res is None:
+                    details.append(RecognitionDetail(
+                        type=RecognitionErrorType.UNKNOWN,
+                        position=(i, j),
+                        message=f"批量识别失败: 结果为None at ({i},{j})",
+                        confidence=0.0
+                    ))
+                    continue
+                    
+                piece_type = res['class_name']
+                confidence = res['confidence']
+                
+                if piece_type and confidence > 0.6:
+                    if piece_type == 'covered':
+                        details.append(RecognitionDetail(
+                            type=RecognitionErrorType.COVERED,
+                            position=(i, j),
+                            message=f"动画遮挡 at ({i},{j})",
+                            confidence=confidence,
+                            piece_type=piece_type
+                        ))
+                        # 动画遮挡时不更新棋盘状态,保留'-'
+                        continue
+                    
+                    # 检测标记：模型识别为 '.' 的位置
+                    if piece_type == '.':
+                        marker_coords.append((i, j))
+                        logger.debug(f"CNN检测到标记 at ({i+1}, {j+1}) conf={confidence:.2f}")  # 1-indexed for readability
+                        pieceArray[i][j] = '-'  # 标记位置的棋子标记为空
+                    else:
+                        pieceArray[i][j] = piece_type
+                        # 调试：显示非标记的识别结果，帮助排查漏检
+                        # print(f"Debug - CNN识别 ({i+1}, {j+1}): {piece_type} conf={confidence:.2f}")
+                else:
+                    # 低置信度：记录错误但仍填入预测结果 (Best Guess)
+                    details.append(RecognitionDetail(
+                        type=RecognitionErrorType.LOW_CONFIDENCE,
+                        position=(i, j),
+                        message=f"低置信度 at ({i},{j}): {piece_type} - {confidence:.2f}",
+                        confidence=confidence,
+                        piece_type=piece_type
+                    ))
+                    # 仍然填入预测结果,避免棋盘破洞
+                    if piece_type and piece_type not in ['covered', '.']:
+                        pieceArray[i][j] = piece_type
+        else:
+            # 全部命中缓存
+            # print("Debug - 全局缓存命中，跳过CNN识别")
+            pass
 
-        # 一次批量推理
-        batch_results = self.context.piece_recognizer.recognize_batch(crops)
-        for idx, res in enumerate(batch_results):
-            i, j = positions[idx]
-            if res is None:
-                raise self.RecognitionError("批量识别失败: 结果为None")
-            piece_type = res['class_name']
-            confidence = res['confidence']
-            if piece_type and confidence > 0.6:
-                if piece_type == 'covered':
-                    raise self.RecognitionError(f"动画遮挡: {piece_type} - {confidence:.2f}")
-                pieceArray[i][j] = piece_type
-            else:
-                raise self.RecognitionError(f"无法识别或置信度低: {piece_type} - {confidence:.2f}")
-        return pieceArray, marker_coords
+        # 检查是否无标记 (新增 MARKER_MISSING 检测)
+        if not marker_coords:
+            details.append(RecognitionDetail(
+                type=RecognitionErrorType.MARKER_MISSING,
+                position=(-1, -1),
+                message=f"未检测到标记 (Hash变动: {predicted_count}格)",
+                confidence=1.0
+            ))
+        
+        # 检查是否巨大变化 (可能是结算画面)
+        if predicted_count > 45:
+            details.append(RecognitionDetail(
+                type=RecognitionErrorType.MASSIVE_CHANGE,
+                position=(-1, -1),
+                message=f"巨大变化 ({predicted_count}格)",
+                confidence=1.0
+            ))
+
+        # 打印时转换为 1-indexed 方便阅读
+        display_coords = [(r+1, c+1) for r, c in marker_coords]
+        logger.info(f"检测到 {len(marker_coords)} 个标记--------------------------------------{display_coords}")
+        
+        # 更新内部缓存
+        self.last_grid_hashes = current_grid_hashes
+        self.last_board_array = pieceArray
+        self.last_marker_coords = marker_coords  # 缓存标记位置
+        
+        return pieceArray, marker_coords, current_grid_hashes, details
 
     # 计算棋子坐标
     def get_piece_position(self, point, x_array, y_array):
@@ -210,7 +337,7 @@ class ChessRecognizer:
                 # 使用recognize_piece_type识别棋子类型
                 piece_type = self.recognize_piece_type(piece_img)
                 if piece_type is None:
-                    print(f"无法识别棋子: {piece_img}")
+                    logger.warning(f"无法识别棋子: {piece_img}")
                     continue
                 if piece_type == 'k':  # 如果是黑将
                     upper_palace_king = (j, i)
@@ -227,7 +354,7 @@ class ChessRecognizer:
                 # 使用recognize_piece_type识别棋子类型
                 piece_type = self.recognize_piece_type(piece_img)
                 if piece_type is None:
-                    print(f"无法识别棋子: {piece_img}")
+                    logger.warning(f"无法识别棋子: {piece_img}")
                     continue
                 if piece_type == 'k':  # 如果是黑将
                     lower_palace_king = (j, i)
@@ -259,6 +386,6 @@ class ChessRecognizer:
                 return None
             return result['class_name'], result['confidence']
         except Exception as e:
-            print(f"棋子识别过程中出错: {e}")
+            logger.error(f"棋子识别过程中出错: {e}")
             return None
 

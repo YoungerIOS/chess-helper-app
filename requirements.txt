@@ -60,3 +60,6 @@ pytesseract>=0.3.8
 
 # 图像哈希
 ImageHash==4.3.1
+
+# 日志系统
+loguru>=0.7.0

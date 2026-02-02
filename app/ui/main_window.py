@@ -16,9 +16,11 @@ from app.chess.message import Message, MessageType
 from app.chess.message_bus import message_bus
 from app.chess.context import context
 from app.ui.board_display import BoardDisplay
-
+from app.chess.processor import ChessProcess
 
 class MainWindow(QMainWindow):
+
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("象棋助手")
@@ -81,11 +83,11 @@ class MainWindow(QMainWindow):
         self.engine_params = context.get_engine_params()
         
         # 顶部文本显示区域
-        self.move_display = QLabel()
-        self.move_display.setAlignment(Qt.AlignCenter)
-        self.move_display.setFont(QFont("Arial", 18, QFont.Bold))
-        self.move_display.setFixedHeight(100)  # 设置固定高度
-        self.move_display.setStyleSheet("""
+        self.text_display = QLabel()
+        self.text_display.setAlignment(Qt.AlignCenter)
+        self.text_display.setFont(QFont("Arial", 18, QFont.Bold))
+        self.text_display.setFixedHeight(100)  # 设置固定高度
+        self.text_display.setStyleSheet("""
             QLabel {
                 background-color: #f0f0f0;
                 border: 1px solid #ccc;
@@ -94,7 +96,7 @@ class MainWindow(QMainWindow):
                 line-height: 1.2;  /* 减小行间距 */
             }
         """)
-        main_layout.addWidget(self.move_display)
+        main_layout.addWidget(self.text_display)
         
         # 添加中间按钮行
         middle_buttons_layout = QHBoxLayout()
@@ -166,7 +168,7 @@ class MainWindow(QMainWindow):
             self.tt_action.setChecked(True)
         
         # 创建手动刷新按钮
-        self.manual_refresh_btn = QPushButton("手动刷新")
+        self.manual_refresh_btn = QPushButton("重置")
         self.manual_refresh_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
         self.manual_refresh_btn.setFont(QFont("Arial", 11))
         self.manual_refresh_btn.setStyleSheet("""
@@ -188,9 +190,34 @@ class MainWindow(QMainWindow):
                 border: 1px solid #0d47a1;
             }
         """)
-        # 连接到手动刷新功能
         self.manual_refresh_btn.clicked.connect(self.on_manual_capture)
         middle_buttons_layout.addWidget(self.manual_refresh_btn)
+
+        # 创建变招按钮
+        self.change_move_btn = QPushButton("变招")
+        self.change_move_btn.setFixedSize(75, 35)  # 与其他按钮保持一致
+        self.change_move_btn.setFont(QFont("Arial", 11))
+        self.change_move_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1874CD;
+                color: white;
+                border: 1px solid #1874CD;
+                border-radius: 5px;
+                text-align: center;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                background-color: #1565c0;
+                border: 1px solid #1565c0;
+            }
+            QPushButton:pressed {
+                background-color: #0d47a1;
+                border: 1px solid #0d47a1;
+            }
+        """)
+        self.change_move_btn.clicked.connect(self.on_change_move)
+        middle_buttons_layout.addWidget(self.change_move_btn)
         
         # 添加其他按钮
         self.start_btn = QPushButton("开始")
@@ -679,6 +706,10 @@ class MainWindow(QMainWindow):
                 elif result.type == MessageType.ERROR:
                     # 显示错误消息
                     self.update_text(result.content, result.type)
+                elif result.type == MessageType.NON_GAME_SCREEN:
+                    # 非棋局画面：清空棋盘并显示提示
+                    self.board_display.clear_board()
+                    self.update_text(result.content, MessageType.STATUS)
     
     def close_queue(self):
         """销毁截图线程"""
@@ -754,7 +785,7 @@ class MainWindow(QMainWindow):
             elif i == 2 and line:  # 第3行（着法）
                 display_text += f'<span style="color: black; font-size: 45pt; line-height: 1;">{line}</span>'
         
-        self.move_display.setText(display_text)
+        self.text_display.setText(display_text)
 
     
     def create_position_dot(self, is_temp=False, x=None, y=None):
@@ -923,12 +954,28 @@ class MainWindow(QMainWindow):
             # 执行一次完整的监控与截图流程
             success = self.capture_manager.manually_capture_once()
             if success:
-                self.update_text("手动截图分析完成", MessageType.STATUS)
+                self.update_text("重置数据并重新分析...", MessageType.STATUS)
             else:
-                self.update_text("手动截图分析失败", MessageType.ERROR)
+                self.update_text("重置失败", MessageType.ERROR)
         else:
             self.update_text("请先点击开始按钮", MessageType.STATUS)
 
+
+    def on_change_move(self):
+        """请求变招"""
+        try:
+             # 创建临时的 Processor 实例来处理请求
+             # 注意：状态（checker, history）是共享的，所以可以这样做
+             process = ChessProcess.from_context(context)
+             
+             # 异步执行，避免阻塞 UI
+             import threading
+             threading.Thread(target=process.request_alternative_move, daemon=True).start()
+             
+             self.update_text("正在计算变招...", MessageType.STATUS)
+        except Exception as e:
+             print(f"变招请求失败: {e}")
+             self.update_text(f"变招失败: {e}", MessageType.ERROR)
 
     def show_param_menu(self):
         """显示参数菜单"""
