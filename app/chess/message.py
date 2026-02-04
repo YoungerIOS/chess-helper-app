@@ -43,7 +43,7 @@ class Message:
 class MessageContent:
     """统一管理所有消息内容"""
     # 状态消息
-    WAITING = "等待获取棋局..."
+    WAITING = "等待获取游戏..."
     RECOGNIZING = "正在识别局面..."
     MY_TURN = "轮到我方走棋"
     MY_MOVING = "我方思考中..."
@@ -60,4 +60,4 @@ class MessageContent:
     ENGINE_ERROR = "引擎错误，请重试"
     
     # 非棋局画面
-    NON_GAME_SCREEN = "非棋局画面"
+    NON_GAME_SCREEN = "等待对弈开始..."

@@ -441,6 +441,7 @@ class ChessProcess:
 
                 message_bus.publish(Message(MessageType.MOVE_TEXT, chinese_move))
                 message_bus.publish(Message(MessageType.MOVE_CODE, move, is_red=is_red))
+                message_bus.publish(Message(MessageType.STATUS, "推荐走法："))
                 
             except Exception as e:
                 logger.error(f"引擎分析失败: {str(e)}")
@@ -501,7 +502,7 @@ class ChessProcess:
                      return
                  
                  # 加上 "(变)" 前缀以示区别
-                 message_bus.publish(Message(MessageType.MOVE_TEXT, f"(变) {chinese_move}"))
+                 message_bus.publish(Message(MessageType.MOVE_TEXT, f"🥈 {chinese_move}"))
                  message_bus.publish(Message(MessageType.MOVE_CODE, alt_move, is_red=self.checker.is_red))
              else:
                  logger.debug("未找到变招")

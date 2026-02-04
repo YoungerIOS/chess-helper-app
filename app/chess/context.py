@@ -125,6 +125,7 @@ class ChessContext:
     base_fen: Optional[str] = None # 用于历史中断时的锚点FEN (持久化存储)
     analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
     discard_before_timestamp: float = 0.0  # RETRY时设置，过滤在此时间之前截图的帧
+    _theme: str = "light"  # 当前主题
     
     
     def __post_init__(self):
@@ -179,7 +180,13 @@ class ChessContext:
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
+            # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
+            self._board_index = config.get('board_index', 0)
             logger.info(f"棋盘皮肤索引设置为: {self._board_index}")
+            
+            # 读取主题
+            self._theme = config.get('theme', 'light')
+            logger.info(f"主题设置为: {self._theme}")
             
             # 预加载当前平台的模型
             _ = self.piece_recognizer
@@ -231,7 +238,10 @@ class ChessContext:
             config['platform'] = self.platform
             config['analysis_mode'] = self._analysis_mode
             # 保存棋盘底图索引
+            # 保存棋盘底图索引
             config['board_index'] = self.board_index
+            # 保存主题
+            config['theme'] = self._theme
             
             # 获取引擎参数的副本
             with self._engine_params_lock:
@@ -404,7 +414,20 @@ class ChessContext:
         with self._engine_lock:
             if self.engine:
                 self.engine.quit()
+            if self.engine:
+                self.engine.quit()
                 self.engine = None
+    
+    @property
+    def theme(self) -> str:
+        """获取当前主题"""
+        return self._theme
+
+    @theme.setter
+    def theme(self, value: str) -> None:
+        """设置当前主题"""
+        self._theme = value
+        self.save_config()
 
 
 # 创建全局上下文实例
