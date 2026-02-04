@@ -1,0 +1,289 @@
+/* Dark Theme QSS (Custom from user colors) */
+
+QMainWindow, QWidget {
+    background-color: #292B31;
+    color: #d7cbb9;
+}
+
+QLabel {
+    color: #d7cbb9;
+}
+
+QLabel#textDisplay {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2F313B,
+        stop:0.5 #48515E,
+        stop:1 #2F313B
+    );
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 3px;
+    color: #E0E0E0; /* 调得稍暗一点的白色，不刺眼 */
+}
+
+/* 按钮通用样式 */
+QPushButton {
+    /* 默认样式，作为fallback或用于非primary按钮 */
+    background-color: #2D4067;
+    color: white;
+    border: 1px solid #2D4067;
+    border-radius: 8px;
+    padding: 5px;
+}
+
+QPushButton#primary {
+    border-radius: 8px;
+    color: white;
+    padding: 6px 18px;
+
+    /* 水平渐变：两边深(#2D4067)，中间浅(#4876AA) */
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2D4067,
+        stop:0.5 #4876AA,
+        stop:1 #2D4067
+    );
+
+    /* 3D 立体边框 */
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #5C8ABe;  /* 顶部高光 */
+    border-left-color: #2D4067; 
+    border-right-color: #2D4067;
+    border-bottom-color: #0E1825; /* 底部阴影 */
+    margin: 0px;
+}
+
+QPushButton#primary:hover {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #415479,
+        stop:0.5 #5C8ABe,
+        stop:1 #415479
+    );
+    border-top-color: #7DA8D8;
+    border-bottom-color: #0E1825;
+}
+
+QPushButton#primary:pressed {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #192C53,
+        stop:0.5 #346296,
+        stop:1 #192C53
+    );
+    /* 按下时反转边框或变暗 */
+    border-top-color: #151e2f;
+    border-bottom-color: #5C8ABe;
+    padding: 7px 17px 5px 19px; /* 模拟按下位移 */
+} 
+
+QPushButton#secondary {
+    background-color: #393C44;
+    color: white;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #505460;
+    border-left-color: #393C44;
+    border-right-color: #393C44;
+    border-bottom-color: #1F2125;
+
+    border-radius: 8px;
+    padding: 0px 8px; /* 统一padding */
+    margin: 0px;
+}
+
+QPushButton#secondary:hover {
+    background-color: #4A4D55;
+    border-top-color: #606470;
+}
+
+QPushButton#secondary:pressed {
+    background-color: #292C34;
+    border-top-color: #1F2125;
+    border-bottom-color: #505460;
+}
+
+QPushButton#tertiary {
+    background-color: #353840;
+    color: white;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #4A4E58;
+    border-left-color: #353840;
+    border-right-color: #353840;
+    border-bottom-color: #1E2024;
+
+    border-radius: 8px;
+    padding: 0px 8px;
+    margin: 0px;
+}
+
+QPushButton#tertiary:hover {
+    background-color: #464952;
+    border-top-color: #5A5E68;
+}
+
+QPushButton#tertiary:pressed {
+    background-color: #252830;
+    border-top-color: #1E2024;
+    border-bottom-color: #4A4E58;
+}
+
+/* 参数调节按钮特殊样式 */
+QPushButton#paramBtn {
+    background-color: #2D303C;
+    color: white;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #404455;
+    border-left-color: #2D303C;
+    border-right-color: #2D303C;
+    border-bottom-color: #181A20;
+
+    border-radius: 8px;
+    padding: 0px;
+    margin: 0px;
+}
+
+QPushButton#paramBtn:hover {
+    background-color: #3E4150;
+    border-top-color: #505465;
+}
+
+QPushButton#paramBtn:pressed {
+    background-color: #1F2129;
+    border-top-color: #181A20;
+    border-bottom-color: #404455;
+}
+
+/* 菜单样式 */
+QMenu {
+    background-color: #3A3C42;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 2px;
+}
+
+QMenu::item {
+    padding: 5px 20px 5px 20px; /* 上 右 下 左 */
+    min-height: 20px;
+    color: #d7cbb9;
+}
+
+QMenu::item:selected {
+    background-color: #4876AA;
+    color: white;
+}
+
+QMenu::item:checked {
+    background-color: #2D4067;
+    color: white;
+}
+
+/* 棋盘容器结构化样式 - Dark Theme */
+
+/* 外壳层 (Board Shell) - 负责材质、厚度、立体外框 */
+/* 外壳层 (Board Shell) - 负责材质、厚度、立体外框 */
+QFrame#boardShell {
+    background-color: #1C1C20; /* 模拟深色木纹或深色金属材质 */
+    
+    /* 外边框：不均匀颜色模拟光照 (上亮下暗) */
+    border-style: solid;
+    border-width: 1.5px;
+    border-top-color: #4A4E58;  /* 顶部高光 */
+    border-left-color: #353840;
+    border-right-color: #353840;
+    border-bottom-color: #1E2024; /* 底部阴影 */
+    
+    border-radius: 12px; /* 整体圆角 */
+    
+    /* 用 padding 模拟外框的物理厚度 (上部收窄 2px，其他 8px -> 左右减小为4px) */
+    padding: 3px 6px 8px 6px; 
+}
+
+/* 内嵌层 (Board Inset) - 负责内凹阴影、缓冲 */
+QFrame#boardInset {
+    background-color: #3B3C42; /* #5E5D60 (比外壳浅，形成材质对比) */
+    
+    /* 内边框：不对称设计 (顶亮，两侧柔和，底深重) */
+    border-style: solid;
+    border-top-width: 2px;
+    border-left-width: 5px;   /* 左侧 5px */
+    border-right-width: 5px;  /* 右侧与左侧一致 */
+    border-bottom-width: 7px; /* 底部最厚 */
+    
+    border-top-color: #9D9DA0;  /* 顶部高光 */
+    border-left-color: #262730; /* 左侧调浅 */
+    border-right-color: #262730; /* 右侧同左侧 */
+    border-bottom-color: #22232A; /* 底部加深 (起“托底”作用) */
+
+    border-radius: 12px;
+    
+    /* 内间距：控制棋盘图片与外框的距离 (增大至 8px 以加粗线条) */
+    padding: 10px;
+}
+
+/* 画布层 (Board Canvas) - 仅显示内容 */
+QLabel#boardImage {
+    background-color: transparent; /* 背景透明，显示底层 */
+    border: none; /* 无边框 */
+    border-radius: 0px;
+}
+
+QLabel#paramLabel {
+    background-color: #202228;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 0px;
+    color: #d7cbb9;
+}
+
+/* 退出按钮特殊样式 */
+QPushButton#exitBtn {
+    border-radius: 8px;
+    color: #D17378; /* 红色文字 (亮红以适应深色背景) */
+    padding: 6px 18px;
+
+    /* 水平渐变：两边(#313036)，中间(#3A353B) */
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #313036,
+        stop:0.5 #3A353B,
+        stop:1 #313036
+    );
+
+    /* 3D 边框 */
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #4A454B;
+    border-left-color: #313036;
+    border-right-color: #313036;
+    border-bottom-color: #1A191C;
+}
+
+QPushButton#exitBtn:hover {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #414046,
+        stop:0.5 #4A454B,
+        stop:1 #414046
+    );
+    border-top-color: #5A555B;
+}
+
+QPushButton#exitBtn:pressed {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #212026,
+        stop:0.5 #2A252B,
+        stop:1 #212026
+    );
+    border-top-color: #1A191C;
+    border-bottom-color: #4A454B;
+    padding: 7px 17px 5px 19px;
+}

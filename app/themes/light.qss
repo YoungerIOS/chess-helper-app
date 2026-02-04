@@ -1,0 +1,292 @@
+/* Light Theme QSS (Rough Draft based on Dark Theme structure) */
+
+QMainWindow {
+    background-color: #F1F0ED; /* 窗口背景设为白色，使系统的标题栏呈现白色 */
+}
+
+QWidget {
+    color: #3A3A3A; /* 深灰文本 */
+}
+
+QWidget#centralWidget {
+    background-color: #E8E2E0; /* 调灰背景 (暖灰) */
+}
+
+QLabel {
+    color: #2F3640;
+}
+
+QLabel#textDisplay {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #E0E0E0,
+        stop:0.5 #F0F0F0,
+        stop:1 #E0E0E0
+    );
+    border: 1px solid #CCC;
+    border-radius: 8px;
+    padding: 3px;
+    color: #000000; /* 原来的黑色 */
+}
+
+/* 按钮通用样式 */
+QPushButton {
+    background-color: #DCDDE1;
+    color: #2F3640;
+    border: 1px solid #B0B5C0;
+    border-radius: 8px;
+    padding: 5px;
+}
+
+/* Primary 按钮 (蓝色系，高亮渐变) */
+QPushButton#primary {
+    border-radius: 8px;
+    color: white;
+    padding: 6px 18px;
+
+    /* 水平渐变：两边(#5088D6)，中间(#85C9FD) */
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #5088D6,
+        stop:0.5 #85C9FD,
+        stop:1 #5088D6
+    );
+
+    /* 3D 立体边框 */
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #A0C8F0;  /* 顶部高光 (更亮) */
+    border-left-color: #5088D6; 
+    border-right-color: #5088D6;
+    border-bottom-color: #3068B6; /* 底部阴影 */
+    margin: 0px;
+}
+
+QPushButton#primary:hover {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #6098E6,
+        stop:0.5 #99D9FF,
+        stop:1 #6098E6
+    );
+    border-top-color: #C0D8F0;
+    border-bottom-color: #3068B6;
+}
+
+QPushButton#primary:pressed {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #4078C6,
+        stop:0.5 #75B9ED,
+        stop:1 #4078C6
+    );
+    border-top-color: #3068B6;
+    border-bottom-color: #85C9FD;
+    padding: 7px 17px 5px 19px;
+} 
+
+/* Secondary 按钮 (功能类) - 现在与 Tertiary 样式保持一致（灰色） */
+QPushButton#secondary {
+    background-color: #DADADA; /* 加深灰色 */
+    color: #2F3640;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #EFEFEF;
+    border-left-color: #DADADA;
+    border-right-color: #DADADA;
+    border-bottom-color: #9E9E9E;
+
+    border-radius: 8px;
+    padding: 0px 8px;
+    margin: 0px;
+}
+
+QPushButton#secondary:hover {
+    background-color: #E4E4E4;
+    border-top-color: #F8F8F8;
+}
+
+QPushButton#secondary:pressed {
+    background-color: #C0C0C0;
+    border-top-color: #9E9E9E;
+    border-bottom-color: #EFEFEF;
+    padding: 2px 7px 0px 9px;
+}
+
+/* Tertiary 按钮 (菜单类) - 加深以示区分 */
+QPushButton#tertiary {
+    background-color: #DADADA; /* 加深灰色 */
+    color: #2F3640;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #EFEFEF;
+    border-left-color: #DADADA;
+    border-right-color: #DADADA;
+    border-bottom-color: #9E9E9E;
+
+    border-radius: 8px;
+    padding: 0px 8px;
+    margin: 0px;
+}
+
+QPushButton#tertiary:hover {
+    background-color: #E4E4E4;
+    border-top-color: #F8F8F8;
+}
+
+QPushButton#tertiary:pressed {
+    background-color: #C0C0C0;
+    border-top-color: #9E9E9E;
+    border-bottom-color: #EFEFEF;
+    padding: 2px 7px 0px 9px;
+}
+
+/* 参数调节按钮 */
+QPushButton#paramBtn {
+    background-color: #D1D8E0;
+    color: #2F3640;
+    
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #EAF0F6;
+    border-left-color: #D1D8E0;
+    border-right-color: #D1D8E0;
+    border-bottom-color: #A4B0BE;
+
+    border-radius: 8px;
+    padding: 0px;
+    margin: 0px;
+}
+
+QPushButton#paramBtn:hover {
+    background-color: #DEE4EA;
+    border-top-color: #FFFFFF;
+}
+
+QPushButton#paramBtn:pressed {
+    background-color: #BCC3CC;
+    border-top-color: #99A3B0;
+    border-bottom-color: #DEE4EA;
+}
+
+/* 菜单样式 */
+QMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #CCC;
+    border-radius: 8px;
+    padding: 2px;
+}
+
+QMenu::item {
+    padding: 5px 20px 5px 20px;
+    min-height: 20px;
+    color: #2F3640;
+}
+
+QMenu::item:selected {
+    background-color: #4876AA;
+    color: white;
+}
+
+QMenu::item:checked {
+    background-color: #2D4067;
+    color: white;
+}
+
+/* 棋盘容器结构化样式 - Light Theme */
+
+/* 外壳层 (Board Shell) */
+QFrame#boardShell {
+    background-color: #E0E0E0; /* 浅灰金属/塑料质感 */
+    
+    border-style: solid;
+    border-width: 1.5px;
+    border-top-color: #FFFFFF;  /* 顶部高光 */
+    border-left-color: #D0D0D0;
+    border-right-color: #D0D0D0;
+    border-bottom-color: #A0A0A0; /* 底部阴影 */
+    
+    border-radius: 12px;
+    padding: 3px 6px 8px 6px; /* 模拟厚度 */
+}
+
+/* 内嵌层 (Board Inset) */
+QFrame#boardInset {
+    background-color: #D8D8D8; /* 调暗内嵌背景，原来 #F5F5F5 太刺眼 */
+    
+    border-style: solid;
+    border-top-width: 2px;
+    border-left-width: 5px;
+    border-right-width: 5px;
+    border-bottom-width: 7px;
+    
+    border-top-color: #FFFFFF;  /* 顶部高光 */
+    border-left-color: #C0C0C0; /* 左侧柔和 (从 #E8E8E8 调暗) */
+    border-right-color: #C0C0C0;
+    border-bottom-color: #C0C0C0; /* 底部加深 */
+
+    border-radius: 12px;
+    padding: 0px; /* 改为0，让BoardCanvas这一层充满，通过内部padding实现棋子溢出 */
+}
+
+/* 画布层 (Board Canvas) */
+QLabel#boardImage {
+    background-color: transparent;
+    border: none;
+    border-radius: 0px;
+}
+
+QLabel#paramLabel {
+    background-color: #FFFFFF; /* 白色背景 */
+    border: 1px solid #CCC;
+    border-radius: 8px;
+    padding: 0px;
+    color: #2F3640;
+}
+
+/* 退出按钮特殊样式 */
+QPushButton#exitBtn {
+    border-radius: 8px;
+    color: #D00000; /* 深红色文字 */
+    padding: 6px 18px;
+
+    /* 浅色主题下的退出按钮 - 淡红色背景 */
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #EDDEDE,
+        stop:0.5 #F7EEEE,
+        stop:1 #EDDEDE
+    );
+
+    /* 3D 边框 (带红调) */
+    border-style: solid;
+    border-width: 1px;
+    border-top-color: #FFFFFF;
+    border-left-color: #EDDEDE;
+    border-right-color: #EDDEDE;
+    border-bottom-color: #D3B0B0;
+}
+
+QPushButton#exitBtn:hover {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #F5E8E8,
+        stop:0.5 #FCF6F6,
+        stop:1 #F5E8E8
+    );
+    border-top-color: #FFFFFF;
+}
+
+QPushButton#exitBtn:pressed {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #DDBBBB,
+        stop:0.5 #EDD5D5,
+        stop:1 #DDBBBB
+    );
+    border-top-color: #D3B0B0;
+    border-bottom-color: #FCF6F6;
+    padding: 7px 17px 5px 19px;
+}

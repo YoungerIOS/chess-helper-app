@@ -17,6 +17,7 @@ from app.chess.message_bus import message_bus
 from app.chess.context import context
 from app.ui.board_display import BoardDisplay
 from app.chess.processor import ChessProcess
+from app.themes.theme_manager import ThemeManager
 
 class MainWindow(QMainWindow):
 
@@ -34,7 +35,8 @@ class MainWindow(QMainWindow):
         context.screen_size = (screen_width, screen_height)
         
         # 加载棋盘图片并计算其宽高比
-        board_img = QPixmap(resource_path('images', 'media', 'chessboard1.png'))
+        # 使用存在的图片计算比例，避免因文件缺失导致窗口比例异常
+        board_img = QPixmap(resource_path('images', 'media', 'chessboard3.png'))
         if board_img.isNull():
             board_ratio = 1.0
         else:
@@ -52,7 +54,8 @@ class MainWindow(QMainWindow):
             100 +  # 顶部文本显示区域
             35 +   # 中间按钮行
             35 +   # 底部控制区域
-            30     # 布局间距
+            30 -   # 布局间距
+            11     # 棋盘容器内边距
         )
         
         # 设置窗口高度为棋盘高度加上其他UI元素的高度
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         
         # 创建中央部件
         central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         
         # 创建主布局
@@ -87,15 +91,9 @@ class MainWindow(QMainWindow):
         self.text_display.setAlignment(Qt.AlignCenter)
         self.text_display.setFont(QFont("Arial", 18, QFont.Bold))
         self.text_display.setFixedHeight(100)  # 设置固定高度
-        self.text_display.setStyleSheet("""
-            QLabel {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 3px;
-                line-height: 1.2;  /* 减小行间距 */
-            }
-        """)
+        self.text_display.setObjectName("textDisplay")
+        # 移除内联样式，使用主题样式表
+        self.text_display.setStyleSheet("")
         main_layout.addWidget(self.text_display)
         
         # 添加中间按钮行
@@ -107,53 +105,19 @@ class MainWindow(QMainWindow):
         self.game_btn = QPushButton("游戏平台")
         self.game_btn.setFixedSize(75, 35) 
         self.game_btn.setFont(QFont("Arial", 11))
+        self.game_btn.setObjectName("secondary")
         # 加载并设置箭头图标
-        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        self.game_btn.setIcon(arrow_icon)
+        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
+        # self.game_btn.setIcon(arrow_icon)
         self.game_btn.setIconSize(QSize(12, 12))
-        self.game_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px 8px;  /* 左右padding设为8px */
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        # 移除内联样式，使用主题样式表
+        self.game_btn.setStyleSheet("")
         self.game_btn.clicked.connect(self.show_game_menu)
         middle_buttons_layout.addWidget(self.game_btn)
         
         # 创建游戏选择菜单
         self.game_menu = QMenu(self)
-        self.game_menu.setStyleSheet("""
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 5px 10px;
-                min-height: 20px;
-                color: black;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu::item:checked {
-                background-color: #e0e0e0;
-            }
-        """)
+        self.game_menu.setStyleSheet("")
         self.jj_action = self.game_menu.addAction("JJ象棋")
         self.tt_action = self.game_menu.addAction("天天象棋")
         self.jj_action.setCheckable(True)
@@ -171,25 +135,9 @@ class MainWindow(QMainWindow):
         self.manual_refresh_btn = QPushButton("重置")
         self.manual_refresh_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
         self.manual_refresh_btn.setFont(QFont("Arial", 11))
-        self.manual_refresh_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.manual_refresh_btn.setObjectName("secondary")
+        # 移除内联样式，使用主题样式表
+        self.manual_refresh_btn.setStyleSheet("")
         self.manual_refresh_btn.clicked.connect(self.on_manual_capture)
         middle_buttons_layout.addWidget(self.manual_refresh_btn)
 
@@ -197,50 +145,17 @@ class MainWindow(QMainWindow):
         self.change_move_btn = QPushButton("变招")
         self.change_move_btn.setFixedSize(75, 35)  # 与其他按钮保持一致
         self.change_move_btn.setFont(QFont("Arial", 11))
-        self.change_move_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.change_move_btn.setObjectName("secondary")
+        # 移除内联样式，使用主题样式表
+        self.change_move_btn.setStyleSheet("")
         self.change_move_btn.clicked.connect(self.on_change_move)
         middle_buttons_layout.addWidget(self.change_move_btn)
         
         # 添加其他按钮
         self.start_btn = QPushButton("开始")
-        self.start_btn.setMinimumHeight(35)
-        self.start_btn.setFont(QFont("Arial", 11))
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.start_btn.setFixedHeight(35)
+        self.start_btn.setFont(QFont("Arial", 13))
+        self.start_btn.setObjectName("primary")
         self.start_btn.clicked.connect(self.on_start)
         middle_buttons_layout.addWidget(self.start_btn)
         
@@ -249,13 +164,6 @@ class MainWindow(QMainWindow):
         # 中间棋盘区域
         self.board_display = BoardDisplay()
         # 移除固定高度设置，让棋盘自适应图片大小
-        self.board_display.setStyleSheet("""
-            QWidget {
-                background-color: #4F4F4F;
-                border: 1px solid #4F4F4F;
-                border-radius: 5px;
-            }
-        """)
         main_layout.addWidget(self.board_display)
         
         # 底部控制区域
@@ -267,132 +175,55 @@ class MainWindow(QMainWindow):
         self.exit_btn = QPushButton("退出")
         self.exit_btn.setMinimumHeight(35)
         self.exit_btn.setFont(QFont("Arial", 11))
-        self.exit_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.exit_btn.setObjectName("exitBtn")
+        # 移除内联样式，使用主题样式表
+        self.exit_btn.setStyleSheet("")
         self.exit_btn.clicked.connect(self.on_exit)
         control_layout.addWidget(self.exit_btn)
         
         # 创建棋盘定位按钮 - 改为下拉菜单样式
-        self.board_btn = QPushButton("棋盘设置")
+        self.board_btn = QPushButton("软件设置")
         self.board_btn.setFixedSize(75, 35)  
         self.board_btn.setFont(QFont("Arial", 11))
+        self.board_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
-        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        self.board_btn.setIcon(arrow_icon)
+        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
+        # self.board_btn.setIcon(arrow_icon)
         self.board_btn.setIconSize(QSize(12, 12))
-        self.board_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px 8px;  /* 左右padding设为8px */
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        # 移除内联样式，使用主题样式表
+        self.board_btn.setStyleSheet("")
         self.board_btn.clicked.connect(self.show_board_menu)
         control_layout.addWidget(self.board_btn)
         
         # 创建棋盘设置菜单
         self.board_menu = QMenu(self)
-        self.board_menu.setStyleSheet("""
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 5px 10px;
-                min-height: 20px;
-                color: black;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-        """)
+        self.board_menu.setStyleSheet("")
         self.manual_position_action = self.board_menu.addAction("手动定位")
         self.change_board_action = self.board_menu.addAction("更换棋盘")
         self.manual_position_action.triggered.connect(self.on_reposition)
         self.change_board_action.triggered.connect(self.on_change_board_bg)
         
+        self.change_theme_action = self.board_menu.addAction("更换主题")
+        self.change_theme_action.triggered.connect(self.on_change_theme)
+        
         # 创建"其他设置"按钮
         self.settings_btn = QPushButton("其他设置") 
         self.settings_btn.setFixedSize(75, 35)  
         self.settings_btn.setFont(QFont("Arial", 11))
+        self.settings_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
-        arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        self.settings_btn.setIcon(arrow_icon)
+        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
+        # self.settings_btn.setIcon(arrow_icon)
         self.settings_btn.setIconSize(QSize(12, 12))
-        self.settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px 8px;  /* 左右padding设为8px */
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        # 移除内联样式，使用主题样式表
+        self.settings_btn.setStyleSheet("")
         # 不再使用checkable属性
         self.settings_btn.clicked.connect(self.show_settings_menu)
         control_layout.addWidget(self.settings_btn)
         
         # 创建设置菜单
         self.settings_menu = QMenu(self)
-        self.settings_menu.setStyleSheet("""
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 5px 10px;
-                min-height: 20px;
-                color: black;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu::item:checked {
-                background-color: #e0e0e0;
-            }
-        """)
+        self.settings_menu.setStyleSheet("")
         self.continuous_action = self.settings_menu.addAction("连续识别")
         self.timer_action = self.settings_menu.addAction("计时识别")
         # 设置菜单项可选中
@@ -408,53 +239,19 @@ class MainWindow(QMainWindow):
         self.param_btn = QPushButton("参数")
         self.param_btn.setFixedSize(55, 35)  
         self.param_btn.setFont(QFont("Arial", 11))
+        self.param_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
-        arrow_icon = QIcon('app/images/pulldown_arrow.png')
-        self.param_btn.setIcon(arrow_icon)
+        # arrow_icon = QIcon('app/images/pulldown_arrow.png')
+        # self.param_btn.setIcon(arrow_icon)
         self.param_btn.setIconSize(QSize(12, 12))
-        self.param_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                text-align: center;
-                padding: 0px 8px;  /* 左右padding设为8px */
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        # 移除内联样式，使用主题样式表
+        self.param_btn.setStyleSheet("")
         self.param_btn.clicked.connect(self.show_param_menu)
         control_layout.addWidget(self.param_btn)
         
         # 创建参数菜单
         self.param_menu = QMenu(self)
-        self.param_menu.setStyleSheet("""
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 5px 10px;
-                min-height: 20px;
-                color: black;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu::item:checked {
-                background-color: #e0e0e0;
-            }
-        """)
+        self.param_menu.setStyleSheet("")
         self.depth_action = self.param_menu.addAction("depth")
         self.movetime_action = self.param_menu.addAction("movetime")
         self.depth_action.setCheckable(True)
@@ -475,63 +272,26 @@ class MainWindow(QMainWindow):
         self.decrease_btn = QPushButton("−")
         self.decrease_btn.setFixedSize(20, 35) 
         self.decrease_btn.setFont(QFont("Arial", 16))
-        self.decrease_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.decrease_btn.setObjectName("paramBtn")
+        # 移除内联样式，使用主题样式表
+        self.decrease_btn.setStyleSheet("")
         self.decrease_btn.clicked.connect(self.on_decrease_param)
         param_layout.addWidget(self.decrease_btn)
         
         self.param_label = QLabel(self.engine_params[self.engine_params["goParam"]])
         self.param_label.setAlignment(Qt.AlignCenter)
         self.param_label.setFixedHeight(35)
-        self.param_label.setStyleSheet("""
-            QLabel {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                padding: 0px;
-                margin: 0px;
-                color: black;
-            }
-        """)
+        self.param_label.setObjectName("paramLabel")
+        # 移除内联样式，使用主题样式表
+        self.param_label.setStyleSheet("")
         param_layout.addWidget(self.param_label)
         
         self.increase_btn = QPushButton("+")
         self.increase_btn.setFixedSize(20, 35) 
         self.increase_btn.setFont(QFont("Arial", 16))
-        self.increase_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1874CD;
-                color: white;
-                border: 1px solid #1874CD;
-                border-radius: 5px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:hover {
-                background-color: #1565c0;
-                border: 1px solid #1565c0;
-            }
-            QPushButton:pressed {
-                background-color: #0d47a1;
-                border: 1px solid #0d47a1;
-            }
-        """)
+        self.increase_btn.setObjectName("paramBtn")
+        # 移除内联样式，使用主题样式表
+        self.increase_btn.setStyleSheet("")
         self.increase_btn.clicked.connect(self.on_increase_param)
         param_layout.addWidget(self.increase_btn)
         
@@ -558,6 +318,12 @@ class MainWindow(QMainWindow):
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
         self.lines = ["", "", ""]
         self.update_text("等待获取棋局...", MessageType.STATUS)
+        
+        # 应用当前主题
+        ThemeManager.apply_theme(context.theme)
+        
+        # 初始化图标
+        self.update_icons()
 
     
     def on_engine_param_changed(self, param):
@@ -621,6 +387,11 @@ class MainWindow(QMainWindow):
         # 立即更新UI状态
         self.is_running = False
         self.start_btn.setText("开始")
+        
+        # 清空界面状态
+        self.board_display.clear_board()
+        self.lines[2] = "" # 确保清除着法缓存
+        self.update_text("点击开始，为你推荐最佳着法~", MessageType.STATUS)
         
         # 异步执行停止操作，避免阻塞UI
         def stop_worker():
@@ -783,7 +554,7 @@ class MainWindow(QMainWindow):
             elif i == 1 and line:  # 第2行
                 display_text += f'<span style="color: {style["color"]}; font-size: {style["font_size"]}; line-height: 1;">{line}</span><br>'
             elif i == 2 and line:  # 第3行（着法）
-                display_text += f'<span style="color: black; font-size: 45pt; line-height: 1;">{line}</span>'
+                display_text += f'<span style="font-family: \'Songti SC\', \'SimSun\', \'STSong\', serif; font-weight: bold; font-size: 45pt; line-height: 1;">{line}</span>'
         
         self.text_display.setText(display_text)
 
@@ -999,6 +770,35 @@ class MainWindow(QMainWindow):
         """更换棋盘底图"""
         self.board_display.next_board()
     
+    def on_change_theme(self):
+        """更换主题"""
+        new_theme = ThemeManager.toggle_theme()
+        self.update_icons()
+        print(f"Theme switched to: {new_theme}")
+
+    def update_icons(self):
+        """根据当前主题更新图标"""
+        # Determine icon name based on theme
+        # Light theme -> black arrow, Dark theme -> white arrow
+        icon_name = 'pulldown_arrow_black.png' if context.theme == 'light' else 'pulldown_arrow.png'
+        icon_path = resource_path('images', icon_name)
+        
+        # Check if file exists to avoid crash if generation failed
+        if not os.path.exists(icon_path):
+            icon_path = resource_path('images', 'pulldown_arrow.png')
+            
+        arrow_icon = QIcon(icon_path)
+        
+        # Update buttons if they exist
+        if hasattr(self, 'game_btn'):
+            self.game_btn.setIcon(arrow_icon)
+        if hasattr(self, 'board_btn'):
+            self.board_btn.setIcon(arrow_icon)
+        if hasattr(self, 'settings_btn'):
+            self.settings_btn.setIcon(arrow_icon)
+        if hasattr(self, 'param_btn'):
+            self.param_btn.setIcon(arrow_icon)
+    
     def on_exit(self):
         """优雅安全规范地退出程序"""
         # 停止所有线程和监听器
@@ -1120,10 +920,13 @@ class ManualPositioner(QObject):
         self.start_cursor_tracking()
         
         # 显示第一步提示
-        self.main_window.move_display.setText('<span style="color: red;">第1步：点击棋盘左上角顶点<br>右键点击可取消定位</span>')
+        self.main_window.text_display.setText('<span style="color: red;">第1步：点击棋盘左上角顶点<br>右键点击可取消定位</span>')
         
-        # 启动鼠标监听
-        self.start_mouse_listener()
+        # 初始化图标
+        self.main_window.update_icons()
+
+        # 加载引擎
+        self.main_window.start_engine_loader()
         print("手动定位已启动")
     
     def cancel_positioning(self):
@@ -1138,7 +941,7 @@ class ManualPositioner(QObject):
         # 清理临时定位点
         self.cleanup_position_dot()
         
-        self.main_window.move_display.setText('<span style="color: blue;">定位已取消</span>')
+        self.main_window.text_display.setText('<span style="color: blue;">定位已取消</span>')
         print("手动定位已取消")
     
     def create_position_dot(self, is_temp=False, x=None, y=None):
@@ -1337,7 +1140,7 @@ class ManualPositioner(QObject):
             # 第1步：左上角
             self.positioning_coords.append((x, y))
             self.positioning_step = 2
-            self.main_window.move_display.setText('<span style="color: orange;">第2步：点击棋盘右下角顶点<br>右键点击可取消定位</span>')
+            self.main_window.text_display.setText('<span style="color: orange;">第2步：点击棋盘右下角顶点<br>右键点击可取消定位</span>')
             
             # 确保定位点继续跟随光标
             if self.position_dot and self.follow_cursor:
@@ -1364,10 +1167,10 @@ class ManualPositioner(QObject):
                 # 创建并显示定位点（使用左上角坐标）
                 left_top = self.positioning_coords[0]
                 self.create_position_dot(is_temp=False, x=left_top[0], y=left_top[1])
-                self.main_window.move_display.setText('<span style="color: green;">2角定位完成!</span>')
+                self.main_window.text_display.setText('<span style="color: green;">2角定位完成!</span>')
             else:
                 # 定位失败，显示错误信息
-                self.main_window.move_display.setText('<span style="color: red;">2角定位失败，请重试</span>')
+                self.main_window.text_display.setText('<span style="color: red;">2角定位失败，请重试</span>')
                 # 重置定位状态，允许重新开始
                 self.positioning_step = 0
                 self.positioning_coords = []
