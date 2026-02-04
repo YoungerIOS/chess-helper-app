@@ -64,6 +64,28 @@ def _ensure_engine_files():
         logger.debug(f"引擎文件复制失败（不影响应用启动）: {e}")
         pass
 
+def check_screen_recording_permission():
+    """
+    检查屏幕录制权限
+    在macOS上，只有尝试进行一次截图，系统才会询问用户是否授权。
+    """
+    if sys.platform != 'darwin':
+        return
+
+    try:
+        import mss
+        with mss.mss() as sct:
+            # 尝试抓取一个小区域 (1x1像素)
+            # 这会触发系统权限弹窗（如果尚未授权）
+            monitor = sct.monitors[1]
+            rect = {"top": monitor["top"], "left": monitor["left"], "width": 1, "height": 1}
+            sct.grab(rect)
+            logger.info("屏幕录制权限检查: 已触发/已授权")
+    except Exception as e:
+        logger.warning(f"屏幕录制权限检查可能失败 (通常意味着未授权或取消): {e}")
+        # 这里可以选择弹出一个提示框告知用户
+        pass
+
 def excepthook(exctype, value, tb):
     # 写日志
     try:
@@ -89,6 +111,9 @@ def main():
     
     # 复制引擎文件到用户目录（如果不存在）
     _ensure_engine_files()
+    
+    # 尽早触发屏幕录制权限申请
+    check_screen_recording_permission()
     
     app = QApplication(sys.argv)
     window = MainWindow()

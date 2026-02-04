@@ -82,7 +82,7 @@ class Platform:
     board_coords: Dict[str, List[int]]  # 棋盘坐标
     regions: Dict  # 区域配置
     _piece_recognizer: Optional[object] = None  # 棋子识别器
-    _timer_recognizer: Optional[object] = None  # 倒计时识别器
+
     
     def __post_init__(self):
         """初始化时设置动画等待时长"""
@@ -96,13 +96,7 @@ class Platform:
             self._piece_recognizer = ChessPieceRecognizer(platform=self.name)
         return self._piece_recognizer
     
-    @property
-    def timer_recognizer(self) -> object:
-        """获取倒计时识别器"""
-        if self._timer_recognizer is None:
-            from app.chess.timer_recognizer import ChessTimerPredictor
-            self._timer_recognizer = ChessTimerPredictor(platform=self.name)
-        return self._timer_recognizer
+
 
 @dataclass
 class ChessContext:
@@ -190,7 +184,7 @@ class ChessContext:
             
             # 预加载当前平台的模型
             _ = self.piece_recognizer
-            _ = self.timer_recognizer
+
             logger.info("模型初始化完成")
             
         except (FileNotFoundError, json.JSONDecodeError) as e:
@@ -219,7 +213,7 @@ class ChessContext:
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
-            _ = self.timer_recognizer
+
             logger.info("模型初始化完成")
     
     def save_config(self):
@@ -237,7 +231,7 @@ class ChessContext:
             # 添加其他配置
             config['platform'] = self.platform
             config['analysis_mode'] = self._analysis_mode
-            # 保存棋盘底图索引
+    
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
             # 保存主题
@@ -309,11 +303,6 @@ class ChessContext:
         """获取当前平台的棋子识别器"""
         return self._platforms[self.platform].piece_recognizer
     
-    @property
-    def timer_recognizer(self) -> object:
-        """获取当前平台的倒计时识别器"""
-        return self._platforms[self.platform].timer_recognizer
-
     @property
     def analysis_mode(self) -> str:
         return self._analysis_mode
@@ -412,8 +401,6 @@ class ChessContext:
     def quit_engine(self) -> None:
         """线程安全地完全退出引擎"""
         with self._engine_lock:
-            if self.engine:
-                self.engine.quit()
             if self.engine:
                 self.engine.quit()
                 self.engine = None
