@@ -362,7 +362,13 @@ class BoardLocator:
         print(f"游戏窗口内霍夫圆检测到 {len(circles)} 个圆形")
         self.logger.info(f"霍夫圆检测结果: 检测到{len(circles)}个圆形")
         
-        # 6. 将检测到的圆坐标转换回原始图像尺寸
+        # 6. 计算Retina缩放因子 (物理像素 / 逻辑像素)
+        # search_region['width'] 是逻辑点(Points)，img_np.shape[1] 是物理像素(Pixels)
+        retina_scale = img_np.shape[1] / search_region['width']
+        print(f"Retina缩放检测: 逻辑宽度={search_region['width']}, 物理像素={img_np.shape[1]}, 缩放因子={retina_scale:.2f}")
+
+        # 7. 将检测到的圆坐标转换回原始图像尺寸 (Physical Pixels)
+        # 注意：这里我们得到的 circles 是在 2x 放大后的图像上的
         original_circles = []
         for x, y, r in circles:
             orig_x = int(x / scale_factor)
@@ -370,15 +376,24 @@ class BoardLocator:
             orig_r = int(r / scale_factor)
             original_circles.append((orig_x, orig_y, orig_r))
         
-        # 7. 处理圆检测（使用原始尺寸的坐标）
+        # 8. 处理圆检测（使用原始尺寸的坐标 - Physical Pixels）
         piece_centers = self._process_circles(original_circles, img_np)
         
-        # 8. 将相对坐标转换为绝对坐标
+        # 9. 将相对坐标(Pixels)转换为绝对坐标(Points)
+        # 必须除以 retina_scale 才能变回逻辑点
         absolute_piece_centers = []
         for x, y, r, piece_type in piece_centers:
-            abs_x = x + search_region['left']
-            abs_y = y + search_region['top']
-            absolute_piece_centers.append((abs_x, abs_y, r, piece_type))
+            # 先转回逻辑点偏移量
+            offset_x_points = x / retina_scale
+            offset_y_points = y / retina_scale
+            r_points = r / retina_scale
+            
+            # 再加上窗口得逻辑点原点
+            abs_x = offset_x_points + search_region['left']
+            abs_y = offset_y_points + search_region['top']
+            
+            absolute_piece_centers.append((abs_x, abs_y, r_points, piece_type))
+
         
         # 9. 筛选关键点位置的棋子组合(卒, 将, 卒)/(兵, 帅, 兵)
         filtered_pieces = self._filter_keypoint_pieces(absolute_piece_centers)
