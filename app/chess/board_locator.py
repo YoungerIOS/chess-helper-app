@@ -288,7 +288,7 @@ class BoardLocator:
         
         platform = window_info['platform']
         
-        # 4. 图像放大策略
+        # 3. 图像放大策略
         # 统一放大2倍（TT平台已在截取前收缩区域，这里无需再次裁剪）
         scale_factor = 2.0
         base_h, base_w = img_np.shape[0], img_np.shape[1]
@@ -301,37 +301,57 @@ class BoardLocator:
         
         print(f"图像放大: {base_w}x{base_h} -> {target_width}x{target_height}, 缩放比例: {scale_factor:.2f}")
         
-        if platform == "TT":
-            # TT平台：使用更温和的预处理
-            blurred = cv2.GaussianBlur(scaled_gray, (3, 3), 0)
-            processed = blurred
-            # TT平台的参数（放大后可以更精确）
-            minRadius = int(8 * scale_factor)
-            maxRadius = int(18 * scale_factor)
-            minDist = int(20 * scale_factor)
-            param1 = 50
-            param2 = 20
-        else:  # JJ平台
-            # JJ平台：使用原来的预处理
-            blurred = cv2.GaussianBlur(scaled_gray, (5, 5), 0)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            processed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
-            # JJ平台的参数（放大后可以更精确）
-            minRadius = int(12 * scale_factor)
-            maxRadius = int(20 * scale_factor) #22
-            minDist = int(25 * scale_factor)
-            param1 = 70
-            param2 = 30
+        # 动态计算棋子半径范围
+        # 假设：标准棋盘通常占满搜索区域宽度（TT稍微收缩过，JJ占大部分）
+        # 标准棋盘宽度大约是9个格子的宽度，加上两边边距，大约相当于10-11个棋子直径
+        # 估算：一个棋子直径约占 搜索区域宽度 的 1/10 ~ 1/12
+        # 我们设定一个较宽的估算范围：
+        estimated_diameter = target_width / 10.0
+        estimated_radius = estimated_diameter / 2.0
         
-        # print(f"区域检测 - 平台: {platform}, 参数: minRadius={minRadius}, maxRadius={maxRadius}, param1={param1}, param2={param2}")
+        # 设定动态阈值 (基于估算半径的 60% ~ 140%)
+        minRadius = int(estimated_radius * 0.6)
+        maxRadius = int(estimated_radius * 1.4)
         
+        # 确保最小半径至少为8（避免噪点）
+        minRadius = max(8, minRadius)
+        
+        print(f"动态半径计算: 估算半径r={estimated_radius:.1f}px, 搜索范围=[{minRadius}, {maxRadius}]")
+        
+        # 统一的预处理参数
+        # 无论平台，先尝试高斯模糊减少噪点
+        blurred = cv2.GaussianBlur(scaled_gray, (5, 5), 0)
+        
+        if platform == "JJ":
+             # JJ平台特定优化
+             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+             processed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+             param1 = 70
+             param2 = 30
+             minDist = int(estimated_diameter * 0.8) # 两个棋子圆心最小距离略小于直径
+        else:
+            # TT平台或其他
+             processed = blurred
+             param1 = 50
+             param2 = 25
+             minDist = int(estimated_diameter * 0.8)
+
         # 5. 霍夫圆检测
         circles = cv2.HoughCircles(processed, cv2.HOUGH_GRADIENT, 1, minDist,
                                   param1=param1, param2=param2,
                                   minRadius=minRadius, maxRadius=maxRadius)
         
         if circles is None:
-            print("在游戏窗口内未检测到任何圆形")
+            # 如果第一次检测失败，尝试放宽范围重试 (0.5 ~ 1.6)
+            print("首次检测未发现圆形，尝试放宽范围重试...")
+            minRadius_retry = int(estimated_radius * 0.5)
+            maxRadius_retry = int(estimated_radius * 1.6)
+            circles = cv2.HoughCircles(processed, cv2.HOUGH_GRADIENT, 1, minDist,
+                                      param1=param1, param2=int(param2 * 0.8), # 稍微降低阈值
+                                      minRadius=minRadius_retry, maxRadius=maxRadius_retry)
+
+        if circles is None:
+            print("在游戏窗口内未检测到任何圆形 (重试后)")
             self.logger.warning("霍夫圆检测未发现任何圆形")
             detected_circles_path = app_cache_path("detected_circles.jpg")
             cv2.imwrite(detected_circles_path, img_np)
