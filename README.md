@@ -7,12 +7,11 @@
 
 ## 📸 功能演示 (Demo)
 
-### 1. 自动识别与实时分析
+### 自动识别与实时分析
 程序能够自动检测游戏窗口，精准定位棋盘，并实时显示最佳着法路线。
 ![实时分析演示](demo.gif)
 
-### 2. 动态窗口适应
-无论您如何移动或缩放游戏窗口，助手都能智能跟随，无需手动重新校准。
+计算速度快，引擎参数可调。
 ![窗口跟随演示](demo_2.gif)
 
 ---
@@ -46,34 +45,12 @@
 -   Python 3.10+
 
 ### 快速开始
+-   下载预编译的 App 文件
 
-1.  **克隆项目**
-    ```bash
-    git clone https://github.com/YoungerIOS/chess-helper-app.git
-    cd chess-helper-app
-    ```
-
-2.  **安装依赖**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3.  **运行程序**
-    ```bash
-    python -m app.main
-    ```
-
-4.  **打包为 App (可选)**
-    
-    *Apple Silicon (M1/M2/M3):*
-    ```bash
-    pyinstaller ChessHelper.spec
-    ```
-    
-    *Intel Mac:*
-    ```bash
-    pyinstaller IntelMac_Spec.py
-    ```
+### 自行编译
+-   若有兴趣和技术能力，可以参考Pikafish开源引擎文档，自行编译所需硬件平台的引擎文件
+-   将引擎文件中的src目录放入本项目`chess-helper-app/app/Pikafish`目录下，运行`python3 -m app.main`即可使用
+-   使用pyinstaller 打包客户端
 
 ---
 
