@@ -988,13 +988,14 @@ class BoardLocator:
             self.context.save_config()
             return board_region
 
-    def handle_locating_board_tasks(self, message_type=None, data=None, moved_coords=None):
+    def handle_locating_board_tasks(self, message_type=None, data=None, moved_coords=None, fallback_coords=None):
         """
         尝试定位棋盘
         Args:
             message_type: 消息类型（回调时使用）
             data: 消息数据（回调时使用）
             moved_coords: 窗口移动时按移动距离计算的新坐标
+            fallback_coords: 自动定位失败时的备用坐标
         Returns:
             bool: 是否成功定位棋盘
         """
@@ -1010,7 +1011,7 @@ class BoardLocator:
             if message_type is not None:
                 print(f"收到重新定位请求: {message_type} = {data}")
             
-            # 优先级：自动定位 > 保存的手动坐标 > 窗口移动坐标
+            # 优先级：自动定位 > 窗口移动坐标 > 自动检测失败后的Fallback > 保存的手动坐标
             if moved_coords is not None:
                 # 使用本次窗口移动坐标，清除手动坐标记录
                 # self.context.manual_coords = None
@@ -1024,16 +1025,23 @@ class BoardLocator:
                     print("棋盘定位成功(自动)")
                     msg = "棋盘定位完成"
                 except LocationError:
-                    # 自动定位失败，检查是否有保存的手动坐标
-                    saved_manual_coords = self.context.manual_coords
-                    if saved_manual_coords is not None:
-                        # 使用保存的手动坐标
-                        self.update_board_and_avatars_regions(coords=saved_manual_coords)
-                        print("棋盘定位成功(使用保存的手动坐标)")
-                        msg = "棋盘定位成功"
+                    # 自动定位失败
+                    # 1. 尝试使用本次计算的Fallback坐标（通常是基于窗口缩放推算的）
+                    if fallback_coords is not None:
+                         self.update_board_and_avatars_regions(coords=fallback_coords)
+                         print("棋盘定位成功(使用推算的Fallback坐标)")
+                         msg = "棋盘定位成功"
                     else:
-                        # 没有手动坐标，重新抛出异常
-                        raise
+                        # 2. 检查是否有保存的手动坐标（注意：如果窗口已移动，这可能失效）
+                        saved_manual_coords = self.context.manual_coords
+                        if saved_manual_coords is not None:
+                            # 使用保存的手动坐标
+                            self.update_board_and_avatars_regions(coords=saved_manual_coords)
+                            print("棋盘定位成功(使用保存的手动坐标)")
+                            msg = "棋盘定位成功"
+                        else:
+                            # 没有手动坐标，重新抛出异常
+                            raise
             
             # 发送成功消息
             message_bus.publish_status(msg)
@@ -1050,7 +1058,6 @@ class BoardLocator:
         监控窗口移动，检测到移动时调用回调
         Args:
             stop_event: 停止事件
-            callback: 移动检测到时的回调函数
         """
         # 初始化：记录基准窗口边界（最近一次成功定位时的窗口边界）
         first_info = self.find_game_window(self.context.platform)
@@ -1078,7 +1085,7 @@ class BoardLocator:
         last_change_time = None
         pending_move = False
         pending_resize = False
-
+        
         while not stop_event.is_set():
             now = time.monotonic()
             if now >= next_check_time:
@@ -1101,28 +1108,49 @@ class BoardLocator:
                         pending_resize = pending_resize or size_changed
                         last_change_time = now
                         last_seen_bounds = current_bounds
+                        
                     else:
                         # 没有新变化，检查是否已稳定超过阈值，若是则执行重定位
                         if last_change_time is not None and (now - last_change_time) >= stable_wait and (pending_move or pending_resize):
                             # 以基准边界为参考计算总位移
                             dx_total = int(last_seen_bounds['left']) - int(baseline_bounds['left']) if baseline_bounds else 0
                             dy_total = int(last_seen_bounds['top']) - int(baseline_bounds['top']) if baseline_bounds else 0
+                            
+                            # 获取最新基准区域（可能会在手动定位后变化）
+                            curr_platform = self.context.get_platform(self.context.platform)
+                            curr_board = curr_platform.regions.get('board') if curr_platform else None
+                            ref_board_region = baseline_board_region or curr_board
 
                             try:
                                 if pending_resize:
                                     # 尺寸变化：执行完整自动定位
-                                    self.handle_locating_board_tasks()
+                                    # 计算预测Fallback坐标：基于窗口缩放比例
+                                    fallback = None
+                                    if baseline_bounds and ref_board_region and int(baseline_bounds['width']) > 0 and int(baseline_bounds['height']) > 0:
+                                        scale_w = int(last_seen_bounds['width']) / int(baseline_bounds['width'])
+                                        scale_h = int(last_seen_bounds['height']) / int(baseline_bounds['height'])
+                                        
+                                        # 计算相对于旧窗口左上角的偏移
+                                        rel_x = (int(ref_board_region['left']) - int(baseline_bounds['left'])) * scale_w
+                                        rel_y = (int(ref_board_region['top']) - int(baseline_bounds['top'])) * scale_h
+                                        
+                                        new_w = int(ref_board_region['width']) * scale_w
+                                        new_h = int(ref_board_region['height']) * scale_h
+                                        
+                                        new_l = int(last_seen_bounds['left']) + rel_x
+                                        new_t = int(last_seen_bounds['top']) + rel_y
+                                        
+                                        fallback = (int(new_l), int(new_t), int(new_w), int(new_h))
+                                        print(f"窗口缩放，计算Fallback坐标: {fallback}")
+                                    
+                                    self.handle_locating_board_tasks(fallback_coords=fallback)
                                 else:
                                     # 仅移动：根据总位移平移棋盘左上角，复用原宽高，传入4元组
-                                    platform_conf = self.context.get_platform(self.context.platform)
-                                    current_board = platform_conf.regions.get('board') if platform_conf else None
-                                    # 使用基准棋盘区域做平移，避免逐次平移造成的误差累积
-                                    board_region = baseline_board_region or current_board
-                                    if board_region is not None:
-                                        new_left = int(board_region['left']) + dx_total
-                                        new_top = int(board_region['top']) + dy_total
-                                        new_width = int(board_region['width'])
-                                        new_height = int(board_region['height'])
+                                    if ref_board_region is not None:
+                                        new_left = int(ref_board_region['left']) + dx_total
+                                        new_top = int(ref_board_region['top']) + dy_total
+                                        new_width = int(ref_board_region['width'])
+                                        new_height = int(ref_board_region['height'])
                                         move_region = (new_left, new_top, new_width, new_height)
                                         self.handle_locating_board_tasks(moved_coords=move_region)
 
@@ -1141,6 +1169,7 @@ class BoardLocator:
                                         'width': int(br2['width']),
                                         'height': int(br2['height'])
                                     }
+                                    
                                 pending_move = False
                                 pending_resize = False
                                 last_change_time = None

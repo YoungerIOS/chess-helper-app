@@ -4,7 +4,7 @@ import threading
 import sys
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QApplication, QMenu)
-from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject
+from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, Signal
 from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 from pynput import mouse
 from app.tools.utils import resource_path
@@ -21,6 +21,7 @@ from app.chess.processor import ChessProcess
 from app.themes.theme_manager import ThemeManager
 
 class MainWindow(QMainWindow):
+    resume_polling_signal = Signal()  # 定义信号用于在主线程恢复轮询
 
 
     def __init__(self):
@@ -92,6 +93,9 @@ class MainWindow(QMainWindow):
         context.load_config()
         self.engine_params = context.get_engine_params()
         
+        # 连接信号与槽
+        self.resume_polling_signal.connect(lambda: self.check_platform_change(notify_always=False, schedule_next=True))
+        
         # 顶部文本显示区域
         self.text_display = QLabel()
         self.text_display.setAlignment(Qt.AlignCenter)
@@ -161,7 +165,7 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.exit_btn, 1)  # Stretch factor 1
         
         # 创建棋盘定位按钮 - 改为下拉菜单样式
-        self.board_btn = QPushButton("软件设置")
+        self.board_btn = QPushButton("设置")
         self.board_btn.setFixedHeight(35)
         self.board_btn.setFont(QFont("Arial", 11))
         self.board_btn.setObjectName("tertiary")
@@ -186,7 +190,7 @@ class MainWindow(QMainWindow):
         self.change_theme_action.triggered.connect(self.on_change_theme)
         
         # 创建"其他设置"按钮
-        self.settings_btn = QPushButton("其他设置") 
+        self.settings_btn = QPushButton("其他") 
         self.settings_btn.setFixedHeight(35)
         self.settings_btn.setFont(QFont("Arial", 11))
         self.settings_btn.setObjectName("tertiary")
@@ -320,6 +324,7 @@ class MainWindow(QMainWindow):
             notify_always: 是否即使平台未变化也显示通知
             schedule_next: 如果未检测到，是否调度下一次检测（2秒后）
         """
+        print(f"DEBUG: check_platform_change is_running={self.is_running}, schedule_next={schedule_next}")
         try:
             # 1. 尝试查找当前平台窗口
             current_found = self.platform_detector.find_game_window(context.platform)
@@ -444,6 +449,9 @@ class MainWindow(QMainWindow):
                 print(f"停止操作失败: {e}")
             finally:
                 self.is_stopping = False
+                # 停止完成后，通过信号触发主线程恢复平台轮询检测
+                print("停止完成，正在恢复平台轮询...")
+                self.resume_polling_signal.emit()
         
         # 在后台线程中执行停止操作
         import threading
@@ -963,8 +971,8 @@ class ManualPositioner(QObject):
         # 初始化图标
         self.main_window.update_icons()
 
-        # 加载引擎
-        self.main_window.start_engine_loader()
+        # 启动鼠标监听
+        self.start_mouse_listener()
         print("手动定位已启动")
     
     def cancel_positioning(self):
@@ -1141,8 +1149,26 @@ class ManualPositioner(QObject):
         if self.mouse_listener:
             self.stop_mouse_listener()
         
-        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
-        self.mouse_listener.start()
+        try:
+            self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
+            self.mouse_listener.start()
+            
+            # 检查监听器线程是否存活 (如果因权限问题立即退出)
+            if not self.mouse_listener.is_alive():
+                 raise Exception("监听器启动失败(可能未获得辅助功能权限)")
+                 
+        except Exception as e:
+            print(f"启动鼠标监听失败: {e}")
+            self.main_window.update_text("无法启动鼠标监听，请检查 系统设置->隐私与安全性->辅助功能", MessageType.ERROR)
+            
+            # 尝试打开系统设置辅助功能页面 (仅尝试，不保证成功)
+            import subprocess
+            try:
+                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+            except:
+                pass
+                
+            self.cancel_positioning()
     
     def stop_mouse_listener(self):
         """停止全局鼠标监听"""
@@ -1155,18 +1181,24 @@ class ManualPositioner(QObject):
         if not self.is_positioning:
             return True
             
-        if button == mouse.Button.left and pressed:
-            # 左键点击：确认位置
-            cursor_pos = QPoint(x, y)
-            # 将该操作切换到主线程执行
-            QApplication.instance().postEvent(self.main_window, QEvent(CONFIRM_POSITION_EVENT))
-            # 在事件处理函数中处理
-            self.main_window.cursor_pos_clicked = cursor_pos
+        # 只处理按下事件
+        if not pressed:
             return True
-        elif button == mouse.Button.right and pressed:
+
+        print(f"Mouse click detected: {button} at {x}, {y}")
+            
+        if button == mouse.Button.left:
+            # 左键点击：确认位置
+            cursor_pos = QPoint(int(x), int(y)) # 确保坐标是整数
+            # 将该操作切换到主线程执行
+            self.main_window.cursor_pos_clicked = cursor_pos
+            QApplication.instance().postEvent(self.main_window, QEvent(CONFIRM_POSITION_EVENT))
+            return True # 继续监听，直到逻辑决定停止
+        elif button == mouse.Button.right:
             # 右键点击：取消定位
+            print("Right click detected, posting cancel event")
             QApplication.instance().postEvent(self.main_window, QEvent(CANCEL_POSITION_EVENT))
-            return False
+            return False # 停止监听
         return True
     
     def confirm_position(self, cursor_pos):
