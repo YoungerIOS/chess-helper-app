@@ -45,9 +45,11 @@ def _ensure_engine_files():
                 os.makedirs(os.path.dirname(user_engine_path), exist_ok=True)
                 # 复制引擎文件
                 shutil.copy2(src_engine, user_engine_path)
-                # 设置执行权限
-                os.chmod(user_engine_path, 0o755)
                 logger.info("引擎文件已静默复制到用户数据目录")
+            
+            # 每次启动都确保有执行权限
+            if os.path.exists(user_engine_path):
+                os.chmod(user_engine_path, 0o755)
         
         # 如果NNUE文件不存在，尝试从打包资源复制
         if not os.path.exists(user_nnue_path):

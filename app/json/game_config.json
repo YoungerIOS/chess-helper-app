@@ -27,22 +27,22 @@
         },
         "regions": {
             "board": {
-                "left": 703.7,
-                "top": 182.1,
-                "width": 449.6,
-                "height": 498.9
+                "left": 691.2,
+                "top": 169.6,
+                "width": 459.6,
+                "height": 508.5
             },
             "avatar_upper": {
-                "left": 583.8,
-                "top": 194.1,
-                "width": 79.0,
-                "height": 79.0
+                "left": 568.7,
+                "top": 181.9,
+                "width": 81.0,
+                "height": 81.0
             },
             "avatar_lower": {
-                "left": 1191.3,
-                "top": 533.8,
-                "width": 79.0,
-                "height": 79.0
+                "left": 1189.6,
+                "top": 529.1,
+                "width": 81.0,
+                "height": 81.0
             }
         }
     },
@@ -74,26 +74,26 @@
         },
         "regions": {
             "board": {
-                "left": 657.5,
-                "top": 226.4,
-                "width": 423.3,
-                "height": 452.2
+                "left": 611.6,
+                "top": 230.3,
+                "width": 421.0,
+                "height": 447.4
             },
             "avatar_upper": {
-                "left": 657.5,
-                "top": 79.9,
-                "width": 94.0,
-                "height": 94.0
+                "left": 611.6,
+                "top": 85.3,
+                "width": 93.0,
+                "height": 93.0
             },
             "avatar_lower": {
-                "left": 996.1,
-                "top": 735.1,
-                "width": 94.0,
-                "height": 94.0
+                "left": 948.4,
+                "top": 733.6,
+                "width": 93.0,
+                "height": 93.0
             }
         }
     },
-    "platform": "JJ",
+    "platform": "TT",
     "analysis_mode": "continuous",
     "board_index": 2,
     "theme": "dark",

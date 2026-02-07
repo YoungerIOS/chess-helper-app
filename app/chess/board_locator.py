@@ -83,8 +83,8 @@ class BoardLocator:
         
         # 游戏窗口标题关键词
         self.game_titles = {
-            "JJ": ["JJ象棋", "微信"],
-            "TT": ["天天象棋", "微信"]
+            "JJ": ["JJ象棋"],
+            "TT": ["天天象棋"]
         }
         self.window_size = None
         
@@ -174,71 +174,76 @@ class BoardLocator:
             return []
 
     def find_game_window(self, platform_name):
-        """查找游戏窗口"""
+        """查找游戏窗口 (Refined Logic)"""
         system = platform.system()
         
         if system not in ["Darwin", "Windows"]:
             print(f"当前系统 {system} 不支持窗口检测，跳过窗口检测")
             return None
-            
-        # print(f"使用{system}系统API检测游戏窗口...")
         
-        # 构建检测平台列表：先检测指定平台，检测不到时检测所有其他平台
-        platforms_to_check = []
+        # 收集所有匹配的窗口
+        # candidates: List of (score, platform, match_info)
+        # Score rules:
+        # 100: Specific Title (not "微信") + Matches Requested Platform
+        # 90:  Specific Title (not "微信") + Matches Other Platform
+        # 50:  Generic Title ("微信") + Matches Requested Platform
+        # 40:  Generic Title ("微信") + Matches Other Platform
         
-        # 1. 首先检测指定的平台（如果提供了）
-        if platform_name in self.game_titles:
-            platforms_to_check.append(platform_name)
+        candidates = []
         
-        # 2. 添加所有备用平台（排除已添加的指定平台）
-        for p in self.game_titles.keys():
-            if p not in platforms_to_check:
-                platforms_to_check.append(p)
-        
-        for p in platforms_to_check:
-            if p not in self.game_titles:
-                continue
-                
-            titles = self.game_titles[p]
-            
+        # 遍历所有支持的平台
+        for p, titles in self.game_titles.items():
             for title in titles:
-                # print(f"搜索窗口标题: {title}")
                 matches = self.find_window_by_title(title)
                 
                 if matches:
-                    # print(f"找到 {len(matches)} 个匹配窗口:")
-                    # for i, match in enumerate(matches):
-                        # print(f"  {i+1}. 标题: {match['title']}")
-                        # print(f"     位置: {match['bounds']}")
+                    score = 100  # 具体标题匹配
                     
-                    # 返回第一个匹配的窗口
+                    if p == platform_name:
+                        score += 10  # 优先匹配当前请求的平台
+                        
+                    # 只取第一个匹配项（通常是最上层的）
                     match = matches[0]
-                    x, y, width, height = match['bounds']
-                    # 记录窗口尺寸，供回退参考
-                    self.window_size = (int(width), int(height))
-                    
-                    window_info = {
+                    candidates.append({
+                        'score': score,
                         'platform': p,
                         'title': match['title'],
-                        'region': {
-                            'left': int(x),
-                            'top': int(y),
-                            'width': int(width),
-                            'height': int(height)
-                        },
-                        'confidence': 1.0
-                    }
-                    
-                    # print(f"检测到窗口: {window_info['title']}")
-                    # print(f"窗口尺寸: {window_info['region']['width']}x{window_info['region']['height']}")
-                    
-                    # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
-                    if self.context and self.context.platform != p:
-                        self.context.set_platform(p)
-                    
-                    return window_info
+                        'match_info': match
+                    })
+
+        if not candidates:
+            return None
+            
+        # 按分数降序排序
+        candidates.sort(key=lambda x: x['score'], reverse=True)
         
-        return None
+        # 选择最佳匹配
+        best_candidate = candidates[0]
+        p = best_candidate['platform']
+        match = best_candidate['match_info']
+        
+        # 构建返回信息
+        x, y, width, height = match['bounds']
+        self.window_size = (int(width), int(height))
+        
+        window_info = {
+            'platform': p,
+            'platform_name': self.game_titles[p][0], # 使用配置的第一个标题作为显示名称
+            'title': match['title'],
+            'region': {
+                'left': int(x),
+                'top': int(y),
+                'width': int(width),
+                'height': int(height)
+            },
+            'confidence': 1.0 if best_candidate['score'] >= 50 else 0.5
+        }
+
+        # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
+        if self.context and self.context.platform != p:
+            self.context.set_platform(p)
+            
+        return window_info
 
     def _find_pieces_in_window(self):
         """在指定游戏窗口内检测将帅"""
@@ -419,32 +424,41 @@ class BoardLocator:
         for combination in filtered_pieces:
             # 绘制将/帅
             king_x, king_y, king_r, king_type = combination['king']
-            cv2.circle(full_img, (king_x, king_y), king_r, (0, 255, 0), 2)
-            cv2.circle(full_img, (king_x, king_y), 2, (0, 0, 255), 3)
+            # 将逻辑坐标(Float)转回物理像素(Int)用于绘图
+            draw_x = int(king_x * retina_scale)
+            draw_y = int(king_y * retina_scale)
+            draw_r = int(king_r * retina_scale)
+            
+            cv2.circle(full_img, (draw_x, draw_y), draw_r, (0, 255, 0), 2)
+            cv2.circle(full_img, (draw_x, draw_y), 2, (0, 0, 255), 3)
             
             # 绘制兵/卒（如果存在）
             if combination['pawns'] and len(combination['pawns']) >= 2:
                 # 绘制左兵/卒
                 left_x, left_y, left_r, left_type = combination['pawns'][0]
-                cv2.circle(full_img, (left_x, left_y), left_r, (0, 255, 255), 2)
-                cv2.circle(full_img, (left_x, left_y), 2, (255, 255, 0), 3)
+                lx, ly, lr = int(left_x*retina_scale), int(left_y*retina_scale), int(left_r*retina_scale)
+                cv2.circle(full_img, (lx, ly), lr, (0, 255, 255), 2)
+                cv2.circle(full_img, (lx, ly), 2, (255, 255, 0), 3)
                 
                 # 绘制右兵/卒
                 right_x, right_y, right_r, right_type = combination['pawns'][1]
-                cv2.circle(full_img, (right_x, right_y), right_r, (0, 255, 255), 2)
-                cv2.circle(full_img, (right_x, right_y), 2, (255, 255, 0), 3)
+                rx, ry, rr = int(right_x*retina_scale), int(right_y*retina_scale), int(right_r*retina_scale)
+                cv2.circle(full_img, (rx, ry), rr, (0, 255, 255), 2)
+                cv2.circle(full_img, (rx, ry), 2, (255, 255, 0), 3)
                 
             # 绘制车（如果存在）
             if combination['rooks'] and len(combination['rooks']) >= 2:
                 # 绘制左车
                 left_x, left_y, left_r, left_type = combination['rooks'][0]
-                cv2.circle(full_img, (left_x, left_y), left_r, (255, 0, 255), 2)
-                cv2.circle(full_img, (left_x, left_y), 2, (255, 0, 255), 3)
+                lx, ly, lr = int(left_x*retina_scale), int(left_y*retina_scale), int(left_r*retina_scale)
+                cv2.circle(full_img, (lx, ly), lr, (255, 0, 255), 2)
+                cv2.circle(full_img, (lx, ly), 2, (255, 0, 255), 3)
                 
                 # 绘制右车
                 right_x, right_y, right_r, right_type = combination['rooks'][1]
-                cv2.circle(full_img, (right_x, right_y), right_r, (255, 0, 255), 2)
-                cv2.circle(full_img, (right_x, right_y), 2, (255, 0, 255), 3)
+                rx, ry, rr = int(right_x*retina_scale), int(right_y*retina_scale), int(right_r*retina_scale)
+                cv2.circle(full_img, (rx, ry), rr, (255, 0, 255), 2)
+                cv2.circle(full_img, (rx, ry), 2, (255, 0, 255), 3)
         
         detected_circles_path = app_cache_path("detected_circles.jpg")
         cv2.imwrite(detected_circles_path, full_img)

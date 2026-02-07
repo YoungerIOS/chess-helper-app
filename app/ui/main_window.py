@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 from pynput import mouse
 from app.tools.utils import resource_path
 from app.chess.screenshot import ChessCaptureManager
+from app.chess.board_locator import BoardLocator
 from app.chess.engine import ChessEngine
 from app.chess.checker import PositionChecker
 from app.chess.history import MoveHistory
@@ -79,8 +80,13 @@ class MainWindow(QMainWindow):
         
         # 创建主布局
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(10)  # 减小整体间距
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 计算动态间距 (约为窗口宽度的 1.5%)
+        self.spacing_base = max(5, int(width * 0.015))
+        self.spacing_tight = max(2, int(self.spacing_base * 0.4))
+        
+        main_layout.setSpacing(self.spacing_base * 2)  # 垂直间距稍大
+        main_layout.setContentsMargins(self.spacing_base, self.spacing_base, self.spacing_base, self.spacing_base)
         
         # 初始化上下文
         context.load_config()
@@ -101,38 +107,11 @@ class MainWindow(QMainWindow):
         middle_buttons_layout.setSpacing(5)
         middle_buttons_layout.setContentsMargins(0, 0, 0, 0)  # 移除底部边距，保持与主布局间距一致
         
-        # 创建游戏选择按钮
-        self.game_btn = QPushButton("游戏平台")
-        self.game_btn.setFixedSize(75, 35) 
-        self.game_btn.setFont(QFont("Arial", 11))
-        self.game_btn.setObjectName("secondary")
-        # 加载并设置箭头图标
-        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        # self.game_btn.setIcon(arrow_icon)
-        self.game_btn.setIconSize(QSize(12, 12))
-        # 移除内联样式，使用主题样式表
-        self.game_btn.setStyleSheet("")
-        self.game_btn.clicked.connect(self.show_game_menu)
-        middle_buttons_layout.addWidget(self.game_btn)
         
-        # 创建游戏选择菜单
-        self.game_menu = QMenu(self)
-        self.game_menu.setStyleSheet("")
-        self.jj_action = self.game_menu.addAction("JJ象棋")
-        self.tt_action = self.game_menu.addAction("天天象棋")
-        self.jj_action.setCheckable(True)
-        self.tt_action.setCheckable(True)
-        self.jj_action.triggered.connect(lambda: self.on_game_selected("JJ象棋"))
-        self.tt_action.triggered.connect(lambda: self.on_game_selected("天天象棋"))
-        
-        # 设置初始选中状态
-        if context.platform == "JJ":
-            self.jj_action.setChecked(True)
-        else:
-            self.tt_action.setChecked(True)
+        # 移除游戏选择按钮及菜单
         
         # 创建手动刷新按钮
-        self.manual_refresh_btn = QPushButton("重置")
+        self.manual_refresh_btn = QPushButton("刷新")
         self.manual_refresh_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
         self.manual_refresh_btn.setFont(QFont("Arial", 11))
         self.manual_refresh_btn.setObjectName("secondary")
@@ -168,22 +147,22 @@ class MainWindow(QMainWindow):
         
         # 底部控制区域
         control_layout = QHBoxLayout()
-        control_layout.setSpacing(5)
+        control_layout.setSpacing(self.spacing_base)
         control_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
         
         # 创建退出按钮
         self.exit_btn = QPushButton("退出")
-        self.exit_btn.setMinimumHeight(35)
+        self.exit_btn.setFixedHeight(35)
         self.exit_btn.setFont(QFont("Arial", 11))
         self.exit_btn.setObjectName("exitBtn")
         # 移除内联样式，使用主题样式表
         self.exit_btn.setStyleSheet("")
         self.exit_btn.clicked.connect(self.on_exit)
-        control_layout.addWidget(self.exit_btn)
+        control_layout.addWidget(self.exit_btn, 1)  # Stretch factor 1
         
         # 创建棋盘定位按钮 - 改为下拉菜单样式
         self.board_btn = QPushButton("软件设置")
-        self.board_btn.setFixedSize(75, 35)  
+        self.board_btn.setFixedHeight(35)
         self.board_btn.setFont(QFont("Arial", 11))
         self.board_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
@@ -193,7 +172,7 @@ class MainWindow(QMainWindow):
         # 移除内联样式，使用主题样式表
         self.board_btn.setStyleSheet("")
         self.board_btn.clicked.connect(self.show_board_menu)
-        control_layout.addWidget(self.board_btn)
+        control_layout.addWidget(self.board_btn, 2)  # Stretch factor 2 (Wider)
         
         # 创建棋盘设置菜单
         self.board_menu = QMenu(self)
@@ -208,7 +187,7 @@ class MainWindow(QMainWindow):
         
         # 创建"其他设置"按钮
         self.settings_btn = QPushButton("其他设置") 
-        self.settings_btn.setFixedSize(75, 35)  
+        self.settings_btn.setFixedHeight(35)
         self.settings_btn.setFont(QFont("Arial", 11))
         self.settings_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
@@ -219,7 +198,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setStyleSheet("")
         # 不再使用checkable属性
         self.settings_btn.clicked.connect(self.show_settings_menu)
-        control_layout.addWidget(self.settings_btn)
+        control_layout.addWidget(self.settings_btn, 2)  # Stretch factor 2 (Wider)
         
         # 创建设置菜单
         self.settings_menu = QMenu(self)
@@ -236,8 +215,8 @@ class MainWindow(QMainWindow):
         self.timer_action.triggered.connect(self.toggle_timer)
         
         # 创建参数选择按钮
-        self.param_btn = QPushButton("参数")
-        self.param_btn.setFixedSize(55, 35)  
+        self.param_btn = QPushButton("引擎参数")
+        self.param_btn.setFixedHeight(35)
         self.param_btn.setFont(QFont("Arial", 11))
         self.param_btn.setObjectName("tertiary")
         # 加载并设置箭头图标
@@ -247,7 +226,7 @@ class MainWindow(QMainWindow):
         # 移除内联样式，使用主题样式表
         self.param_btn.setStyleSheet("")
         self.param_btn.clicked.connect(self.show_param_menu)
-        control_layout.addWidget(self.param_btn)
+        control_layout.addWidget(self.param_btn, 2)  # Stretch factor 2 (Wider, same as others)
         
         # 创建参数菜单
         self.param_menu = QMenu(self)
@@ -267,7 +246,7 @@ class MainWindow(QMainWindow):
         
         # 创建参数调整按钮
         param_layout = QHBoxLayout()
-        param_layout.setSpacing(2)
+        param_layout.setSpacing(self.spacing_tight)
         
         self.decrease_btn = QPushButton("−")
         self.decrease_btn.setFixedSize(20, 35) 
@@ -295,7 +274,7 @@ class MainWindow(QMainWindow):
         self.increase_btn.clicked.connect(self.on_increase_param)
         param_layout.addWidget(self.increase_btn)
         
-        control_layout.addLayout(param_layout)
+        control_layout.addLayout(param_layout, 3)  # Stretch factor 3 (Most space for value)
         main_layout.addLayout(control_layout)
         
         # 初始化UI消息队列和定时器（保持一直运行）
@@ -324,6 +303,62 @@ class MainWindow(QMainWindow):
         
         # 初始化图标
         self.update_icons()
+        
+        # 初始化状态
+        self.last_detected_platform = None
+        
+        # 初始化平台检测器
+        self.platform_detector = BoardLocator(context)
+        
+        # 启动时执行一次平台检测（延迟执行以确保窗口完全加载），并强制显示结果，未检测到则开启轮询
+        QTimer.singleShot(100, lambda: self.check_platform_change(notify_always=True, schedule_next=True))
+
+    def check_platform_change(self, notify_always=False, schedule_next=False):
+        """
+        检测当前运行的游戏平台并自动切换
+        Args:
+            notify_always: 是否即使平台未变化也显示通知
+            schedule_next: 如果未检测到，是否调度下一次检测（2秒后）
+        """
+        try:
+            # 1. 尝试查找当前平台窗口
+            current_found = self.platform_detector.find_game_window(context.platform)
+            
+            result = current_found
+            
+            if result:
+                detected_platform = result['platform']
+                platform_display_name = result.get('platform_name', detected_platform)
+                
+                # 更新最后检测到的平台状态
+                self.last_detected_platform = detected_platform
+
+                # 如果检测到的平台与当前上下文不一致，则切换
+                if detected_platform != context.platform:
+                    print(f"Auto-switch platform: {context.platform} -> {detected_platform}")
+                    context.set_platform(detected_platform)
+                    self.update_text(f"自动切换到游戏: {platform_display_name}", MessageType.STATUS)
+                else:
+                     # 即使未变化，也显示当前检测到的平台（因为可能是启动时的确认，或者是轮询成功的通知）
+                     self.update_text(f"检测到游戏: {platform_display_name}", MessageType.STATUS)
+            else:
+                # 情况1: 之前检测到了游戏，现在没了 -> 游戏被关闭
+                if self.last_detected_platform is not None:
+                     self.update_text("游戏窗口已关闭，等待重新启动...", MessageType.ERROR)
+                     self.last_detected_platform = None
+                
+                # 情况2: 强制通知（如启动时或点击开始时）
+                elif notify_always:
+                    self.update_text("未检测到象棋游戏窗口", MessageType.ERROR)
+                    if schedule_next:
+                         print("未检测到象棋游戏窗口，2秒后重试...")
+                
+            # 只要不是正在运行状态，且要求调度，就继续轮询（允许用户先开一个游戏再换另一个）
+            if schedule_next and not self.is_running:
+                QTimer.singleShot(2000, lambda: self.check_platform_change(notify_always=False, schedule_next=True))
+                    
+        except Exception as e:
+            print(f"自动检测平台失败: {e}")
 
     
     def on_engine_param_changed(self, param):
@@ -373,6 +408,9 @@ class MainWindow(QMainWindow):
     def on_start(self):
         """开始/停止按钮事件"""
         if not self.is_running:
+            # 点击开始时，再次确认一下平台并显示结果 (不需要轮询)
+            self.check_platform_change(notify_always=True, schedule_next=False)
+            
             self.is_running = True
             self.start_btn.setText("停止")
             self.create_queue()
