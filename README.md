@@ -48,9 +48,11 @@
 -   下载安装客户端dmg文件
 
 ### 自行编译
--   若有兴趣和技术能力，可以参考Pikafish开源引擎文档，自行编译所需硬件平台的引擎文件：https://github.com/official-pikafish/Pikafish
--   将引擎文件中的src目录放入本项目`chess-helper-app/app/Pikafish`目录下，运行`python3 -m app.main`即可使用
--   使用pyinstaller 打包客户端
+-   若有兴趣和技术能力，可以参考Pikafish开源引擎文档，自行编译Windows平台的引擎文件：https://github.com/official-pikafish/Pikafish
+-   将编译好的引擎文件中的src目录放入本项目`chess-helper-app/app/Pikafish`目录下
+-   下载本项目，安装依赖，执行`pip install -r requirements.txt`
+-   运行`python app/main.py`即可使用
+-   如有需要，可以使用`pyinstaller ChessHelper.spec --noconfirm`打包客户端
 
 ---
 
