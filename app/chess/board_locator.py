@@ -125,6 +125,8 @@ class BoardLocator:
                     bounds = win.get('kCGWindowBounds', {})
                     matches.append({
                         "title": title,
+                        "pid": win.get('kCGWindowOwnerPID'),
+                        "window_id": win.get('kCGWindowNumber'),
                         "bounds": (
                             bounds.get('X'),
                             bounds.get('Y'),
@@ -230,6 +232,8 @@ class BoardLocator:
             'platform': p,
             'platform_name': self.game_titles[p][0], # 使用配置的第一个标题作为显示名称
             'title': match['title'],
+            'pid': match.get('pid'),
+            'window_id': match.get('window_id'),
             'region': {
                 'left': int(x),
                 'top': int(y),
@@ -1283,5 +1287,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"检测完成，耗时: {end_time - start_time:.2f}秒")
     print("棋盘坐标：", board_pos)
-
 

@@ -14,22 +14,47 @@ logger = get_logger(__name__)
 class ChessEngine:
     """中国象棋引擎类，封装了与Pikafish引擎的交互"""
     
-    def __init__(self, engine_path: str = None, threads: int = 4, hash_size: int = 256):
+    def __init__(
+        self,
+        engine_path: Optional[str] = None,
+        threads: Optional[int] = None,
+        hash_size: Optional[int] = None,
+    ):
         """
         初始化象棋引擎
         
         Args:
             engine_path: 引擎可执行文件路径，如果为None则使用默认路径
-            threads: 引擎使用的线程数
-            hash_size: 引擎哈希表大小(MB)
+            threads: 引擎使用的线程数；为None时从配置读取
+            hash_size: 引擎哈希表大小(MB)；为None时从配置读取
         """
+        engine_params = context.get_engine_params()
         self.engine_path = engine_path or self._get_default_engine_path()
-        self.threads = threads
-        self.hash_size = hash_size
+        self.threads = self._parse_option(
+            threads if threads is not None else engine_params.get('threads'),
+            default=8,
+            minimum=1,
+            maximum=128,
+        )
+        self.hash_size = self._parse_option(
+            hash_size if hash_size is not None else engine_params.get('hash'),
+            default=256,
+            minimum=16,
+            maximum=32768,
+        )
         self.process: Optional[subprocess.Popen] = None
         self.lock = threading.Lock()
         self.analysis_lock = threading.Lock()
         self.is_initialized = False
+
+    @staticmethod
+    def _parse_option(value, default: int, minimum: int, maximum: int) -> int:
+        """解析并限制引擎整数参数，避免损坏的配置导致引擎启动失败。"""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
         
     def _get_default_engine_path(self) -> str:
         """获取默认引擎路径"""
@@ -94,10 +119,42 @@ class ChessEngine:
         
         self._send_command(f'setoption name Threads value {self.threads}')
         self._send_command(f'setoption name Hash value {self.hash_size}')
+        logger.info(
+            f"Pikafish配置: Threads={self.threads}, Hash={self.hash_size}MB"
+        )
         time.sleep(0.2)
         
         self._send_command('isready')
         self._wait_for_response('readyok', timeout=1)
+
+    def set_threads(self, threads: int) -> bool:
+        """安全地更新线程数；引擎未运行时只更新实例配置。"""
+        new_threads = self._parse_option(
+            threads,
+            default=self.threads,
+            minimum=1,
+            maximum=128,
+        )
+
+        # Pikafish不应在搜索过程中修改Threads。等待当前分析结束，同时
+        # 使用生命周期锁避免与start/quit并发操作进程。
+        with self.analysis_lock:
+            with self.lock:
+                self.threads = new_threads
+                if (
+                    not self.is_initialized
+                    or self.process is None
+                    or self.process.poll() is not None
+                ):
+                    return False
+
+                self._send_command(f'setoption name Threads value {self.threads}')
+                self._send_command('isready')
+                responses = self._wait_for_response('readyok', timeout=3)
+                applied = any('readyok' in line for line in responses)
+                if applied:
+                    logger.info(f"Pikafish线程数已更新: Threads={self.threads}")
+                return applied
     
     def quit(self):
         """停止引擎"""
@@ -185,14 +242,48 @@ class ChessEngine:
                 cmd += f" moves {moves}"
         self._send_command(cmd)
 
-    def _go(self, param: str, value: str) -> Tuple[List[str], str, List[dict]]:
+    def _go(self, param: str, value: str, timeout: float = 35) -> Tuple[List[str], str, List[dict]]:
         """
         发送go命令和读取结果
         """
         self._send_command(f"go {param} {value}")
-        return self._read_output_with_timeout(35)
+        return self._read_output_with_timeout(timeout)
 
-    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1) -> Tuple[str, str, List[str]]:
+    @staticmethod
+    def resolve_search_limit(engine_params, depth_bonus=0):
+        """解析本次搜索条件，并仅在固定深度模式应用吃子加成。"""
+        param = engine_params.get('goParam', 'depth')
+        value = engine_params.get(param, '20')
+        if not param or not value:
+            param, value = 'depth', '20'
+
+        if param == 'depth':
+            try:
+                base_depth = int(value)
+                bonus = max(0, int(depth_bonus))
+            except (TypeError, ValueError):
+                base_depth, bonus = 20, 0
+            value = str(min(200, max(1, base_depth + bonus)))
+        return param, str(value)
+
+    def get_search_timeout(self, depth_bonus=0):
+        """根据有效搜索条件给固定深度残局保留足够的安全时间。"""
+        param, value = self.resolve_search_limit(
+            context.get_engine_params(),
+            depth_bonus,
+        )
+        if param == 'movetime':
+            try:
+                return max(35.0, int(value) / 1000.0 + 10.0)
+            except (TypeError, ValueError):
+                return 35.0
+        try:
+            depth = int(value)
+        except (TypeError, ValueError):
+            depth = 20
+        return min(300.0, max(35.0, 35.0 + max(0, depth - 25) * 15.0))
+
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1, depth_bonus: int = 0) -> Tuple[str, str, List[str]]:
         """获取最佳走法
         Returns:
             (best_move, fen_string, pvs_list)
@@ -221,20 +312,20 @@ class ChessEngine:
             if fen:
                 fen_string = fen + ' ' + ('w' if side else 'b')
             engine_params = context.get_engine_params()
-            param = engine_params.get('goParam', 'depth')
-            value = engine_params.get(param, '20')
-            if not param or not value:
-                param = 'depth'
-                value = '20'
+            param, value = self.resolve_search_limit(engine_params, depth_bonus)
+            search_timeout = self.get_search_timeout(depth_bonus)
 
             if display_callback:
-                display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))
+                thinking_text = MessageContent.ENGINE_THINKING
+                if param == 'depth' and depth_bonus > 0:
+                    thinking_text = f"引擎正在计算（深度 {value}）..."
+                display_callback(Message(MessageType.STATUS, thinking_text))
 
             if is_newgame:
                 self.new_game()
 
             self._position(fen_string, use_startpos=use_startpos, moves=moves)
-            lines, best_move, pvs = self._go(param, value)
+            lines, best_move, pvs = self._go(param, value, search_timeout)
 
             # 恢复 MultiPV 为 1 (以免影响后续正常思考)
             if multipv > 1:
@@ -338,6 +429,3 @@ class ChessEngine:
     def __del__(self):
         """析构函数，确保资源被正确释放"""
         self.quit()
-
-
-

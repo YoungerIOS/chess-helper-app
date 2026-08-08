@@ -75,6 +75,15 @@ def setup_logging():
 # 初始化日志系统
 logger = setup_logging()
 
+DEFAULT_ENGINE_PARAMS = {
+    "movetime": "2000",
+    "depth": "25",
+    "goParam": "movetime",
+    "threads": "8",
+    "hash": "256",
+    "settings_version": "2",
+}
+
 @dataclass
 class Platform:
     """平台配置类，包含平台相关的所有信息"""
@@ -118,8 +127,11 @@ class ChessContext:
     _manual_coords: Optional[tuple] = None  # 手动定位坐标 (x, y, width, height)
     base_fen: Optional[str] = None # 用于历史中断时的锚点FEN (持久化存储)
     analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
+    _analysis_token_lock: Lock = field(default_factory=Lock)
     discard_before_timestamp: float = 0.0  # RETRY时设置，过滤在此时间之前截图的帧
     _theme: str = "light"  # 当前主题
+    _auto_move_enabled: bool = False  # 自动走子默认关闭
+    _capture_depth_enabled: bool = False  # 我方被吃子时动态增加搜索深度
     
     
     def __post_init__(self):
@@ -158,11 +170,21 @@ class ChessContext:
             
             # 加载引擎参数
             with self._engine_params_lock:
-                self._engine_params = config.get('engine_params', {
-                    "movetime": "3000",
-                    "depth": "20",
-                    "goParam": "depth"
-                }).copy()
+                # 合并默认值，让旧配置自动获得新增的 threads/hash 参数。
+                saved_engine_params = config.get('engine_params', {})
+                if saved_engine_params.get("settings_version") != "2":
+                    # v2新增线程调节控件，并采用本机实测后的平衡配置。
+                    saved_engine_params = {
+                        **saved_engine_params,
+                        "movetime": "2000",
+                        "goParam": "movetime",
+                        "threads": "8",
+                        "settings_version": "2",
+                    }
+                self._engine_params = {
+                    **DEFAULT_ENGINE_PARAMS,
+                    **saved_engine_params
+                }
             
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
@@ -171,6 +193,11 @@ class ChessContext:
             # 设置分析模式
             self._analysis_mode = config.get('analysis_mode', 'timer')
             logger.info(f"分析模式设置为: {self._analysis_mode}")
+
+            self._auto_move_enabled = bool(config.get('auto_move_enabled', False))
+            logger.info(f"自动走子设置为: {self._auto_move_enabled}")
+            self._capture_depth_enabled = bool(config.get('capture_depth_enabled', False))
+            logger.info(f"被吃子加深设置为: {self._capture_depth_enabled}")
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
@@ -203,13 +230,11 @@ class ChessContext:
                 )
             }
             with self._engine_params_lock:
-                self._engine_params = {
-                    "movetime": "3000",
-                    "depth": "20",
-                    "goParam": "depth"
-                }.copy()
+                self._engine_params = DEFAULT_ENGINE_PARAMS.copy()
             self.platform = "TT"
             self._analysis_mode = "timer"
+            self._auto_move_enabled = False
+            self._capture_depth_enabled = False
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
@@ -231,6 +256,8 @@ class ChessContext:
             # 添加其他配置
             config['platform'] = self.platform
             config['analysis_mode'] = self._analysis_mode
+            config['auto_move_enabled'] = self._auto_move_enabled
+            config['capture_depth_enabled'] = self._capture_depth_enabled
     
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
@@ -311,6 +338,36 @@ class ChessContext:
     def analysis_mode(self, mode: str):
         self._analysis_mode = mode
         self.save_config()  # 保存配置
+
+    @property
+    def auto_move_enabled(self) -> bool:
+        return self._auto_move_enabled
+
+    @auto_move_enabled.setter
+    def auto_move_enabled(self, enabled: bool) -> None:
+        self._auto_move_enabled = bool(enabled)
+        self.save_config()
+
+    @property
+    def capture_depth_enabled(self) -> bool:
+        return self._capture_depth_enabled
+
+    @capture_depth_enabled.setter
+    def capture_depth_enabled(self, enabled: bool) -> None:
+        self._capture_depth_enabled = bool(enabled)
+        self.save_config()
+
+    def next_analysis_token(self) -> int:
+        with self._analysis_token_lock:
+            self.analysis_token += 1
+            return self.analysis_token
+
+    def invalidate_analysis(self) -> int:
+        return self.next_analysis_token()
+
+    def is_analysis_token_current(self, token: int) -> bool:
+        with self._analysis_token_lock:
+            return token == self.analysis_token
     
 
     
@@ -428,4 +485,4 @@ def get_context():
     return _context_instance
 
 # 为了向后兼容，保留context变量
-context = get_context() 
+context = get_context()

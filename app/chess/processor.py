@@ -179,19 +179,45 @@ class ChessProcess:
             return self._handle_my_move(state)
         # 6. 对手走棋
         elif status.is_opponent_step:
+            if self.context.capture_depth_enabled:
+                captured_piece = status.step_info.get('captured_piece')
+                if self.checker.record_own_piece_captured(captured_piece):
+                    self._publish_capture_depth_update(captured_piece)
             return self._handle_opponent_move(state, callback)
 
         # 7. 新对局(注意: 新对局不是指初始局面)
         if status.is_new_game:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             self._handle_new_game()
         # 8. 红方开局
         if status.is_red_start:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             return self._handle_red_start(state, callback)            
         # 9. 黑方开局
         if status.is_black_start:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             return self._handle_black_start(state)
 
         return BoardAnalysisState()
+
+    def _publish_capture_depth_update(self, captured_piece=None):
+        """通知UI刷新基础深度与本局动态加成。"""
+        engine_params = self.context.get_engine_params()
+        try:
+            base_depth = int(engine_params.get('depth', 20))
+        except (TypeError, ValueError):
+            base_depth = 20
+        bonus = self.checker.capture_depth_bonus
+        message_bus.publish(Message(
+            MessageType.PARAM_UPDATE,
+            base_depth + bonus,
+            base_depth=base_depth,
+            depth_bonus=bonus,
+            captured_piece=captured_piece,
+        ))
 
     def _handle_red_start(self, state, callback):
         # 处理红方开局
@@ -355,12 +381,22 @@ class ChessProcess:
             fen_str, all_moves, state, callback
         )
 
-    def _get_engine_move(self, fen_str, moves, state, callback, is_newgame_override=False) -> BoardAnalysisState:
+    def _get_engine_move(self, fen_str, moves, state, callback, is_newgame_override=False, desync_retry=0) -> BoardAnalysisState:
         # 获取引擎着法 (异步多线程版)
+        analysis_token = self.context.next_analysis_token()
+
+        # 后台分析必须使用不可变快照，避免后续识别帧覆盖转换所用棋盘。
+        analysis_board = (
+            [row[:] for row in state.board_array]
+            if state.board_array else None
+        )
         
         # 2. 保存当前状态供"变招"使用
         self.checker.last_fen_str = fen_str
-        self.checker.last_board_array_for_engine = state.board_array
+        self.checker.last_board_array_for_engine = (
+            [row[:] for row in analysis_board]
+            if analysis_board else None
+        )
         
         # 3. 准备参数
         # [Engine Correction] 
@@ -383,19 +419,25 @@ class ChessProcess:
         # 局面不连续时（强制同步、历史重置等），必须发送 newgame 命令
         is_newgame = is_newgame_override or state.board_status.is_new_game
         is_red = self.checker.is_red
+        depth_bonus = (
+            self.checker.capture_depth_bonus
+            if self.context.capture_depth_enabled else 0
+        )
         
         # [DEBUG] 追踪关键状态
         logger.debug(f"Analysis Context: IsNewGame={is_newgame}, IsRed={is_red}")
         logger.debug(f"  EngineFEN: {engine_fen if engine_fen else 'startpos'}")
         logger.debug(f"  VerifyFEN: {verify_fen}")
         logger.debug(f"  Moves: {moves}")
+        logger.debug(f"  CaptureDepthBonus: {depth_bonus}")
         
         # 4. 定义后台任务
         def run_analysis():
             try:
                 # [Watchdog] 启动看门狗定时器，防止引擎计算超时卡死
-                # 设定30秒超时（比引擎内部35秒超时提前5秒panic）
-                watchdog_timer = threading.Timer(30.0, self.engine.stop_analysis)
+                # 固定深度加深时同步延长安全上限，最高允许5分钟。
+                watchdog_timeout = self.engine.get_search_timeout(depth_bonus)
+                watchdog_timer = threading.Timer(watchdog_timeout, self.engine.stop_analysis)
                 watchdog_timer.start()
                 
                 try:
@@ -407,13 +449,18 @@ class ChessProcess:
                         use_startpos=use_startpos,
                         is_newgame=is_newgame, 
                         moves=moves,
-                        multipv=1 
+                        multipv=1,
+                        depth_bonus=depth_bonus,
                     )
                 finally:
                     # 无论成功或异常，必须取消定时器
                     watchdog_timer.cancel()
                 
                 # 存储备选着法
+                if not self.context.is_analysis_token_current(analysis_token):
+                    logger.debug(f"忽略过期引擎结果: token={analysis_token}, move={move}")
+                    return
+
                 self.checker.last_pvs = pvs
                 
                 # 检查着法有效性
@@ -423,14 +470,22 @@ class ChessProcess:
                     return
                 
                 # 转换并推送结果
-                chinese_move = utils.convert_move_to_chinese(move, self.checker.last_board_array_for_engine, is_red)
+                chinese_move = utils.convert_move_to_chinese(move, analysis_board, is_red)
                 
-                # 如果着法无效（起点无棋子或是对方棋子），跳过推送
+                # 引擎局面与视觉局面漂移时，自动以当前FEN重新锚定并重算。
                 if chinese_move is None:
                     logger.warning(f"着法转换失败(无效/非法): {move} on board_fen={verify_fen}")
+                    self._recover_from_engine_desync(
+                        move=move,
+                        state=state,
+                        analysis_board=analysis_board,
+                        callback=callback,
+                        desync_retry=desync_retry,
+                    )
                     return
                 
                 logger.debug(f"Engine Analysis Done: {move}")
+                self.checker.consecutive_mismatches = 0
                 
                 # 检查是否已在结算画面
                 if self.checker.in_settlement_screen:
@@ -438,7 +493,13 @@ class ChessProcess:
                     return
 
                 message_bus.publish(Message(MessageType.MOVE_TEXT, chinese_move))
-                message_bus.publish(Message(MessageType.MOVE_CODE, move, is_red=is_red))
+                message_bus.publish(Message(
+                    MessageType.MOVE_CODE,
+                    move,
+                    is_red=is_red,
+                    analysis_token=analysis_token,
+                    auto_execute=True,
+                ))
                 message_bus.publish(Message(MessageType.STATUS, "推荐走法："))
                 
             except Exception as e:
@@ -450,6 +511,73 @@ class ChessProcess:
         analysis_thread.start()
         
         return BoardAnalysisState()
+
+    def _recover_from_engine_desync(
+        self,
+        *,
+        move,
+        state,
+        analysis_board,
+        callback,
+        desync_retry,
+    ):
+        """恢复引擎历史与视觉棋盘不一致，避免相同局面永久卡住。"""
+        if not analysis_board:
+            message_bus.publish(Message(
+                MessageType.ERROR,
+                "引擎局面不同步且缺少棋盘快照，正在自动刷新",
+            ))
+            self.context.discard_before_timestamp = time.time()
+            message_bus.publish(Message(MessageType.RETRY_CAPTURE, "引擎局面不同步"))
+            return
+
+        current_fen, _ = utils.convert_array_to_fen(
+            analysis_board,
+            self.checker.is_red,
+        )
+        if desync_retry < 1:
+            logger.warning(
+                f"自动重同步引擎局面: invalid_move={move}, anchor={current_fen}"
+            )
+            self.history.clear()
+            self.context.base_fen = current_fen
+            self.checker.force_sync_board(analysis_board)
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "检测到引擎局面漂移，正在自动重新同步...",
+            ))
+            self._get_engine_move(
+                current_fen,
+                "",
+                state,
+                callback,
+                is_newgame_override=True,
+                desync_retry=desync_retry + 1,
+            )
+            return
+
+        # 当前FEN重算仍失败：执行与手动刷新等价的硬恢复，再由重试截图
+        # 流程重新建立棋盘与历史。保留本局动态深度加成。
+        logger.error(
+            f"当前FEN重算仍返回非法着法: {move}; 执行自动硬刷新"
+        )
+        preserved_depth_bonus = self.checker.capture_depth_bonus
+        self.context.invalidate_analysis()
+        self.engine.stop_analysis()
+        self.history.clear()
+        self.context.base_fen = None
+        self.context.reset_checker()
+        self.checker.capture_depth_bonus = preserved_depth_bonus
+        self.context.reset_recognizer()
+        self.context.discard_before_timestamp = time.time()
+        message_bus.publish(Message(
+            MessageType.ERROR,
+            "引擎局面同步失败，已自动刷新并重新识别",
+        ))
+        message_bus.publish(Message(
+            MessageType.RETRY_CAPTURE,
+            "引擎局面同步失败，自动硬刷新",
+        ))
 
     def request_alternative_move(self):
         """
@@ -476,7 +604,11 @@ class ChessProcess:
                 None, 
                 use_startpos=(self.context.base_fen is None), 
                 moves=all_moves,
-                multipv=2
+                multipv=2,
+                depth_bonus=(
+                    self.checker.capture_depth_bonus
+                    if self.context.capture_depth_enabled else 0
+                ),
              )
              
              # 获取第二好的着法

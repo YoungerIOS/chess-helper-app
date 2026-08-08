@@ -74,6 +74,7 @@ class PositionChecker:
         self.consecutive_drops = 0 # 连续丢帧重拍计数(防卡死)
         self.consecutive_mismatches = 0 # 连续历史校验不一致计数
         self.in_settlement_screen = False  # 是否处于结算画面状态
+        self.capture_depth_bonus = 0  # 本局我方被吃棋子带来的额外搜索深度
         
         # 优化：模拟状态缓存
         self._sim_cache = {
@@ -94,6 +95,7 @@ class PositionChecker:
         self.consecutive_drops = 0
         self.consecutive_mismatches = 0
         self.in_settlement_screen = False  # 重置结算状态
+        self.capture_depth_bonus = 0
         
         # 清空备份
         self._backup_last_board = None 
@@ -101,6 +103,22 @@ class PositionChecker:
 
         # 清空缓存
         self._sim_cache = { 'base_fen': None, 'moves_str': None, 'board': None }
+
+    def reset_capture_depth_bonus(self):
+        self.capture_depth_bonus = 0
+
+    def record_own_piece_captured(self, captured_piece):
+        """记录一次经过合法走子校验的我方损子。"""
+        if not captured_piece or captured_piece == '-':
+            return False
+        captured_is_red = captured_piece.isupper()
+        if captured_is_red != bool(self.is_red):
+            return False
+        self.capture_depth_bonus += 1
+        logger.info(
+            f"我方棋子被吃: {captured_piece}, 动态深度加成={self.capture_depth_bonus}"
+        )
+        return True
     
     def check_settlement(self, board_array, is_massive_change):
         """
@@ -158,6 +176,7 @@ class PositionChecker:
         # 获取当前棋子数量统计（忽略合法性检查结果，只取计数）
         _, _, self.last_counts = self.check_pieces_count(board_array)
         self.consecutive_drops = 0
+        self._sim_cache = { 'base_fen': None, 'moves_str': None, 'board': None }
         logger.debug("检查器状态已重置 (Force Sync)")
 
     def update_side_detection(self, board_array):

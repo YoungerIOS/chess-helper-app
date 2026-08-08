@@ -18,10 +18,12 @@ from app.chess.message_bus import message_bus
 from app.chess.context import context
 from app.ui.board_display import BoardDisplay
 from app.chess.processor import ChessProcess
+from app.chess.auto_mover import AutoMoveController
 from app.themes.theme_manager import ThemeManager
 
 class MainWindow(QMainWindow):
     resume_polling_signal = Signal()  # 定义信号用于在主线程恢复轮询
+    engine_threads_applied_signal = Signal(int, bool, str)
 
 
     def __init__(self):
@@ -95,6 +97,7 @@ class MainWindow(QMainWindow):
         
         # 连接信号与槽
         self.resume_polling_signal.connect(lambda: self.check_platform_change(notify_always=False, schedule_next=True))
+        self.engine_threads_applied_signal.connect(self.on_engine_threads_applied)
         
         # 顶部文本显示区域
         self.text_display = QLabel()
@@ -217,6 +220,17 @@ class MainWindow(QMainWindow):
         self.timer_action.setChecked(context.analysis_mode == "timer")  # 根据配置设置初始状态
         self.continuous_action.triggered.connect(self.toggle_continuous)
         self.timer_action.triggered.connect(self.toggle_timer)
+
+        self.settings_menu.addSeparator()
+        self.auto_move_action = self.settings_menu.addAction("自动走子")
+        self.auto_move_action.setCheckable(True)
+        self.auto_move_action.setChecked(context.auto_move_enabled)
+        self.auto_move_action.triggered.connect(self.toggle_auto_move)
+
+        self.capture_depth_action = self.settings_menu.addAction("被吃子时深度 +1")
+        self.capture_depth_action.setCheckable(True)
+        self.capture_depth_action.setChecked(context.capture_depth_enabled)
+        self.capture_depth_action.triggered.connect(self.toggle_capture_depth)
         
         # 创建参数选择按钮
         self.param_btn = QPushButton("引擎参数")
@@ -237,16 +251,21 @@ class MainWindow(QMainWindow):
         self.param_menu.setStyleSheet("")
         self.depth_action = self.param_menu.addAction("depth")
         self.movetime_action = self.param_menu.addAction("movetime")
+        self.param_menu.addSeparator()
+        self.threads_action = self.param_menu.addAction("线程数量")
         self.depth_action.setCheckable(True)
         self.movetime_action.setCheckable(True)
+        self.threads_action.setCheckable(True)
         self.depth_action.triggered.connect(lambda: self.on_param_selected("depth"))
         self.movetime_action.triggered.connect(lambda: self.on_param_selected("movetime"))
+        self.threads_action.triggered.connect(lambda: self.on_param_selected("threads"))
         
         # 设置初始选中状态
         if self.engine_params["goParam"] == "depth":
             self.depth_action.setChecked(True)
         else:
             self.movetime_action.setChecked(True)
+        self.selected_engine_param = self.engine_params["goParam"]
         
         # 创建参数调整按钮
         param_layout = QHBoxLayout()
@@ -313,6 +332,14 @@ class MainWindow(QMainWindow):
         
         # 初始化平台检测器
         self.platform_detector = BoardLocator(context)
+
+        # 自动走子控制器：只在主选着法消息到达后执行，默认关闭。
+        self.auto_mover = AutoMoveController(
+            context,
+            window_provider=lambda: self.platform_detector.find_game_window(context.platform),
+            can_execute=lambda: self.is_running and not self.is_stopping,
+            result_callback=self.on_auto_move_result,
+        )
         
         # 启动时执行一次平台检测（延迟执行以确保窗口完全加载），并强制显示结果，未检测到则开启轮询
         QTimer.singleShot(100, lambda: self.check_platform_change(notify_always=True, schedule_next=True))
@@ -368,47 +395,88 @@ class MainWindow(QMainWindow):
     
     def on_engine_param_changed(self, param):
         """处理引擎参数改变"""
-        self.engine_params["goParam"] = param
-        self.param_label.setText(self.engine_params[param])
-        context.update_engine_params(self.engine_params)
+        self.on_param_selected(param)
 
     def on_increase_param(self):
         """增加参数值"""
         # 获取当前参数
         engine_params = context.get_engine_params()
-        key = engine_params["goParam"]
+        key = self.selected_engine_param
         param_value = int(engine_params[key])
         
         if key == "depth" and param_value < 200:
             param_value += 1
         elif key == "movetime" and param_value < 20000:
             param_value += 2000
+        elif key == "threads":
+            param_value = min(param_value + 1, max(1, os.cpu_count() or 1))
         
         # 更新参数
         engine_params[key] = str(param_value)
         context.update_engine_params(engine_params)
+        self.engine_params = engine_params
         
         # 更新显示
-        self.param_label.setText(str(param_value))
+        self.refresh_engine_param_label()
+        if key == "threads":
+            self.apply_engine_threads(param_value)
 
     def on_decrease_param(self):
         """减少参数值"""
         # 获取当前参数
         engine_params = context.get_engine_params()
-        key = engine_params["goParam"]
+        key = self.selected_engine_param
         param_value = int(engine_params[key])
         
         if key == "depth" and param_value > 1:
             param_value -= 1
         elif key == "movetime" and param_value > 2000:
             param_value -= 2000
+        elif key == "threads":
+            param_value = max(1, param_value - 1)
         
         # 更新参数
         engine_params[key] = str(param_value)
         context.update_engine_params(engine_params)
+        self.engine_params = engine_params
         
         # 更新显示
-        self.param_label.setText(str(param_value))
+        self.refresh_engine_param_label()
+        if key == "threads":
+            self.apply_engine_threads(param_value)
+
+    def apply_engine_threads(self, threads: int):
+        """异步应用线程数，防止等待当前搜索结束时阻塞界面。"""
+        engine = context.get_engine()
+        if engine is None or not engine.is_initialized:
+            self.update_text(
+                f"线程数量已设为 {threads}，启动引擎后生效",
+                MessageType.STATUS,
+            )
+            return
+
+        def worker():
+            try:
+                # 多次快速点击时，以持久化配置中的最终值为准。
+                latest = int(context.get_engine_params().get("threads", threads))
+                applied = engine.set_threads(latest)
+                self.engine_threads_applied_signal.emit(latest, applied, "")
+            except Exception as exc:
+                self.engine_threads_applied_signal.emit(threads, False, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_engine_threads_applied(self, threads: int, applied: bool, error: str):
+        """在Qt主线程显示线程配置结果。"""
+        if error:
+            self.update_text(f"线程数量调整失败: {error}", MessageType.ERROR)
+        elif applied:
+            self.update_text(f"引擎线程数量已调整为 {threads}", MessageType.STATUS)
+        else:
+            self.update_text(
+                f"线程数量已设为 {threads}，下次启动引擎后生效",
+                MessageType.STATUS,
+            )
 
     def on_start(self):
         """开始/停止按钮事件"""
@@ -427,6 +495,9 @@ class MainWindow(QMainWindow):
         if self.is_stopping: 
             return
         self.is_stopping = True
+        context.invalidate_analysis()
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
         # 立即更新UI状态
         self.is_running = False
         self.start_btn.setText("开始")
@@ -514,6 +585,16 @@ class MainWindow(QMainWindow):
                 elif result.type == MessageType.MOVE_CODE:
                     # 更新着法箭头
                     self.board_display.update_arrow(result.content, result.kwargs['is_red'])
+                    if (
+                        result.kwargs.get('auto_execute') and
+                        context.auto_move_enabled and
+                        hasattr(self, 'auto_mover')
+                    ):
+                        self.auto_mover.schedule(
+                            result.content,
+                            result.kwargs['is_red'],
+                            result.kwargs.get('analysis_token'),
+                        )
                 elif result.type == MessageType.MOVE_TEXT:
                     # 显示着法文本
                     self.update_text(result.content, result.type)
@@ -527,6 +608,9 @@ class MainWindow(QMainWindow):
                     # 非棋局画面：清空棋盘并显示提示
                     self.board_display.clear_board()
                     self.update_text(result.content, MessageType.STATUS)
+                elif result.type == MessageType.PARAM_UPDATE:
+                    # 棋子被吃或新局重置后，刷新动态有效深度。
+                    self.refresh_engine_param_label()
     
     def close_queue(self):
         """销毁截图线程"""
@@ -735,6 +819,62 @@ class MainWindow(QMainWindow):
         context.analysis_mode = "timer"
         context.save_config()
 
+    def toggle_auto_move(self, checked=None):
+        """启用或关闭自动走子；关闭时立即取消尚未执行的任务。"""
+        enabled = self.auto_move_action.isChecked() if checked is None else bool(checked)
+        self.auto_move_action.setChecked(enabled)
+        context.auto_move_enabled = enabled
+        if not enabled and hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
+        message = "自动走子已开启（下一次推荐生效）" if enabled else "自动走子已关闭"
+        self.update_text(message, MessageType.STATUS)
+
+    def toggle_capture_depth(self, checked=None):
+        """切换我方被吃棋子后的动态搜索加深。"""
+        enabled = (
+            self.capture_depth_action.isChecked()
+            if checked is None else bool(checked)
+        )
+        self.capture_depth_action.setChecked(enabled)
+        context.capture_depth_enabled = enabled
+        checker = context.get_checker()
+        if checker is not None:
+            checker.reset_capture_depth_bonus()
+        self.refresh_engine_param_label()
+        message = (
+            "被吃子加深已开启（本局从0重新计数）"
+            if enabled else "被吃子加深已关闭"
+        )
+        self.update_text(message, MessageType.STATUS)
+
+    def refresh_engine_param_label(self):
+        """显示当前参数；固定深度模式同时显示本局吃子加成。"""
+        if not hasattr(self, 'param_label') or not hasattr(self, 'selected_engine_param'):
+            return
+        engine_params = context.get_engine_params()
+        key = self.selected_engine_param
+        if key != 'depth':
+            self.param_label.setText(str(engine_params.get(key, '')))
+            return
+
+        try:
+            base_depth = int(engine_params.get('depth', 20))
+        except (TypeError, ValueError):
+            base_depth = 20
+        checker = context.get_checker()
+        bonus = 0
+        if context.capture_depth_enabled and checker is not None:
+            bonus = max(0, int(getattr(checker, 'capture_depth_bonus', 0)))
+        if bonus:
+            self.param_label.setText(f"{base_depth}+{bonus}={base_depth + bonus}")
+        else:
+            self.param_label.setText(str(base_depth))
+
+    def on_auto_move_result(self, success, message):
+        """由自动走子后台线程通过消息队列更新界面。"""
+        message_type = MessageType.STATUS if success else MessageType.ERROR
+        message_bus.publish(Message(message_type, message))
+
     def on_reposition(self):
         """处理重新定位选项"""
         # 手动定位前先停止当前运行的任务
@@ -781,6 +921,10 @@ class MainWindow(QMainWindow):
     def on_change_move(self):
         """请求变招"""
         try:
+             # 用户请求变招时，取消可能尚未落子的首选着法。
+             context.invalidate_analysis()
+             if hasattr(self, 'auto_mover'):
+                 self.auto_mover.cancel_pending()
              # 创建临时的 Processor 实例来处理请求
              # 注意：状态（checker, history）是共享的，所以可以这样做
              process = ChessProcess.from_context(context)
@@ -803,10 +947,14 @@ class MainWindow(QMainWindow):
         # 更新选中状态
         self.depth_action.setChecked(param == "depth")
         self.movetime_action.setChecked(param == "movetime")
+        self.threads_action.setChecked(param == "threads")
         
-        self.engine_params["goParam"] = param
-        self.param_label.setText(self.engine_params[param])
-        context.update_engine_params(self.engine_params)
+        self.selected_engine_param = param
+        self.engine_params = context.get_engine_params()
+        if param in ("depth", "movetime"):
+            self.engine_params["goParam"] = param
+            context.update_engine_params(self.engine_params)
+        self.refresh_engine_param_label()
 
     def show_board_menu(self):
         """显示棋盘定位菜单"""
@@ -847,6 +995,9 @@ class MainWindow(QMainWindow):
     
     def on_exit(self):
         """优雅安全规范地退出程序"""
+        context.invalidate_analysis()
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
         # 停止所有线程和监听器
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
@@ -878,6 +1029,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时处理"""
+        context.invalidate_analysis()
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
         # 停止所有线程和监听器
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
