@@ -119,17 +119,15 @@ class ChessProcess:
             # 处理其他识别错误 （排除错误中的允许情况，然后集中安排重试）
             fatal_errors = []
             for d in details:
-                # 无标记情形，允许新开局帧通过
+                # 标记只用于辅助验证，棋盘变化才是真相源。新版 JJ 的移动
+                # 标记可能短暂消失，因此无标记不能成为丢弃整帧的理由。
                 if d.type == RecognitionErrorType.MARKER_MISSING:
-                     is_start_red = (board_array == self.checker.START_RED)
-                     is_start_black = (board_array == self.checker.START_BLACK)
-                     if is_start_red or is_start_black:
-                         logger.debug("忽视开局无标记警告")
-                         continue  
+                    logger.debug("未检测到移动标记，继续使用棋盘变化判断")
+                    continue
                 
-                # 低置信度情形，已经填充最佳猜测，允许通过，让后续的校验来判断
+                # 低置信度格已回退到上一帧（或空格），允许后续校验处理。
                 if d.type == RecognitionErrorType.LOW_CONFIDENCE:
-                    logger.debug(f"低置信度警告(已填充最佳猜测): {d.message}")
+                    logger.debug(f"低置信度警告(已使用安全回退): {d.message}")
                     continue
                 
                 # 其他所有类型错误 (如 COVERED, UNKNOWN, MARKER_MISSING) ，默认丢帧重试
@@ -614,4 +612,3 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
     threads.append(t)
 
     return threads
-

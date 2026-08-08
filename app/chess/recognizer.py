@@ -163,7 +163,11 @@ class ChessRecognizer:
                     y_radius = (y_array[i] - y_array[i-1]) // 2
                 else:
                     y_radius = min((y_array[i] - y_array[i-1]) // 2, (y_array[i+1] - y_array[i]) // 2)
-                cut_radius = int((x_radius + y_radius) // 2 * 0.95)
+                # JJ 新版棋子外圈和阴影更宽。沿用 0.95 会把过多背景缩进
+                # 80x80 模型输入，黑炮等字形会被误判；稍微收紧后模型能
+                # 聚焦棋子文字。TT 保持原比例，避免改变已有识别效果。
+                crop_scale = 0.85 if self.context.platform == "JJ" else 0.95
+                cut_radius = int((x_radius + y_radius) // 2 * crop_scale)
                 adjusted_center_x = max(cut_radius, min(resized_img.shape[1] - 1 - cut_radius, center_x))
                 adjusted_center_y = max(cut_radius, min(resized_img.shape[0] - 1 - cut_radius, center_y))
                 x1 = adjusted_center_x - cut_radius
@@ -233,7 +237,9 @@ class ChessRecognizer:
                         # 调试：显示非标记的识别结果，帮助排查漏检
                         # print(f"Debug - CNN识别 ({i+1}, {j+1}): {piece_type} conf={confidence:.2f}")
                 else:
-                    # 低置信度：记录错误但仍填入预测结果 (Best Guess)
+                    # 低置信度：记录错误，但不要把不可靠的猜测写入棋盘。
+                    # 有上一帧时保留该格状态；首次识别则维持为空，等待后续
+                    # 稳定帧重新识别。这样可避免一个误判造成非法棋子数量。
                     details.append(RecognitionDetail(
                         type=RecognitionErrorType.LOW_CONFIDENCE,
                         position=(i, j),
@@ -241,9 +247,10 @@ class ChessRecognizer:
                         confidence=confidence,
                         piece_type=piece_type
                     ))
-                    # 仍然填入预测结果,避免棋盘破洞
-                    if piece_type and piece_type not in ['covered', '.']:
-                        pieceArray[i][j] = piece_type
+                    if last_board_array:
+                        pieceArray[i][j] = last_board_array[i][j]
+                    # 不缓存本次不可靠结果，确保下一稳定帧会重新推理该格。
+                    current_grid_hashes[i][j] = None
         else:
             # 全部命中缓存
             # print("Debug - 全局缓存命中，跳过CNN识别")
@@ -388,4 +395,3 @@ class ChessRecognizer:
         except Exception as e:
             logger.error(f"棋子识别过程中出错: {e}")
             return None
-
