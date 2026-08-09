@@ -124,5 +124,6 @@ class ChessSimulation:
         
         # 执行移动 (覆盖)
         piece = board[from_r][from_c]
-        board[to_r][to_c] = piece
+        # 揭棋历史着法的第5位表示暗子移动后揭开的真实棋子。
+        board[to_r][to_c] = uci_move[4] if len(uci_move) >= 5 else piece
         board[from_r][from_c] = '-'

@@ -231,6 +231,12 @@ class MainWindow(QMainWindow):
         self.capture_depth_action.setCheckable(True)
         self.capture_depth_action.setChecked(context.capture_depth_enabled)
         self.capture_depth_action.triggered.connect(self.toggle_capture_depth)
+
+        self.settings_menu.addSeparator()
+        self.jieqi_action = self.settings_menu.addAction("揭棋模式（实验）")
+        self.jieqi_action.setCheckable(True)
+        self.jieqi_action.setChecked(context.game_variant == "jieqi")
+        self.jieqi_action.triggered.connect(self.toggle_jieqi_mode)
         
         # 创建参数选择按钮
         self.param_btn = QPushButton("引擎参数")
@@ -318,6 +324,7 @@ class MainWindow(QMainWindow):
         # 初始化状态
         self.is_running = False
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
+        self._exit_started = False
         self.lines = ["", "", ""]
         self.update_text("等待获取棋局...", MessageType.STATUS)
         
@@ -551,7 +558,7 @@ class MainWindow(QMainWindow):
                     print("引擎启动失败")
                 
                 # 初始化局面检查器和历史记录
-                context.set_checker(PositionChecker())
+                context.set_checker(PositionChecker(variant=context.game_variant))
                 context.history = MoveHistory()
                 
                 # 执行主处理流程（阻塞调用）
@@ -847,6 +854,27 @@ class MainWindow(QMainWindow):
         )
         self.update_text(message, MessageType.STATUS)
 
+    def toggle_jieqi_mode(self, checked=None):
+        """切换普通象棋/揭棋；模式改变后必须重建引擎和棋局状态。"""
+        enabled = self.jieqi_action.isChecked() if checked is None else bool(checked)
+        self.jieqi_action.setChecked(enabled)
+        if self.is_running:
+            self.on_stop()
+        context.invalidate_analysis()
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
+        context.quit_engine()
+        context.history.clear()
+        context.base_fen = None
+        context.reset_checker()
+        context.reset_recognizer()
+        context.game_variant = "jieqi" if enabled else "xiangqi"
+        self.update_text(
+            "已切换到揭棋模式，请从完整新局开始并重新点击开始"
+            if enabled else "已切换到普通象棋模式，请重新点击开始",
+            MessageType.STATUS,
+        )
+
     def refresh_engine_param_label(self):
         """显示当前参数；固定深度模式同时显示本局吃子加成。"""
         if not hasattr(self, 'param_label') or not hasattr(self, 'selected_engine_param'):
@@ -911,7 +939,12 @@ class MainWindow(QMainWindow):
             # 执行一次完整的监控与截图流程
             success = self.capture_manager.manually_capture_once()
             if success:
-                self.update_text("重置数据并重新分析...", MessageType.STATUS)
+                self.update_text(
+                    "正在重新识别当前局面（已保留揭棋历史）..."
+                    if context.game_variant == "jieqi"
+                    else "重置数据并重新分析...",
+                    MessageType.STATUS,
+                )
             else:
                 self.update_text("重置失败", MessageType.ERROR)
         else:
@@ -993,24 +1026,39 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'param_btn'):
             self.param_btn.setIcon(arrow_icon)
     
-    def on_exit(self):
-        """优雅安全规范地退出程序"""
+    def _start_exit_cleanup(self):
+        """启动一次性退出清理，不阻塞Qt主线程。"""
+        if self._exit_started:
+            return
+        self._exit_started = True
         context.invalidate_analysis()
         if hasattr(self, 'auto_mover'):
             self.auto_mover.cancel_pending()
-        # 停止所有线程和监听器
+        if hasattr(self, 'check_timer'):
+            self.check_timer.stop()
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
-
-        self.close_queue()
-        
-        # 完全退出引擎
-        context.quit_engine()
-        
-        # 保存配置
         context.save_config()
-        
-        # 优雅退出
+
+        capture_manager = self.capture_manager
+        self.capture_manager = None
+
+        def cleanup_worker():
+            try:
+                if capture_manager is not None:
+                    capture_manager.stop_capture(timeout=0.8)
+                context.quit_engine(fast=True)
+            except Exception as exc:
+                print(f"退出清理失败: {exc}")
+
+        # 非daemon保证Python会完成子进程清理，但窗口与Qt事件循环可以先
+        # 立即退出，用户不会看到界面卡住。
+        threading.Thread(target=cleanup_worker, daemon=False).start()
+
+    def on_exit(self):
+        """立即关闭窗口，并在后台清理识别线程和引擎。"""
+        self.hide()
+        self._start_exit_cleanup()
         QApplication.quit()
     
     def show_game_menu(self):
@@ -1029,18 +1077,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时处理"""
-        context.invalidate_analysis()
-        if hasattr(self, 'auto_mover'):
-            self.auto_mover.cancel_pending()
-        # 停止所有线程和监听器
-        if hasattr(self, 'manual_positioner'):
-            self.manual_positioner.cleanup()
-        self.close_queue()
-        
-        # 完全退出引擎
-        context.quit_engine()
-        
-        super().closeEvent(event)
+        self.hide()
+        self._start_exit_cleanup()
+        event.accept()
 
 def main():
     app = QApplication(sys.argv)

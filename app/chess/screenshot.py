@@ -16,11 +16,13 @@ logger = get_logger(__name__)
 
 class ChessCaptureManager:
     """象棋捕获管理器类，负责截图、发送识别"""
-    
+
     def __init__(self):
         self.context = context
         self.manual_trigger = False  # 手动触发标志
         self.stop_event = threading.Event() # 整个截图流程的停止事件
+        self._stop_lock = threading.Lock()
+        self._stopped_event = threading.Event()
         self.process_queue = queue.Queue()  # 存放识别任务的队列
         self.result_queue = queue.Queue()   # 存放识别和检查结果的队列
         self.worker_threads = processor.start_process_worker(
@@ -123,41 +125,53 @@ class ChessCaptureManager:
         """开始截图任务"""
         self.stop_event.clear()  # 重置停止事件
         self.last_capture_time = time.time()  # 重置截图时间
-    
-    def stop_capture(self):
-        """停止截图任务"""
-        self.stop_event.set()
-        # 停止工作线程池
-        for _ in range(3):
-            self.process_queue.put("STOP")
-        self.result_queue.put("STOP")
-        for t in self.worker_threads:
-            t.join(timeout=2)
 
-        # 停止重试线程
-        if hasattr(self, 'retry_queue'):
-            self.retry_queue.put("STOP")
-        if hasattr(self, 'retry_thread'):
-            self.retry_thread.join(timeout=2)
+    def stop_capture(self, timeout=1.0):
+        """停止截图任务，所有线程共享一个总等待时间。"""
+        if self._stopped_event.is_set():
+            return
+        with self._stop_lock:
+            if self._stopped_event.is_set():
+                return
 
-        # 停止棋盘定位器
-        if hasattr(self, 'board_locator'):
-            self.board_locator.stop()
-        # 停止连续截图线程
-        if self.continuous_thread is not None:
-            self.continuous_thread.join(timeout=2)
+            self.stop_event.set()
+            if hasattr(self, 'board_locator'):
+                self.board_locator.stop()
+
+            # 先同时唤醒所有可能阻塞的消费者，再统一等待；不能给每个线程
+            # 单独等待2秒，否则4个worker会让关闭时间线性累加。
+            for _ in range(2):
+                self.process_queue.put("STOP")
+            self.result_queue.put("STOP")
+            if hasattr(self, 'retry_queue'):
+                self.retry_queue.put("STOP")
+
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            threads = list(getattr(self, 'worker_threads', []))
+            retry_thread = getattr(self, 'retry_thread', None)
+            if retry_thread is not None:
+                threads.append(retry_thread)
+            if self.continuous_thread is not None:
+                threads.append(self.continuous_thread)
+
+            for thread in threads:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if thread is not threading.current_thread():
+                    thread.join(timeout=remaining)
+
             self.continuous_thread = None
-        
-        # 取消消息订阅
-        message_bus.unsubscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
+            message_bus.unsubscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
+            self._stopped_event.set()
 
     def _capture_and_enqueue(self, region, force_output=False):
         """
-        截取棋盘区域，使用纳秒级时间戳作为排序依据
+        截取棋盘区域，使用与重试丢帧基准一致的秒级时间戳排序
         Returns:
             bool: 是否成功入队
         """
-        capture_time = time.time_ns()
+        capture_time = time.time()
         with mss.mss() as sct:
             board_screenshot = sct.grab(region)
         
@@ -189,7 +203,7 @@ class ChessCaptureManager:
                     time.sleep(interval)
                     continue
                 
-                capture_time = time.time_ns()
+                capture_time = time.time()
                 with mss.mss() as sct:
                     board_screenshot = sct.grab(board_region)
                 
@@ -232,7 +246,9 @@ class ChessCaptureManager:
                     break
                 elif retry_data.type == MessageType.RETRY_CAPTURE:
                     # 延时0.3秒，等待棋盘画面稳定
-                    time.sleep(0.6)
+                    if self.stop_event.wait(timeout=0.6):
+                        self.retry_queue.task_done()
+                        break
                     # 执行重试截图
                     self._execute_retry_capture(retry_data.content)
                 self.retry_queue.task_done()
@@ -260,21 +276,37 @@ class ChessCaptureManager:
         执行一次完整的监控与截图流程，模拟重试逻辑
         """
         try:
-            # 1. 停止引擎当前活动
-            self.context.get_engine()._send_command('stop')
-            
-            # 2. 彻底重置所有状态
-            self.context.reset_checker()
-            self.context.history.clear()
-            self.context.base_fen = None # 显式清除锚点
-            print("Debug - 手动刷新 (Hard Reset): History, BaseFen, Checker Cleared.")
+            # 1. 停止并废弃当前分析，保证刷新前的结果不会覆盖新截图。
+            self.context.invalidate_analysis()
+            engine = self.context.get_engine()
+            if engine is not None:
+                engine._send_command('stop')
+
+            if self.context.game_variant == "jieqi":
+                # 揭棋无法从一张中局截图恢复全部暗子身份，因此刷新只能
+                # 重做视觉推理，绝不能清空已积累的暗子状态与带后缀历史。
+                self.context.reset_recognizer()
+                checker = self.context.get_checker()
+                if checker is not None:
+                    checker.consecutive_drops = 0
+                    checker.consecutive_mismatches = 0
+                self.context.discard_before_timestamp = time.time()
+                print("Debug - 揭棋软刷新: 保留 History/BaseFen/Checker，仅重置视觉缓存。")
+                reason = '揭棋软刷新（保留历史）'
+            else:
+                # 普通象棋可从当前完整局面FEN重新建立状态，维持原硬刷新语义。
+                self.context.reset_checker()
+                self.context.history.clear()
+                self.context.base_fen = None
+                self.context.reset_recognizer()
+                print("Debug - 手动刷新 (Hard Reset): History, BaseFen, Checker Cleared.")
+                reason = '手动刷新重置'
             
             # 3. 复用重试截图逻辑（自动检测头像状态并强制截图）
-            if self._execute_retry_capture('手动刷新重置'):
+            if self._execute_retry_capture(reason):
                  return True
             return False
                 
         except Exception as e:
             print(f"执行单次截图流程失败: {e}")
             return False
-    

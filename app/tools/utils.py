@@ -310,6 +310,8 @@ def convert_move_to_chinese(move, board_array, is_red):
         'K': '帥',  
         'P': '兵',
         'C': '炮',
+        'x': '暗',
+        'X': '暗',
         '-': '空'
     }  
 
@@ -358,6 +360,9 @@ def convert_move_to_chinese(move, board_array, is_red):
     is_my_piece = (is_red and piece_type.isupper()) or (not is_red and piece_type.islower())
     if not is_my_piece:
         return None
+
+    if piece_type in ('X', 'x'):
+        return f"暗子 {move}"
     
     piece_name = PIECE_CODES[piece_type]  
   

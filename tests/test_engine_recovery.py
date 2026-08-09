@@ -11,9 +11,13 @@ from app.tools import utils
 class FakeHistory:
     def __init__(self):
         self.clear_count = 0
+        self.moves = "a0a1 b9b8"
 
     def clear(self):
         self.clear_count += 1
+
+    def get_moves_str(self):
+        return self.moves
 
 
 class FakeEngine:
@@ -31,6 +35,7 @@ class FakeContext:
         self.discard_before_timestamp = 0.0
         self.invalidated = 0
         self.recognizer_resets = 0
+        self.game_variant = "xiangqi"
 
     def invalidate_analysis(self):
         self.invalidated += 1
@@ -114,6 +119,70 @@ class EngineRecoveryTests(unittest.TestCase):
         self.assertGreater(self.context.discard_before_timestamp, 0)
         self.assertTrue(any(m.type == MessageType.ERROR for m in published))
         self.assertTrue(any(m.type == MessageType.RETRY_CAPTURE for m in published))
+
+    def test_jieqi_same_board_after_soft_refresh_restarts_analysis(self):
+        self.context.game_variant = "jieqi"
+        self.checker.pending_jieqi_analysis_retry = True
+        self.checker.jieqi_analysis_retry_count = 1
+        calls = []
+        self.process._get_engine_move = (
+            lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+        same_state = BoardAnalysisState(
+            board_array=self.board,
+            board_status=BoardStatus(is_same_board=True),
+        )
+
+        self.process._handle_same_board(same_state)
+
+        self.assertFalse(self.checker.pending_jieqi_analysis_retry)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(self.history.moves, calls[0][0][1])
+        self.assertTrue(calls[0][1]["is_newgame_override"])
+        self.assertEqual(1, calls[0][1]["desync_retry"])
+
+    def test_jieqi_desync_marks_next_stable_frame_for_analysis(self):
+        self.context.game_variant = "jieqi"
+        published = []
+
+        with patch.object(message_bus, "publish", side_effect=published.append):
+            self.process._recover_from_engine_desync(
+                move="h8h2",
+                state=self.state,
+                analysis_board=self.board,
+                callback=lambda _message: None,
+                desync_retry=0,
+            )
+
+        self.assertTrue(self.checker.pending_jieqi_analysis_retry)
+        self.assertEqual(1, self.checker.jieqi_analysis_retry_count)
+        self.assertEqual(1, self.context.invalidated)
+        self.assertEqual(1, self.context.recognizer_resets)
+        self.assertTrue(any(m.type == MessageType.RETRY_CAPTURE for m in published))
+
+    def test_lifted_piece_does_not_accumulate_force_sync_drops(self):
+        self.checker.consecutive_drops = 2
+        lifted_state = BoardAnalysisState(
+            board_array=self.board,
+            board_status=BoardStatus(
+                is_illegal_change=True,
+                step_info={
+                    "transient_single_change": True,
+                    "is_lifted_piece": True,
+                    "position": (6, 0),
+                    "piece": "P",
+                },
+                message="检测到棋子抬起，等待落子",
+            ),
+        )
+        published = []
+
+        with patch.object(message_bus, "publish", side_effect=published.append):
+            self.process._handle_illegal_board(lifted_state)
+
+        self.assertEqual(0, self.checker.consecutive_drops)
+        self.assertEqual((6, 0), self.checker._pending_lift_source)
+        self.assertFalse(any(m.type == MessageType.RETRY_CAPTURE for m in published))
 
 
 if __name__ == "__main__":

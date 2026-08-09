@@ -97,6 +97,10 @@ class ChessProcess:
         board_array, marker_coords, grid_hashes, details = self.recognizer.recognize_piece_from_grid(
             img, x_array, y_array
         )
+        if hasattr(self.checker, 'normalize_visual_board'):
+            board_array = self.checker.normalize_visual_board(
+                board_array, grid_hashes, marker_coords, details
+            )
 
         # 处理识别过程中的详情/警告
         is_massive_change = False
@@ -165,6 +169,7 @@ class ChessProcess:
             if self.checker.consecutive_drops > 0:
                  logger.debug("重置丢帧计数 (原因: ValidStatus)")
             self.checker.consecutive_drops = 0
+            self.checker._pending_lift_source = None
 
         # 3. 局面重复 (高频状态，优先检查)
         if status.is_same_board:
@@ -256,12 +261,59 @@ class ChessProcess:
 
     def _handle_same_board(self, state):
         # 处理局面重复
+        if (
+            getattr(self.context, 'game_variant', 'xiangqi') == "jieqi"
+            and getattr(self.checker, 'pending_jieqi_analysis_retry', False)
+        ):
+            # 引擎着法与视觉棋盘不一致时会先清视觉缓存并重拍。重拍得到的
+            # 往往正是同一可信局面；它不是“无事可做”，而是恢复分析的确认帧。
+            self.checker.pending_jieqi_analysis_retry = False
+            retry_count = getattr(self.checker, 'jieqi_analysis_retry_count', 1)
+            moves = self.history.get_moves_str() if self.history else ""
+            fen_str, _ = utils.convert_array_to_fen(
+                state.board_array, self.checker.is_red
+            )
+
+            def callback(msg):
+                message_bus.publish(msg)
+
+            logger.info(
+                f"揭棋视觉复核通过（局面未变化），自动恢复引擎分析，"
+                f"retry={retry_count}"
+            )
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "局面复核完成，正在重新计算...",
+            ))
+            return self._get_engine_move(
+                fen_str,
+                moves,
+                state,
+                callback,
+                is_newgame_override=True,
+                desync_retry=retry_count,
+            )
         return BoardAnalysisState()
 
     def _handle_illegal_board(self, state):
         status = state.board_status
         if status is not None:
             message = status.message
+
+            # 棋子长时间悬空时画面只有“起点变空”，这不是完整走法。
+            # 永远保留上一可信局面，不累计强制同步计数，也不额外排队重拍；
+            # 连续截图会在棋子真正落下后自然得到完整的两个端点。
+            if status.step_info.get('transient_single_change'):
+                position = status.step_info.get('position')
+                if self.checker._pending_lift_source != position:
+                    logger.info(
+                        f"暂存悬子/不完整走子: position={position}, "
+                        f"piece={status.step_info.get('piece')}"
+                    )
+                self.checker._pending_lift_source = position
+                self.checker.consecutive_drops = 0
+                return BoardAnalysisState()
+
             logger.warning(f"转入非法状态处理，原因: {message}")
             
             # --- 强制同步逻辑 ---
@@ -270,6 +322,20 @@ class ChessProcess:
             logger.debug(f"连续丢帧计数: {self.checker.consecutive_drops}")
 
             if self.checker.consecutive_drops > 2:
+                if getattr(self.context, 'game_variant', 'xiangqi') == "jieqi":
+                    # 揭棋不能像普通象棋一样从当前FEN强制同步：单帧不含
+                    # 已揭示历史与被吃暗子的身份。保留最后一次可信状态，
+                    # 清视觉缓存后重新识别，避免把历史永久清空。
+                    logger.warning("揭棋连续异常：保留可信历史并执行视觉软刷新")
+                    self.context.reset_recognizer()
+                    self.checker.consecutive_drops = 0
+                    self.context.discard_before_timestamp = time.time()
+                    message_bus.publish(Message(
+                        MessageType.RETRY_CAPTURE,
+                        "揭棋识别异常，已保留历史并重新识别",
+                    ))
+                    return BoardAnalysisState()
+
                 # 非法局面（棋子数量/位置非法）不能强制同步
                 if status.is_illegal_board:
                     logger.debug(f"拒绝强制同步(非法局面)，继续重试。: {message}")
@@ -331,6 +397,8 @@ class ChessProcess:
 
     def _handle_my_move(self, state):
         # 处理己方走棋
+        self.checker.pending_jieqi_analysis_retry = False
+        self.checker.jieqi_analysis_retry_count = 0
         
         # print("Debug - 我方走棋")
 
@@ -347,6 +415,7 @@ class ChessProcess:
             state.board_status.step_info.get('to_pos'),
             self.checker.is_red
         )
+        move_str = self._encode_variant_move(move_str, state.board_status.step_info)
         # print(f"Debug - 我方走棋记录: {move_str}")
         
         # 更新历史记录
@@ -357,6 +426,8 @@ class ChessProcess:
 
     def _handle_opponent_move(self, state, callback):
         # 处理对方走棋
+        self.checker.pending_jieqi_analysis_retry = False
+        self.checker.jieqi_analysis_retry_count = 0
         message_bus.publish(Message(
             MessageType.CHANGE,
             MessageContent.MY_TURN,
@@ -370,6 +441,7 @@ class ChessProcess:
             state.board_status.step_info.get('to_pos'),
             self.checker.is_red
         )
+        move_str = self._encode_variant_move(move_str, state.board_status.step_info)
         
         # 更新历史记录
         all_moves = self.history.add_and_get_all("", move_str, "", self.checker.is_red)
@@ -380,6 +452,18 @@ class ChessProcess:
         return self._get_engine_move(
             fen_str, all_moves, state, callback
         )
+
+    def _encode_variant_move(self, move_str, step_info):
+        """给揭棋暗子着法附加揭示身份，供PikaJieQi正确回放历史。"""
+        if getattr(self.context, 'game_variant', 'xiangqi') != "jieqi" or not move_str:
+            return move_str
+        if step_info.get('piece') not in ('X', 'x'):
+            return move_str
+        revealed = step_info.get('revealed_piece')
+        if revealed and revealed not in ('-', 'X', 'x'):
+            return move_str + revealed
+        logger.warning("揭棋暗子已移动，但未识别到揭示后的棋种: %s", step_info)
+        return move_str
 
     def _get_engine_move(self, fen_str, moves, state, callback, is_newgame_override=False, desync_retry=0) -> BoardAnalysisState:
         # 获取引擎着法 (异步多线程版)
@@ -486,6 +570,8 @@ class ChessProcess:
                 
                 logger.debug(f"Engine Analysis Done: {move}")
                 self.checker.consecutive_mismatches = 0
+                self.checker.pending_jieqi_analysis_retry = False
+                self.checker.jieqi_analysis_retry_count = 0
                 
                 # 检查是否已在结算画面
                 if self.checker.in_settlement_screen:
@@ -529,6 +615,39 @@ class ChessProcess:
             ))
             self.context.discard_before_timestamp = time.time()
             message_bus.publish(Message(MessageType.RETRY_CAPTURE, "引擎局面不同步"))
+            return
+
+        if getattr(self.context, 'game_variant', 'xiangqi') == "jieqi":
+            # 当前画面的普通FEN无法表达暗子池和揭示历史，不能像普通象棋
+            # 那样用它重新锚定引擎。保留历史，等待一张新的稳定帧复核。
+            logger.warning(
+                f"揭棋着法与视觉不一致，保留历史并软刷新: invalid_move={move}"
+            )
+            if desync_retry >= 1:
+                # 已在新稳定帧上重算过一次仍不一致，继续循环重拍只会反复
+                # 消耗CPU。明确报错并等待下一次真实棋盘变化或用户刷新。
+                self.checker.pending_jieqi_analysis_retry = False
+                self.checker.jieqi_analysis_retry_count = 0
+                message_bus.publish(Message(
+                    MessageType.ERROR,
+                    "揭棋历史与引擎局面仍不一致，请点击刷新后继续",
+                ))
+                return
+
+            self.checker.pending_jieqi_analysis_retry = True
+            self.checker.jieqi_analysis_retry_count = desync_retry + 1
+            self.context.invalidate_analysis()
+            self.engine.stop_analysis()
+            self.context.reset_recognizer()
+            self.context.discard_before_timestamp = time.time()
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "揭棋画面识别不稳定，已保留走子历史并重新识别...",
+            ))
+            message_bus.publish(Message(
+                MessageType.RETRY_CAPTURE,
+                "揭棋着法视觉复核",
+            ))
             return
 
         current_fen, _ = utils.convert_array_to_fen(
@@ -676,9 +795,13 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 break
             with result_lock:
                 if not result_dict:
-                    result_ready.wait()
+                    # 使用短超时检查stop_event，避免关闭程序时永久睡在条件
+                    # 变量上，迫使UI逐线程等待完整join超时。
+                    result_ready.wait(timeout=0.2)
                     if stop_event and stop_event.is_set():
                         return
+                    if not result_dict:
+                        continue
                 # 按时间戳排序，最早的最先处理
                 earliest_time = min(result_dict.keys())
                 process_result = result_dict.pop(earliest_time)

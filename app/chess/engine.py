@@ -59,6 +59,17 @@ class ChessEngine:
     def _get_default_engine_path(self) -> str:
         """获取默认引擎路径"""
         from app.tools.utils import app_data_path
+
+        if context.game_variant == "jieqi":
+            candidates = [
+                app_data_path("Pikafish/PikaJieQi"),
+                resource_path("Pikafish", "PikaJieQi"),
+                resource_path("Pikafish", "pikafish-jieqi-apple-silicon"),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    return candidate
+            return candidates[0]
         
         # 优先使用用户数据目录中的引擎文件
         user_engine_path = app_data_path("Pikafish/pikafish")
@@ -156,28 +167,32 @@ class ChessEngine:
                     logger.info(f"Pikafish线程数已更新: Threads={self.threads}")
                 return applied
     
-    def quit(self):
-        """停止引擎"""
+    def quit(self, fast=False):
+        """停止引擎；应用退出时使用较短的fast收尾时限。"""
         with self.lock:
             if self.process and self.process.poll() is None:
                 try:
-                    # 先尝试发送quit命令让引擎优雅退出
+                    self._send_command('stop')
                     self._send_command('quit')
-                    # 等待引擎进程自然结束
-                    self.process.wait(timeout=1)
+                    self.process.wait(timeout=0.25 if fast else 0.75)
                 except subprocess.TimeoutExpired:
-                    # 如果1秒内没结束，强制终止
                     self.process.terminate()
-                    self.process.wait(timeout=2)
-                except Exception:
-                    # 如果发送命令失败，直接终止进程
-                    self.process.terminate()
-                    self.process.wait(timeout=2)
-                finally:
-                    # 如果进程仍然存在，强制杀死
-                    if self.process and self.process.poll() is None:
+                    try:
+                        self.process.wait(timeout=0.25 if fast else 0.75)
+                    except subprocess.TimeoutExpired:
                         self.process.kill()
-                        self.process.wait(timeout=1)
+                        self.process.wait(timeout=0.25)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                finally:
+                    if self.process and self.process.poll() is None:
+                        try:
+                            self.process.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
                     self.process = None
                     self.is_initialized = False
                     logger.info("引擎已停止")
@@ -343,7 +358,9 @@ class ChessEngine:
                     # 调试：打印原始 bestmove 响应
                     print(f"Debug - Engine raw response: {best_move}")
                     start_index = best_move.find('bestmove') + len('bestmove') + 1
-                    best_move = best_move[start_index:start_index + 4]
+                    # 揭棋引擎的推荐着法仍是4位坐标；第5/6位只用于向引擎
+                    # 回放已经揭示身份的历史着法。
+                    best_move = best_move[start_index:].split()[0][:4]
                     
                     # 检查是否为无效着法（如 "(none)" 或 "0000"）
                     if best_move.startswith('(') or best_move == '0000' or not best_move[0].isalpha():

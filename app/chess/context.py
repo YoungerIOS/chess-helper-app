@@ -132,6 +132,7 @@ class ChessContext:
     _theme: str = "light"  # 当前主题
     _auto_move_enabled: bool = False  # 自动走子默认关闭
     _capture_depth_enabled: bool = False  # 我方被吃子时动态增加搜索深度
+    _game_variant: str = "xiangqi"  # xiangqi（普通象棋）/ jieqi（揭棋）
     
     
     def __post_init__(self):
@@ -198,6 +199,10 @@ class ChessContext:
             logger.info(f"自动走子设置为: {self._auto_move_enabled}")
             self._capture_depth_enabled = bool(config.get('capture_depth_enabled', False))
             logger.info(f"被吃子加深设置为: {self._capture_depth_enabled}")
+            self._game_variant = config.get('game_variant', 'xiangqi')
+            if self._game_variant not in ('xiangqi', 'jieqi'):
+                self._game_variant = 'xiangqi'
+            logger.info(f"棋类模式设置为: {self._game_variant}")
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
@@ -235,6 +240,7 @@ class ChessContext:
             self._analysis_mode = "timer"
             self._auto_move_enabled = False
             self._capture_depth_enabled = False
+            self._game_variant = "xiangqi"
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
@@ -258,6 +264,7 @@ class ChessContext:
             config['analysis_mode'] = self._analysis_mode
             config['auto_move_enabled'] = self._auto_move_enabled
             config['capture_depth_enabled'] = self._capture_depth_enabled
+            config['game_variant'] = self._game_variant
     
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
@@ -355,6 +362,17 @@ class ChessContext:
     @capture_depth_enabled.setter
     def capture_depth_enabled(self, enabled: bool) -> None:
         self._capture_depth_enabled = bool(enabled)
+        self.save_config()
+
+    @property
+    def game_variant(self) -> str:
+        return self._game_variant
+
+    @game_variant.setter
+    def game_variant(self, variant: str) -> None:
+        if variant not in ('xiangqi', 'jieqi'):
+            raise ValueError(f"未知棋类模式: {variant}")
+        self._game_variant = variant
         self.save_config()
 
     def next_analysis_token(self) -> int:
@@ -455,11 +473,11 @@ class ChessContext:
         with self._engine_lock:
             self.engine = engine
 
-    def quit_engine(self) -> None:
+    def quit_engine(self, fast: bool = False) -> None:
         """线程安全地完全退出引擎"""
         with self._engine_lock:
             if self.engine:
-                self.engine.quit()
+                self.engine.quit(fast=fast)
                 self.engine = None
     
     @property
