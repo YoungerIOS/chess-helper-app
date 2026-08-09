@@ -17,17 +17,22 @@ logger = get_logger(__name__)
 class ChessCaptureManager:
     """象棋捕获管理器类，负责截图、发送识别"""
 
+    PROCESS_QUEUE_SIZE = 2
+    RESULT_QUEUE_SIZE = 4
+    RETRY_QUEUE_SIZE = 1
+
     def __init__(self):
         self.context = context
         self.manual_trigger = False  # 手动触发标志
         self.stop_event = threading.Event() # 整个截图流程的停止事件
         self._stop_lock = threading.Lock()
         self._stopped_event = threading.Event()
-        self.process_queue = queue.Queue()  # 存放识别任务的队列
-        self.result_queue = queue.Queue()   # 存放识别和检查结果的队列
-        self.worker_threads = processor.start_process_worker(
-            self.process_queue, self.result_queue, self.stop_event
-        )
+        # 截图属于实时数据，过期帧没有继续识别的价值。队列必须有界，
+        # 否则识别速度短暂落后时，每张完整棋盘截图都会一直占用内存。
+        self.process_queue = queue.Queue(maxsize=self.PROCESS_QUEUE_SIZE)
+        self.result_queue = queue.Queue(maxsize=self.RESULT_QUEUE_SIZE)
+        self.worker_threads = []
+        self._dropped_frames = 0
         # 初始化棋盘定位器
         self.board_locator = BoardLocator(self.context)
         
@@ -45,7 +50,37 @@ class ChessCaptureManager:
         self.capture_timeout = 120  # 120秒无截图自动停止
         
         # 初始化重试队列 
-        self.retry_queue = queue.Queue()
+        self.retry_queue = queue.Queue(maxsize=self.RETRY_QUEUE_SIZE)
+
+    @staticmethod
+    def _discard_pending(queue_obj):
+        """清空队列并维持Queue的unfinished_tasks计数一致。"""
+        while True:
+            try:
+                queue_obj.get_nowait()
+                queue_obj.task_done()
+            except queue.Empty:
+                return
+
+    def _enqueue_latest_frame(self, item):
+        """非阻塞入队；队列已满时淘汰最旧截图，始终优先实时画面。"""
+        while not self.stop_event.is_set():
+            try:
+                self.process_queue.put_nowait(item)
+                return True
+            except queue.Full:
+                try:
+                    self.process_queue.get_nowait()
+                    self.process_queue.task_done()
+                    self._dropped_frames += 1
+                    if self._dropped_frames == 1 or self._dropped_frames % 50 == 0:
+                        logger.warning(
+                            f"识别队列已满，淘汰过期截图: "
+                            f"dropped={self._dropped_frames}"
+                        )
+                except queue.Empty:
+                    continue
+        return False
 
     def main_process_flow(self): 
         # 首先进行初始定位,循环尝试,直到成功
@@ -94,8 +129,8 @@ class ChessCaptureManager:
             )
             self.continuous_thread.start()
         
-        # 启动重试截图线程
-        self.retry_queue = queue.Queue()
+        # 启动重试截图线程；沿用构造时创建的有界队列。
+        self._discard_pending(self.retry_queue)
         self.retry_thread = threading.Thread(
             target=self._retry_capture_worker,
             daemon=True
@@ -124,7 +159,12 @@ class ChessCaptureManager:
     def start_capture(self):
         """开始截图任务"""
         self.stop_event.clear()  # 重置停止事件
+        self._stopped_event.clear()
         self.last_capture_time = time.time()  # 重置截图时间
+        if not any(thread.is_alive() for thread in self.worker_threads):
+            self.worker_threads = processor.start_process_worker(
+                self.process_queue, self.result_queue, self.stop_event
+            )
 
     def stop_capture(self, timeout=1.0):
         """停止截图任务，所有线程共享一个总等待时间。"""
@@ -140,11 +180,16 @@ class ChessCaptureManager:
 
             # 先同时唤醒所有可能阻塞的消费者，再统一等待；不能给每个线程
             # 单独等待2秒，否则4个worker会让关闭时间线性累加。
+            # 有界队列可能正满。停止时先丢弃过期任务，再放入哨兵，保证
+            # 消费者不会因put阻塞而拖住退出流程。
+            self._discard_pending(self.process_queue)
+            self._discard_pending(self.result_queue)
             for _ in range(2):
-                self.process_queue.put("STOP")
-            self.result_queue.put("STOP")
+                self.process_queue.put_nowait("STOP")
+            self.result_queue.put_nowait("STOP")
             if hasattr(self, 'retry_queue'):
-                self.retry_queue.put("STOP")
+                self._discard_pending(self.retry_queue)
+                self.retry_queue.put_nowait("STOP")
 
             deadline = time.monotonic() + max(0.0, float(timeout))
             threads = list(getattr(self, 'worker_threads', []))
@@ -162,6 +207,9 @@ class ChessCaptureManager:
                     thread.join(timeout=remaining)
 
             self.continuous_thread = None
+            alive = [thread.name for thread in threads if thread.is_alive()]
+            if alive:
+                logger.warning(f"截图管理器停止后仍有后台线程存活: {alive}")
             message_bus.unsubscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
             self._stopped_event.set()
 
@@ -180,7 +228,8 @@ class ChessCaptureManager:
         
         # 如果检测到稳定帧，则入队
         if stable_frame is not None:
-            self.process_queue.put((capture_time, board_screenshot))
+            if not self._enqueue_latest_frame((capture_time, board_screenshot)):
+                return False
             # 更新最后截图时间
             self.last_capture_time = time.time()
             return True
@@ -213,8 +262,8 @@ class ChessCaptureManager:
                 # 如果检测到稳定帧，则入队
                 if stable_frame is not None:
                     # current_turn = None # 连续模式下的轮次由 processor 结合 marker 动态推断
-                    self.process_queue.put((capture_time, board_screenshot))
-                    self.last_capture_time = time.time()
+                    if self._enqueue_latest_frame((capture_time, board_screenshot)):
+                        self.last_capture_time = time.time()
                 
                 time.sleep(interval)
             except Exception as e:
@@ -231,7 +280,11 @@ class ChessCaptureManager:
             # 将重试任务放入队列
             if hasattr(self, 'retry_queue'):
                 # print("Debug - 收到重试截图请求，安排重新截图")
-                self.retry_queue.put(message)
+                try:
+                    self.retry_queue.put_nowait(message)
+                except queue.Full:
+                    # 一个重试已经待执行时，更多同类请求没有额外价值。
+                    logger.debug("合并重复的重试截图请求")
             else:
                 print("警告：重试队列不存在，无法处理重试截图")
                 
@@ -243,6 +296,7 @@ class ChessCaptureManager:
             try:
                 retry_data = self.retry_queue.get(timeout=0.1)
                 if retry_data == "STOP":
+                    self.retry_queue.task_done()
                     break
                 elif retry_data.type == MessageType.RETRY_CAPTURE:
                     # 延时0.3秒，等待棋盘画面稳定

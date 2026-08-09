@@ -24,16 +24,27 @@ class MessageBus:
     def publish(self, message: Message):
         """发布消息"""
         if self._ui_queue:
-            self._ui_queue.put(message)
+            try:
+                self._ui_queue.put_nowait(message)
+            except queue.Full:
+                # 高频引擎遥测可以直接跳过；普通消息则淘汰最旧消息后
+                # 立即投递，确保后台线程永远不会被UI队列反向阻塞。
+                if message.type != MessageType.ENGINE_INFO:
+                    try:
+                        self._ui_queue.get_nowait()
+                        self._ui_queue.task_done()
+                        self._ui_queue.put_nowait(message)
+                    except (queue.Empty, queue.Full):
+                        pass
         
         # 同时通知订阅者
         with self._lock:
-            subscribers = self._subscribers.get(message.type, [])
-            for callback in subscribers:
-                try:
-                    callback(message)
-                except Exception as e:
-                    print(f"消息订阅者回调失败: {e}")
+            subscribers = list(self._subscribers.get(message.type, []))
+        for callback in subscribers:
+            try:
+                callback(message)
+            except Exception as e:
+                print(f"消息订阅者回调失败: {e}")
     
     def subscribe(self, message_type: MessageType, callback: Callable[[Message], None]):
         """订阅特定类型的消息"""

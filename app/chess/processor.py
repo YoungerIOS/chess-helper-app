@@ -855,6 +855,20 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
     result_ready = threading.Condition(result_lock)
     NUM_WORKERS = 2
 
+    def put_latest_result(item):
+        """结果消费落后时淘汰最旧结果，避免实时流水线无限积压。"""
+        while not (stop_event and stop_event.is_set()):
+            try:
+                result_queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    result_queue.get_nowait()
+                    result_queue.task_done()
+                    logger.warning("结果队列已满，淘汰过期识别结果")
+                except queue.Empty:
+                    continue
+
     def process_worker():
         # 处理棋盘截图,转为局面数组, 并检查局面状态
         while True:
@@ -862,6 +876,7 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 break
             item = process_queue.get()  # 阻塞等待任务
             if item == "STOP":
+                process_queue.task_done()
                 break
             capture_time, screenshot = item
             
@@ -894,7 +909,7 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 # 按时间戳排序，最早的最先处理
                 earliest_time = min(result_dict.keys())
                 process_result = result_dict.pop(earliest_time)
-                result_queue.put(process_result)
+                put_latest_result(process_result)
 
     def result_handler_worker():
         # 对不同局面状态分发处理
@@ -908,6 +923,7 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 # 使用超时获取结果，避免无限等待
                 process_result = result_queue.get(timeout=1.0)
                 if process_result == "STOP":
+                    result_queue.task_done()
                     break
                 
                 if process_result:

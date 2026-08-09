@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(analysis_layout)
         
         # 初始化UI消息队列和定时器（保持一直运行）
-        self.ui_message_queue = queue.Queue()
+        self.ui_message_queue = queue.Queue(maxsize=256)
         # 设置全局消息总线
         message_bus.set_ui_queue(self.ui_message_queue)
         self.check_timer = QTimer()
@@ -350,7 +350,9 @@ class MainWindow(QMainWindow):
         # 初始化线程和队列
         self.capture_thread = None
         # 初始化截图管理器
-        self.capture_manager = ChessCaptureManager()
+        # 截图管理器在点击“开始”后才创建，避免窗口初始化时提前启动
+        # 一组永远不会处理截图的识别线程。
+        self.capture_manager = None
         # 初始化手动定位器
         self.manual_positioner = ManualPositioner(self)
 
