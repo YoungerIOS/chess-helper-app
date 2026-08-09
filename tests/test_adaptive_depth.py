@@ -32,23 +32,34 @@ class AdaptiveDepthTests(unittest.TestCase):
 
         self.assertEqual(0, checker.capture_depth_bonus)
 
-    def test_depth_mode_adds_bonus_to_base_depth(self):
-        param, value = ChessEngine.resolve_search_limit(
-            {"goParam": "depth", "depth": "20"},
+    def test_combined_limits_add_bonus_to_depth(self):
+        limits = ChessEngine.resolve_search_limits(
+            {"goParam": "movetime", "depth": "20", "movetime": "6000"},
             depth_bonus=3,
         )
 
-        self.assertEqual("depth", param)
-        self.assertEqual("23", value)
+        self.assertEqual("23", limits["depth"])
+        self.assertEqual("6000", limits["movetime"])
 
-    def test_movetime_mode_ignores_depth_bonus(self):
-        param, value = ChessEngine.resolve_search_limit(
-            {"goParam": "movetime", "movetime": "2000", "depth": "20"},
-            depth_bonus=3,
+    def test_search_override_changes_one_limit_but_keeps_the_other(self):
+        limits = ChessEngine.resolve_search_limits(
+            {"goParam": "depth", "movetime": "10000", "depth": "20"},
+            depth_bonus=2,
+            search_override=("movetime", "5000"),
         )
 
-        self.assertEqual("movetime", param)
-        self.assertEqual("2000", value)
+        self.assertEqual("22", limits["depth"])
+        self.assertEqual("5000", limits["movetime"])
+
+    def test_go_sends_depth_and_movetime_together(self):
+        engine = ChessEngine(engine_path="/tmp/pikafish-test-placeholder")
+        commands = []
+        engine._send_command = commands.append
+        engine._read_output_with_timeout = lambda timeout, callback: ([], "", [])
+
+        engine._go({"depth": "20", "movetime": "10000"})
+
+        self.assertEqual(["go depth 20 movetime 10000"], commands)
 
     def test_confirmed_opponent_capture_updates_bonus_and_ui_message(self):
         class FakeContext:

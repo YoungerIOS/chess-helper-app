@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
             100 +  # 顶部文本显示区域
             35 +   # 中间按钮行
             35 +   # 底部控制区域
+            38 +   # 局势分析区域
             30 -   # 布局间距
             11     # 棋盘容器内边距
         )
@@ -255,8 +256,8 @@ class MainWindow(QMainWindow):
         # 创建参数菜单
         self.param_menu = QMenu(self)
         self.param_menu.setStyleSheet("")
-        self.depth_action = self.param_menu.addAction("depth")
-        self.movetime_action = self.param_menu.addAction("movetime")
+        self.depth_action = self.param_menu.addAction("深度上限")
+        self.movetime_action = self.param_menu.addAction("时间上限")
         self.param_menu.addSeparator()
         self.threads_action = self.param_menu.addAction("线程数量")
         self.depth_action.setCheckable(True)
@@ -305,6 +306,38 @@ class MainWindow(QMainWindow):
         
         control_layout.addLayout(param_layout, 3)  # Stretch factor 3 (Most space for value)
         main_layout.addLayout(control_layout)
+
+        # 局势分析与算力档位：实时展示引擎深度、评价、节点速度和耗时。
+        analysis_layout = QHBoxLayout()
+        analysis_layout.setSpacing(self.spacing_tight)
+        analysis_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.analysis_btn = QPushButton("局势分析")
+        self.analysis_btn.setFixedHeight(32)
+        self.analysis_btn.setFont(QFont("Arial", 10))
+        self.analysis_btn.setObjectName("tertiary")
+        self.analysis_btn.clicked.connect(self.show_analysis_menu)
+        analysis_layout.addWidget(self.analysis_btn, 2)
+
+        self.analysis_menu = QMenu(self)
+        self.analysis_menu.setStyleSheet("")
+        for preset_key, preset_name in (
+            ("eco", "省电"),
+            ("balanced", "均衡"),
+            ("strong", "强力"),
+            ("max", "极致"),
+        ):
+            action = self.analysis_menu.addAction(preset_name)
+            action.triggered.connect(
+                lambda checked=False, key=preset_key: self.apply_compute_preset(key)
+            )
+
+        self.analysis_info_label = QLabel("等待引擎分析…")
+        self.analysis_info_label.setAlignment(Qt.AlignCenter)
+        self.analysis_info_label.setFixedHeight(32)
+        self.analysis_info_label.setObjectName("analysisInfo")
+        analysis_layout.addWidget(self.analysis_info_label, 7)
+        main_layout.addLayout(analysis_layout)
         
         # 初始化UI消息队列和定时器（保持一直运行）
         self.ui_message_queue = queue.Queue()
@@ -572,6 +605,17 @@ class MainWindow(QMainWindow):
 
     def check_queue(self):
         """检查结果队列"""
+        # 独立扫描完整JJ窗口中的绿色“再来一局”按钮。这个入口不依赖
+        # 棋盘格点或结算状态，因此结算页缩小棋盘也不会漏掉。
+        if (
+            self.is_running and
+            not self.is_stopping and
+            context.auto_move_enabled and
+            context.platform == "JJ" and
+            hasattr(self, "auto_mover")
+        ):
+            self.auto_mover.scan_rematch_button()
+
         if not self.ui_message_queue.empty():
             result = self.ui_message_queue.get()
 
@@ -618,6 +662,8 @@ class MainWindow(QMainWindow):
                 elif result.type == MessageType.PARAM_UPDATE:
                     # 棋子被吃或新局重置后，刷新动态有效深度。
                     self.refresh_engine_param_label()
+                elif result.type == MessageType.ENGINE_INFO:
+                    self.update_engine_analysis(result.kwargs or result.content or {})
     
     def close_queue(self):
         """销毁截图线程"""
@@ -974,6 +1020,87 @@ class MainWindow(QMainWindow):
     def show_param_menu(self):
         """显示参数菜单"""
         self.param_menu.exec_(self.param_btn.mapToGlobal(self.param_btn.rect().bottomLeft()))
+
+    def show_analysis_menu(self):
+        """显示局势分析算力档位。"""
+        self.analysis_menu.exec_(
+            self.analysis_btn.mapToGlobal(self.analysis_btn.rect().bottomLeft())
+        )
+
+    def apply_compute_preset(self, preset):
+        """应用算力档位；搜索量立即保存，线程数安全地异步更新。"""
+        cpu_count = max(1, os.cpu_count() or 1)
+        presets = {
+            "eco": {
+                "name": "省电", "threads": max(1, cpu_count // 4),
+                "depth": 16, "movetime": 1000,
+            },
+            "balanced": {
+                "name": "均衡", "threads": max(2, cpu_count // 2),
+                "depth": 20, "movetime": 2000,
+            },
+            "strong": {
+                "name": "强力", "threads": max(2, (cpu_count * 3) // 4),
+                "depth": 24, "movetime": 5000,
+            },
+            "max": {
+                "name": "极致", "threads": cpu_count,
+                "depth": 28, "movetime": 10000,
+            },
+        }
+        values = presets.get(preset)
+        if values is None:
+            return
+
+        engine_params = context.get_engine_params()
+        engine_params["threads"] = str(values["threads"])
+        engine_params["depth"] = str(values["depth"])
+        engine_params["movetime"] = str(values["movetime"])
+        context.update_engine_params(engine_params)
+        self.engine_params = engine_params
+        self.refresh_engine_param_label()
+        self.apply_engine_threads(values["threads"])
+        self.analysis_info_label.setText(
+            f"{values['name']} · {values['threads']}线程 · "
+            f"深度{values['depth']} / {values['movetime']}ms"
+        )
+
+    @staticmethod
+    def _format_engine_rate(value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return "—"
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.1f}Mn/s"
+        if value >= 1_000:
+            return f"{value / 1_000:.0f}kn/s"
+        return f"{value}n/s"
+
+    def update_engine_analysis(self, info):
+        """把UCI实时遥测转换为紧凑的中文局势摘要。"""
+        depth = info.get("depth", "—")
+        score_type = info.get("score_type")
+        score = info.get("score")
+        if score_type == "mate" and score is not None:
+            evaluation = f"我方将杀{abs(score)}步" if score > 0 else f"对方将杀{abs(score)}步"
+        elif score_type == "cp" and score is not None:
+            pawns = score / 100.0
+            if abs(pawns) < 0.15:
+                evaluation = "局势均衡"
+            elif pawns > 0:
+                evaluation = f"我方 +{pawns:.2f}"
+            else:
+                evaluation = f"对方 +{abs(pawns):.2f}"
+        else:
+            evaluation = "评价计算中"
+
+        nps = self._format_engine_rate(info.get("nps"))
+        elapsed = info.get("time")
+        elapsed_text = f"{int(elapsed) / 1000:.1f}s" if elapsed is not None else "—"
+        self.analysis_info_label.setText(
+            f"深度 {depth}  |  {evaluation}  |  {nps}  |  {elapsed_text}"
+        )
     
     def on_param_selected(self, param):
         """处理参数选择"""

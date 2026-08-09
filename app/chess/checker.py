@@ -476,6 +476,26 @@ class PositionChecker:
         king_count = sum(1 for row in board_array for piece in row if piece == 'k')
         general_count = sum(1 for row in board_array for piece in row if piece == 'K')
         kings_missing = (king_count != 1 or general_count != 1)
+        piece_count = sum(1 for row in board_array for piece in row if piece != '-')
+
+        # JJ 棋力评测结算页会缩小棋盘并覆盖半透明奖励层。双方将帅有时
+        # 仍能被模型识别，因此不能只依赖“将帅丢失”；缩放后大量格点会
+        # 同时失配，而一帧普通走子不可能造成这种变化。27 子上限刻意保守，
+        # 完整新局（32 子）的巨大变化不会被当成结算。
+        same_as_trusted_board = (
+            self.last_board is not None and board_array == self.last_board
+        )
+        sparse_settlement = is_massive_change and (
+            piece_count <= 27 or same_as_trusted_board
+        )
+        if sparse_settlement and not self.in_settlement_screen:
+            self.in_settlement_screen = True
+            logger.info(
+                f"进入结算画面 (巨大变化 + 结算特征: {piece_count}子, "
+                f"将{king_count}个/帅{general_count}个)"
+            )
+            self.consecutive_drops = 0
+            return True
         
         if kings_missing:
             # 将帅丢失

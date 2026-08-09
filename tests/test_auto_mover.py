@@ -1,5 +1,8 @@
 import unittest
 
+import cv2
+import numpy as np
+
 from app.chess.auto_mover import (
     AutoMoveCancelled,
     AutoMoveController,
@@ -199,6 +202,121 @@ class AutoMoverTests(unittest.TestCase):
         with self.assertRaises(AutoMoveCancelled):
             controller._validate_window(BOARD_REGION)
 
+    def test_background_move_finishes_as_soon_as_board_changes(self):
+        context = FakeContext(is_red=False)
+        context.checker.last_board_array_for_engine[0][1] = "n"
+        context.checker.last_board[0][1] = "n"
+        clicks = []
+
+        def window_clicker(_window_info, point):
+            clicks.append(point)
+            if len(clicks) == 1:
+                context.checker._pending_lift_source = (0, 1)
+            elif len(clicks) == 2:
+                context.checker.last_board[0][1] = "-"
+                context.checker.last_board[2][2] = "n"
+
+        controller = AutoMoveController(
+            context,
+            window_provider=lambda: {
+                "platform": "JJ",
+                "pid": 1234,
+                "region": {"left": 50, "top": 100, "width": 600, "height": 700},
+            },
+            window_clicker=window_clicker,
+            mouse_factory=lambda: self.fail("后台走子不应获取系统鼠标"),
+            sleeper=lambda _seconds: None,
+        )
+
+        start, end = controller.execute("h0g2", False, 7)
+
+        self.assertEqual([start, end], clicks)
+
+    def test_background_click_without_lift_falls_back_to_compatible_mouse(self):
+        context = FakeContext(is_red=False)
+        context.checker.last_board_array_for_engine[0][1] = "n"
+        context.checker.last_board[0][1] = "n"
+        background_clicks = []
+        mouse = FakeMouse()
+        mouse_clicks = []
+
+        def mouse_clicker(current_mouse):
+            mouse_clicks.append(current_mouse.position)
+            if len(mouse_clicks) % 2 == 0:
+                context.checker.last_board[0][1] = "-"
+                context.checker.last_board[2][2] = "n"
+
+        controller = AutoMoveController(
+            context,
+            window_provider=lambda: {
+                "platform": "JJ",
+                "pid": 1234,
+                "window_id": 5678,
+                "region": {"left": 50, "top": 100, "width": 600, "height": 700},
+            },
+            window_clicker=lambda _window, point: background_clicks.append(point),
+            mouse_factory=lambda: mouse,
+            clicker=mouse_clicker,
+            user_idle_provider=lambda: 99.0,
+            target_window_active_provider=lambda _window: True,
+            sleeper=lambda _seconds: None,
+            selection_observe_timeout=0,
+        )
+
+        start, end = controller.execute("h0g2", False, 7)
+
+        self.assertEqual([start], background_clicks)
+        self.assertEqual([start, end], mouse_clicks)
+        self.assertEqual((10, 20), mouse.position)
+
+        # 同一窗口第二步应直接走兼容路径，不再重复等待后台点击探测。
+        context.checker.last_board[0][1] = "n"
+        context.checker.last_board[2][2] = "-"
+        controller.execute("h0g2", False, 7)
+
+        self.assertEqual([start], background_clicks)
+        self.assertEqual([start, end, start, end], mouse_clicks)
+
+    def test_green_play_again_button_is_detected_by_shape_and_position(self):
+        image = np.zeros((1000, 1000, 3), dtype=np.uint8)
+        image[:] = (30, 20, 50)
+        cv2.rectangle(image, (300, 850), (700, 930), (55, 105, 55), -1)
+
+        self.assertEqual(
+            (500, 890),
+            AutoMoveController.find_rematch_button_in_image(image),
+        )
+
+    def test_visual_button_scan_clicks_detected_center_without_settlement_state(self):
+        context = FakeContext(is_red=False)
+        self.assertFalse(context.checker.in_settlement_screen)
+        image = np.zeros((1000, 1000, 3), dtype=np.uint8)
+        image[:] = (30, 20, 50)
+        cv2.rectangle(image, (300, 850), (700, 930), (55, 105, 55), -1)
+        clicks = []
+
+        controller = AutoMoveController(
+            context,
+            window_provider=lambda: {
+                "platform": "JJ",
+                "pid": 1234,
+                "window_id": 5678,
+                "region": {
+                    "left": 100,
+                    "top": 50,
+                    "width": 500,
+                    "height": 1000,
+                },
+            },
+            window_image_provider=lambda _window: image,
+            window_clicker=lambda _window, point: clicks.append(point),
+        )
+        controller._button_scan_pending = True
+
+        controller._run_button_scan()
+
+        self.assertEqual([(350, 940)], clicks)
+        self.assertTrue(controller._rematch_button_seen)
 
 if __name__ == "__main__":
     unittest.main()

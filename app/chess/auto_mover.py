@@ -23,6 +23,10 @@ class AutoMoveUserBusy(AutoMoveCancelled):
     """用户持续操作电脑时跳过自动走子。"""
 
 
+class AutoMoveBackgroundUnsupported(AutoMoveError):
+    """游戏画布未响应进程定向点击，需要回退到兼容点击。"""
+
+
 def move_to_grid(move, is_red):
     """把 Pikafish 着法转换成当前屏幕朝向下的两个 (row, col)。"""
     if not isinstance(move, str) or not MOVE_PATTERN.fullmatch(move):
@@ -87,15 +91,22 @@ class AutoMoveController:
         clicker=None,
         user_idle_provider=None,
         target_window_active_provider=None,
+        window_clicker=None,
+        window_image_provider=None,
         sleeper=time.sleep,
-        delay=0.35,
-        click_interval=0.32,
-        cursor_settle=0.12,
+        delay=0.0,
+        click_interval=0.16,
+        cursor_settle=0.06,
         idle_required=1.5,
         idle_wait_timeout=6.0,
         idle_poll_interval=0.10,
         verify_timeout=1.0,
         verify_interval=0.10,
+        selection_observe_timeout=0.55,
+        move_response_timeout=8.0,
+        action_poll_interval=0.06,
+        move_retry_interval=0.45,
+        button_scan_interval=0.25,
     ):
         self.context = context
         self.window_provider = window_provider
@@ -107,6 +118,10 @@ class AutoMoveController:
         self.target_window_active_provider = (
             target_window_active_provider or self._default_target_window_active
         )
+        self.window_clicker = window_clicker or self._default_window_clicker
+        self.window_image_provider = (
+            window_image_provider or self._default_window_image_provider
+        )
         self.sleeper = sleeper
         self.delay = delay
         self.click_interval = click_interval
@@ -116,10 +131,21 @@ class AutoMoveController:
         self.idle_poll_interval = idle_poll_interval
         self.verify_timeout = verify_timeout
         self.verify_interval = verify_interval
+        self.selection_observe_timeout = selection_observe_timeout
+        self.move_response_timeout = move_response_timeout
+        self.action_poll_interval = action_poll_interval
+        self.move_retry_interval = move_retry_interval
+        self.button_scan_interval = button_scan_interval
 
         self._lock = threading.Lock()
         self._generation = 0
         self._last_key = None
+        self._button_scan_pending = False
+        self._last_button_scan_at = 0.0
+        self._rematch_button_seen = False
+        self._rematch_button_click_attempts = 0
+        self._background_click_supported = None
+        self._background_click_window_key = None
 
     @staticmethod
     def _default_mouse_factory():
@@ -132,7 +158,7 @@ class AutoMoveController:
         from pynput.mouse import Button
 
         controller.press(Button.left)
-        time.sleep(0.07)
+        time.sleep(0.045)
         controller.release(Button.left)
 
     @staticmethod
@@ -182,10 +208,209 @@ class AutoMoveController:
             return False
         return False
 
+    @staticmethod
+    def _default_window_clicker(window_info, point):
+        """向指定进程投递鼠标点击，不移动系统光标也不切换焦点。"""
+        try:
+            pid = int(window_info.get("pid"))
+        except (AttributeError, TypeError, ValueError):
+            raise AutoMoveError("游戏窗口缺少进程信息，无法后台点击")
+
+        try:
+            import Quartz
+
+            down = Quartz.CGEventCreateMouseEvent(
+                None,
+                Quartz.kCGEventLeftMouseDown,
+                point,
+                Quartz.kCGMouseButtonLeft,
+            )
+            up = Quartz.CGEventCreateMouseEvent(
+                None,
+                Quartz.kCGEventLeftMouseUp,
+                point,
+                Quartz.kCGMouseButtonLeft,
+            )
+            Quartz.CGEventPostToPid(pid, down)
+            time.sleep(0.07)
+            Quartz.CGEventPostToPid(pid, up)
+        except AutoMoveError:
+            raise
+        except Exception as exc:
+            raise AutoMoveError(f"后台点击失败: {exc}") from exc
+
+    @staticmethod
+    def _default_window_image_provider(window_info):
+        """读取指定窗口图像，按钮检测不依赖棋盘定位区域。"""
+        try:
+            window_id = int(window_info.get("window_id"))
+            import numpy as np
+            import Quartz
+
+            image = Quartz.CGWindowListCreateImage(
+                Quartz.CGRectNull,
+                Quartz.kCGWindowListOptionIncludingWindow,
+                window_id,
+                Quartz.kCGWindowImageBoundsIgnoreFraming |
+                Quartz.kCGWindowImageBestResolution,
+            )
+            if image is None:
+                return None
+            width = int(Quartz.CGImageGetWidth(image))
+            height = int(Quartz.CGImageGetHeight(image))
+            bytes_per_row = int(Quartz.CGImageGetBytesPerRow(image))
+            data = bytes(
+                Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(image))
+            )
+            row_pixels = bytes_per_row // 4
+            if width <= 0 or height <= 0 or row_pixels < width:
+                return None
+            bgra = np.frombuffer(data, dtype=np.uint8).reshape(height, row_pixels, 4)
+            return bgra[:, :width, :3].copy()
+        except Exception as exc:
+            logger.debug(f"无法读取JJ窗口用于按钮检测: {exc}")
+            return None
+
+    @staticmethod
+    def find_rematch_button_in_image(image):
+        """以颜色、位置、面积和形状识别底部绿色“再来一局”按钮。"""
+        if image is None or getattr(image, "ndim", 0) != 3:
+            return None
+        height, width = image.shape[:2]
+        if width < 200 or height < 300:
+            return None
+
+        try:
+            import cv2
+            import numpy as np
+
+            # 按钮只会出现在窗口下方；绿色较暗时也要保留，但红框、文字和
+            # 游戏背景必须通过后续几何条件排除。
+            start_y = int(height * 0.72)
+            hsv = cv2.cvtColor(image[start_y:, :, :3], cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv,
+                np.array((25, 45, 35), dtype=np.uint8),
+                np.array((80, 255, 255), dtype=np.uint8),
+            )
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            count, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+
+            candidates = []
+            for index in range(1, count):
+                x, relative_y, box_width, box_height, area = map(int, stats[index])
+                y = relative_y + start_y
+                if box_height <= 0:
+                    continue
+                center_x = x + box_width / 2
+                center_y = y + box_height / 2
+                width_ratio = box_width / width
+                height_ratio = box_height / height
+                aspect_ratio = box_width / box_height
+                fill_ratio = area / (box_width * box_height)
+
+                if not (0.38 <= center_x / width <= 0.62):
+                    continue
+                if not (0.82 <= center_y / height <= 0.96):
+                    continue
+                if not (0.28 <= width_ratio <= 0.58):
+                    continue
+                if not (0.045 <= height_ratio <= 0.12):
+                    continue
+                if not (2.4 <= aspect_ratio <= 5.2):
+                    continue
+                if fill_ratio < 0.35:
+                    continue
+
+                # 优先选择面积大且更接近窗口水平中心的候选。
+                score = area - abs(center_x - width / 2) * 20
+                candidates.append((score, round(center_x), round(center_y)))
+
+            if not candidates:
+                return None
+            _, center_x, center_y = max(candidates)
+            return center_x, center_y
+        except Exception as exc:
+            logger.debug(f"绿色再来一局按钮识别失败: {exc}")
+            return None
+
+    def scan_rematch_button(self):
+        """异步扫描一次完整JJ窗口；只有看见绿色按钮才点击。"""
+        if (
+            not self.context.auto_move_enabled or
+            self.context.platform != "JJ" or
+            not self.can_execute() or
+            self.window_provider is None
+        ):
+            return False
+
+        now = time.monotonic()
+        with self._lock:
+            if self._button_scan_pending:
+                return False
+            if now - self._last_button_scan_at < self.button_scan_interval:
+                return False
+            self._last_button_scan_at = now
+            self._button_scan_pending = True
+
+        threading.Thread(target=self._run_button_scan, daemon=True).start()
+        return True
+
+    def _run_button_scan(self):
+        try:
+            window_info = self.window_provider()
+            if not window_info or window_info.get("platform") != "JJ":
+                return
+            image = self.window_image_provider(window_info)
+            image_point = self.find_rematch_button_in_image(image)
+            if image_point is None:
+                if self._rematch_button_seen:
+                    self._rematch_button_seen = False
+                    self._rematch_button_click_attempts = 0
+                    logger.info("绿色再来一局按钮已消失，停止续局点击")
+                return
+
+            if (
+                not self.context.auto_move_enabled or
+                self.context.platform != "JJ" or
+                not self.can_execute()
+            ):
+                return
+
+            image_height, image_width = image.shape[:2]
+            window = window_info.get("region", {})
+            click_point = (
+                round(float(window["left"]) + image_point[0] / image_width * float(window["width"])),
+                round(float(window["top"]) + image_point[1] / image_height * float(window["height"])),
+            )
+            if not self._rematch_button_seen:
+                self._rematch_button_seen = True
+                logger.info(
+                    f"视觉识别到绿色再来一局按钮: image={image_point}, "
+                    f"screen={click_point}"
+                )
+                self._notify(True, "检测到“再来一局”，正在自动续局...")
+            self._rematch_button_click_attempts += 1
+            if self._rematch_button_click_attempts <= 2:
+                self.window_clicker(window_info, click_point)
+            else:
+                # 微信画布若不接受进程定向事件，连续看见按钮三次后使用
+                # 已验证可用的兼容点击；仍先检查用户空闲并恢复原光标。
+                self._compatibility_click_point(window_info, click_point)
+        except Exception as exc:
+            logger.error(f"绿色再来一局按钮自动点击失败: {exc}")
+        finally:
+            with self._lock:
+                self._button_scan_pending = False
+
     def cancel_pending(self):
         with self._lock:
             self._generation += 1
             self._last_key = None
+            self._button_scan_pending = False
+            self._rematch_button_seen = False
+            self._rematch_button_click_attempts = 0
 
     def schedule(self, move, is_red, analysis_token):
         """安排一次自动走子；重复消息或过期分析不会再次执行。"""
@@ -208,7 +433,8 @@ class AutoMoveController:
 
     def _run_scheduled(self, move, is_red, analysis_token, generation):
         try:
-            self.sleeper(self.delay)
+            if self.delay > 0:
+                self.sleeper(self.delay)
             self._ensure_current(analysis_token, generation)
             self.execute(move, is_red, analysis_token, generation)
             self._notify(True, f"已自动走子：{move}")
@@ -252,6 +478,59 @@ class AutoMoveController:
         start_point = grid_to_screen(*start, platform.board_coords, board_region)
         end_point = grid_to_screen(*end, platform.board_coords, board_region)
 
+        # 生产环境使用发往微信进程的后台事件，不占用鼠标，也无需等待用户空闲。
+        window_key = (window_info.get("pid"), window_info.get("window_id"))
+        if window_key != self._background_click_window_key:
+            self._background_click_window_key = window_key
+            self._background_click_supported = None
+
+        if window_info.get("pid") and self._background_click_supported is not False:
+            try:
+                result = self._execute_window_move(
+                    window_info,
+                    checker,
+                    start,
+                    end,
+                    start_piece,
+                    start_point,
+                    end_point,
+                    analysis_token,
+                    generation,
+                )
+                self._background_click_supported = True
+                return result
+            except AutoMoveBackgroundUnsupported as exc:
+                # 同一个微信窗口无需每一步重复等待探测；窗口变化后会重置。
+                self._background_click_supported = False
+                logger.warning(f"后台点击未被JJ画布接受，切换兼容点击: {exc}")
+        elif self._background_click_supported is False:
+            logger.debug("当前JJ窗口已确认不支持后台点击，直接使用兼容点击")
+
+        return self._execute_cursor_move(
+            window_info,
+            checker,
+            start,
+            end,
+            start_piece,
+            start_point,
+            end_point,
+            analysis_token,
+            generation,
+        )
+
+    def _execute_cursor_move(
+        self,
+        window_info,
+        checker,
+        start,
+        end,
+        start_piece,
+        start_point,
+        end_point,
+        analysis_token,
+        generation,
+    ):
+        """兼容微信画布的系统点击；完成后恢复用户原光标位置。"""
         self._wait_for_user_idle(analysis_token, generation, window_info)
         controller = self.mouse_factory()
         original_position = controller.position
@@ -284,7 +563,7 @@ class AutoMoveController:
                     generation,
                 ):
                     logger.info(
-                        f"空闲自动走子确认成功: {move}, attempt={attempt_name}, "
+                        f"兼容自动走子确认成功: attempt={attempt_name}, "
                         f"{start_point} -> {end_point}"
                     )
                     return start_point, end_point
@@ -292,6 +571,76 @@ class AutoMoveController:
             raise AutoMoveError("多次点击后仍未检测到棋子落地")
         finally:
             self.sleeper(0.15)
+            controller.position = original_position
+
+    def _execute_window_move(
+        self,
+        window_info,
+        checker,
+        start,
+        end,
+        start_piece,
+        start_point,
+        end_point,
+        analysis_token,
+        generation,
+    ):
+        """根据视觉反馈执行后台走子，网络快慢只影响实际完成时间。"""
+        self.window_clicker(window_info, start_point)
+        logger.debug(f"后台自动走子已点起点: {start_point}")
+
+        # 以连续截图中的“抬子”状态确认进程定向点击是否被画布接受。
+        selection_deadline = time.monotonic() + self.selection_observe_timeout
+        lift_observed = False
+        while time.monotonic() < selection_deadline:
+            self._ensure_current(analysis_token, generation)
+            if getattr(checker, "_pending_lift_source", None) == start:
+                lift_observed = True
+                break
+            self.sleeper(self.action_poll_interval)
+
+        if not lift_observed:
+            raise AutoMoveBackgroundUnsupported("点击起点后未观察到抬子")
+
+        self.window_clicker(window_info, end_point)
+        logger.debug(f"后台自动走子已点终点: {end_point}")
+        deadline = time.monotonic() + self.move_response_timeout
+        next_retry = time.monotonic() + self.move_retry_interval
+
+        while True:
+            self._ensure_current(analysis_token, generation)
+            if self._is_move_observed(checker, start, end, start_piece):
+                logger.info(
+                    f"后台自动走子确认成功: {start_point} -> {end_point}"
+                )
+                return start_point, end_point
+
+            now = time.monotonic()
+            if now >= deadline:
+                raise AutoMoveError("等待棋盘确认落子超时")
+            if now >= next_retry:
+                # 已看到起点悬空时只补终点；否则重新完成一次起点-终点事件。
+                if getattr(checker, "_pending_lift_source", None) == start:
+                    logger.debug("棋子仍处于抬起状态，补点终点")
+                    self.window_clicker(window_info, end_point)
+                else:
+                    logger.debug("尚未观察到抬子，后台重试完整走子")
+                    self.window_clicker(window_info, start_point)
+                    self.window_clicker(window_info, end_point)
+                next_retry = now + self.move_retry_interval
+            self.sleeper(self.action_poll_interval)
+
+    def _compatibility_click_point(self, window_info, point):
+        """在目标窗口前台且用户空闲时点击一点，随后恢复原光标。"""
+        if not self.target_window_active_provider(window_info):
+            raise AutoMoveUserBusy("JJ窗口不在最前面，暂不执行兼容点击")
+        if self.user_idle_provider() < self.idle_required:
+            raise AutoMoveUserBusy("用户正在操作电脑，暂不执行兼容点击")
+        controller = self.mouse_factory()
+        original_position = controller.position
+        try:
+            self._click_point(controller, point)
+        finally:
             controller.position = original_position
 
     def _wait_for_user_idle(self, analysis_token, generation, window_info):
@@ -316,7 +665,7 @@ class AutoMoveController:
             self.sleeper(self.cursor_settle)
 
         self.clicker(controller)
-        self.sleeper(0.16)
+        self.sleeper(0.08)
 
     def _wait_until_move_observed(
         self,
@@ -330,16 +679,21 @@ class AutoMoveController:
         deadline = time.monotonic() + self.verify_timeout
         while True:
             self._ensure_current(analysis_token, generation)
-            board = getattr(checker, "last_board", None)
-            if board:
-                source_piece = board[start[0]][start[1]]
-                destination_piece = board[end[0]][end[1]]
-                if source_piece == "-" and destination_piece == start_piece:
-                    return True
+            if self._is_move_observed(checker, start, end, start_piece):
+                return True
             if time.monotonic() >= deadline:
                 break
             self.sleeper(self.verify_interval)
         return False
+
+    @staticmethod
+    def _is_move_observed(checker, start, end, start_piece):
+        board = getattr(checker, "last_board", None)
+        if not board:
+            return False
+        source_piece = board[start[0]][start[1]]
+        destination_piece = board[end[0]][end[1]]
+        return source_piece == "-" and destination_piece == start_piece
 
     def _ensure_current(self, analysis_token, generation):
         if not self.context.auto_move_enabled:

@@ -184,6 +184,31 @@ class EngineRecoveryTests(unittest.TestCase):
         self.assertEqual((6, 0), self.checker._pending_lift_source)
         self.assertFalse(any(m.type == MessageType.RETRY_CAPTURE for m in published))
 
+    def test_missing_bestmove_uses_latest_pv(self):
+        move = self.process._best_available_engine_move(
+            None, ["e3f3", "a0a1"]
+        )
+
+        self.assertEqual("e3f3", move)
+
+    def test_empty_engine_result_retries_with_short_movetime(self):
+        calls = []
+        self.process._get_engine_move = (
+            lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+
+        self.process._recover_from_empty_engine_move(
+            fen_str="3k5/9/9/9/9/9/9/9/9/3K5",
+            moves="e3f3",
+            state=self.state,
+            callback=lambda _message: None,
+            engine_retry=0,
+        )
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(("movetime", "5000"), calls[0][1]["search_override"])
+        self.assertEqual(1, calls[0][1]["engine_retry"])
+
 
 if __name__ == "__main__":
     unittest.main()

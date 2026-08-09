@@ -29,6 +29,14 @@ QLabel#textDisplay {
     color: #000000; /* 原来的黑色 */
 }
 
+QLabel#analysisInfo {
+    background-color: #F4F4F4;
+    border: 1px solid #C7CBD1;
+    border-radius: 7px;
+    padding: 2px 6px;
+    color: #2F3640;
+}
+
 /* 按钮通用样式 */
 QPushButton {
     background-color: #DCDDE1;

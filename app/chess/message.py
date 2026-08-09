@@ -13,6 +13,7 @@ class MessageType(Enum):
     RETRY_CAPTURE = auto()  # 重试截图消息
     NON_GAME_SCREEN = auto()  # 非棋局画面（结算画面等）
     PARAM_UPDATE = auto()     # 引擎动态参数显示更新
+    ENGINE_INFO = auto()      # 引擎实时局势/搜索遥测
 
 
 

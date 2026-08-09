@@ -465,7 +465,10 @@ class ChessProcess:
         logger.warning("揭棋暗子已移动，但未识别到揭示后的棋种: %s", step_info)
         return move_str
 
-    def _get_engine_move(self, fen_str, moves, state, callback, is_newgame_override=False, desync_retry=0) -> BoardAnalysisState:
+    def _get_engine_move(
+        self, fen_str, moves, state, callback, is_newgame_override=False,
+        desync_retry=0, engine_retry=0, search_override=None,
+    ) -> BoardAnalysisState:
         # 获取引擎着法 (异步多线程版)
         analysis_token = self.context.next_analysis_token()
 
@@ -520,7 +523,9 @@ class ChessProcess:
             try:
                 # [Watchdog] 启动看门狗定时器，防止引擎计算超时卡死
                 # 固定深度加深时同步延长安全上限，最高允许5分钟。
-                watchdog_timeout = self.engine.get_search_timeout(depth_bonus)
+                watchdog_timeout = self.engine.get_search_timeout(
+                    depth_bonus, search_override
+                )
                 watchdog_timer = threading.Timer(watchdog_timeout, self.engine.stop_analysis)
                 watchdog_timer.start()
                 
@@ -535,6 +540,7 @@ class ChessProcess:
                         moves=moves,
                         multipv=1,
                         depth_bonus=depth_bonus,
+                        search_override=search_override,
                     )
                 finally:
                     # 无论成功或异常，必须取消定时器
@@ -546,11 +552,22 @@ class ChessProcess:
                     return
 
                 self.checker.last_pvs = pvs
+
+                # 固定深度搜索可能在看门狗stop后没有来得及输出bestmove，
+                # 但此前的info pv仍是完整合法候选。优先复用最后PV首步，
+                # 避免把已经计算数十秒的结果全部丢弃。
+                move = self._best_available_engine_move(move, pvs)
                 
                 # 检查着法有效性
                 if not move or len(move) != 4:
                     logger.warning(f"Engine returned invalid move: '{move}', fen={verify_fen}, moves={moves}")
-                    message_bus.publish(Message(MessageType.ERROR, f"引擎未返回有效着法"))
+                    self._recover_from_empty_engine_move(
+                        fen_str=fen_str,
+                        moves=moves,
+                        state=state,
+                        callback=callback,
+                        engine_retry=engine_retry,
+                    )
                     return
                 
                 # 转换并推送结果
@@ -597,6 +614,78 @@ class ChessProcess:
         analysis_thread.start()
         
         return BoardAnalysisState()
+
+    @staticmethod
+    def _best_available_engine_move(move, pvs):
+        """bestmove缺失时安全采用最后PV的首步。"""
+        if move and isinstance(move, str) and len(move) == 4:
+            return move
+        for candidate in pvs or []:
+            if not isinstance(candidate, str):
+                continue
+            candidate = candidate.split()[0][:4] if candidate.split() else ""
+            if (
+                len(candidate) == 4
+                and candidate[0].isalpha()
+                and candidate[2].isalpha()
+                and candidate[1].isdigit()
+                and candidate[3].isdigit()
+            ):
+                logger.warning(f"bestmove缺失，采用最后PV候选: {candidate}")
+                return candidate
+        return None
+
+    def _recover_from_empty_engine_move(
+        self, *, fen_str, moves, state, callback, engine_retry
+    ):
+        """无bestmove且无PV时自动快速重算，必要时重启引擎。"""
+        if engine_retry == 0:
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "引擎未及时返回着法，正在快速重算...",
+            ))
+            self._get_engine_move(
+                fen_str,
+                moves,
+                state,
+                callback,
+                is_newgame_override=True,
+                engine_retry=1,
+                search_override=("movetime", "5000"),
+            )
+            return
+
+        if engine_retry == 1:
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "引擎响应异常，正在自动重启并重算...",
+            ))
+            try:
+                self.engine.quit(fast=True)
+                if not self.engine.start():
+                    raise RuntimeError("Pikafish重新启动失败")
+            except Exception as exc:
+                logger.error(f"自动重启引擎失败: {exc}")
+                message_bus.publish(Message(
+                    MessageType.ERROR,
+                    f"引擎自动重启失败: {exc}",
+                ))
+                return
+            self._get_engine_move(
+                fen_str,
+                moves,
+                state,
+                callback,
+                is_newgame_override=True,
+                engine_retry=2,
+                search_override=("movetime", "5000"),
+            )
+            return
+
+        message_bus.publish(Message(
+            MessageType.ERROR,
+            "引擎重启后仍未返回着法，请检查引擎文件",
+        ))
 
     def _recover_from_engine_desync(
         self,

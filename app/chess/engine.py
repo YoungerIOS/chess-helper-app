@@ -4,7 +4,7 @@ import sys
 import subprocess
 import threading
 from typing import Optional, Tuple, List, Callable
-from app.chess.message import Message, MessageType, MessageContent
+from app.chess.message import Message, MessageType
 from app.chess.context import context
 from app.tools.utils import resource_path
 from app.tools.log_config import get_logger
@@ -257,48 +257,93 @@ class ChessEngine:
                 cmd += f" moves {moves}"
         self._send_command(cmd)
 
-    def _go(self, param: str, value: str, timeout: float = 35) -> Tuple[List[str], str, List[dict]]:
+    def _go(
+        self, search_limits: dict, timeout: float = 35,
+        info_callback: Optional[Callable] = None,
+    ) -> Tuple[List[str], str, List[dict]]:
         """
         发送go命令和读取结果
         """
-        self._send_command(f"go {param} {value}")
-        return self._read_output_with_timeout(timeout)
+        depth = search_limits['depth']
+        movetime = search_limits['movetime']
+        self._send_command(f"go depth {depth} movetime {movetime}")
+        return self._read_output_with_timeout(timeout, info_callback)
 
     @staticmethod
-    def resolve_search_limit(engine_params, depth_bonus=0):
-        """解析本次搜索条件，并仅在固定深度模式应用吃子加成。"""
-        param = engine_params.get('goParam', 'depth')
-        value = engine_params.get(param, '20')
-        if not param or not value:
-            param, value = 'depth', '20'
+    def parse_engine_info(output: str) -> dict:
+        """解析UCI info行，供界面实时展示局势和搜索算力。"""
+        if not output or not output.startswith('info '):
+            return {}
+        parts = output.split()
+        result = {}
 
-        if param == 'depth':
+        def read_int(name):
             try:
-                base_depth = int(value)
-                bonus = max(0, int(depth_bonus))
-            except (TypeError, ValueError):
-                base_depth, bonus = 20, 0
-            value = str(min(200, max(1, base_depth + bonus)))
-        return param, str(value)
+                return int(parts[parts.index(name) + 1])
+            except (ValueError, IndexError, TypeError):
+                return None
 
-    def get_search_timeout(self, depth_bonus=0):
-        """根据有效搜索条件给固定深度残局保留足够的安全时间。"""
-        param, value = self.resolve_search_limit(
+        for key in ('depth', 'seldepth', 'nodes', 'nps', 'time'):
+            value = read_int(key)
+            if value is not None:
+                result[key] = value
+
+        if 'score' in parts:
+            try:
+                score_index = parts.index('score')
+                score_type = parts[score_index + 1]
+                score_value = int(parts[score_index + 2])
+                if score_type in ('cp', 'mate'):
+                    result['score_type'] = score_type
+                    result['score'] = score_value
+            except (ValueError, IndexError, TypeError):
+                pass
+        return result
+
+    @staticmethod
+    def resolve_search_limits(engine_params, depth_bonus=0, search_override=None):
+        """同时解析深度和时间上限，任意条件先达到即结束搜索。"""
+        try:
+            base_depth = int(engine_params.get('depth', 20))
+            bonus = max(0, int(depth_bonus))
+        except (TypeError, ValueError):
+            base_depth, bonus = 20, 0
+        try:
+            movetime = int(engine_params.get('movetime', 10000))
+        except (TypeError, ValueError):
+            movetime = 10000
+
+        limits = {
+            'depth': str(min(200, max(1, base_depth + bonus))),
+            'movetime': str(min(600000, max(1, movetime))),
+        }
+        if search_override:
+            param, value = str(search_override[0]), str(search_override[1])
+            if param in limits:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    parsed = int(limits[param])
+                maximum = 200 if param == 'depth' else 600000
+                limits[param] = str(min(maximum, max(1, parsed)))
+        return limits
+
+    def get_search_timeout(self, depth_bonus=0, search_override=None):
+        """进程读取超时略大于引擎时间上限，仅用于异常兜底。"""
+        limits = self.resolve_search_limits(
             context.get_engine_params(),
             depth_bonus,
+            search_override,
         )
-        if param == 'movetime':
-            try:
-                return max(35.0, int(value) / 1000.0 + 10.0)
-            except (TypeError, ValueError):
-                return 35.0
         try:
-            depth = int(value)
+            movetime_seconds = int(limits['movetime']) / 1000.0
         except (TypeError, ValueError):
-            depth = 20
-        return min(300.0, max(35.0, 35.0 + max(0, depth - 25) * 15.0))
+            movetime_seconds = 10.0
+        minimum = 8.0 if search_override else 12.0
+        margin = 5.0 if search_override else 10.0
+        return min(620.0, max(minimum, movetime_seconds + margin))
 
-    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1, depth_bonus: int = 0) -> Tuple[str, str, List[str]]:
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1, depth_bonus: int = 0, search_override=None) -> Tuple[str, str, List[str]]:
         """获取最佳走法
         Returns:
             (best_move, fen_string, pvs_list)
@@ -327,20 +372,27 @@ class ChessEngine:
             if fen:
                 fen_string = fen + ' ' + ('w' if side else 'b')
             engine_params = context.get_engine_params()
-            param, value = self.resolve_search_limit(engine_params, depth_bonus)
-            search_timeout = self.get_search_timeout(depth_bonus)
+            search_limits = self.resolve_search_limits(
+                engine_params,
+                depth_bonus,
+                search_override,
+            )
+            search_timeout = self.get_search_timeout(depth_bonus, search_override)
 
             if display_callback:
-                thinking_text = MessageContent.ENGINE_THINKING
-                if param == 'depth' and depth_bonus > 0:
-                    thinking_text = f"引擎正在计算（深度 {value}）..."
+                thinking_text = (
+                    f"引擎正在计算（深度≤{search_limits['depth']} / "
+                    f"时间≤{search_limits['movetime']}ms）..."
+                )
                 display_callback(Message(MessageType.STATUS, thinking_text))
 
             if is_newgame:
                 self.new_game()
 
             self._position(fen_string, use_startpos=use_startpos, moves=moves)
-            lines, best_move, pvs = self._go(param, value, search_timeout)
+            lines, best_move, pvs = self._go(
+                search_limits, search_timeout, display_callback
+            )
 
             # 恢复 MultiPV 为 1 (以免影响后续正常思考)
             if multipv > 1:
@@ -384,7 +436,10 @@ class ChessEngine:
     
 
 
-    def _read_output_with_timeout(self, timeout: float = 1.0) -> Tuple[List[str], str, List[dict]]:
+    def _read_output_with_timeout(
+        self, timeout: float = 1.0,
+        info_callback: Optional[Callable] = None,
+    ) -> Tuple[List[str], str, List[dict]]:
         """读取引擎输出，带超时控制
         Returns:
             lines: 所有输出行
@@ -396,11 +451,26 @@ class ChessEngine:
         pvs = {} # Key: multipv_id, Value: info_dict
         
         start_time = time.time()
+        last_info_emit = 0.0
         
         while time.time() - start_time < timeout:
             output = self.process.stdout.readline().strip()
             if output:
                 lines.append(output)
+                if output.startswith('info '):
+                    telemetry = self.parse_engine_info(output)
+                    now = time.monotonic()
+                    if (
+                        info_callback
+                        and telemetry.get('depth') is not None
+                        and now - last_info_emit >= 0.15
+                    ):
+                        info_callback(Message(
+                            MessageType.ENGINE_INFO,
+                            telemetry,
+                            **telemetry,
+                        ))
+                        last_info_emit = now
                 if output.startswith('info') and ' multipv ' in output and ' pv ' in output:
                     # 解析 info 行
                     try:
