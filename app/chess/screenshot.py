@@ -243,32 +243,34 @@ class ChessCaptureManager:
             platform = self.context.get_platform(self.context.platform)
             return platform.regions.get("board") if platform else None
         
-        while not self.stop_event.is_set():
-            try:
-                # 动态获取当前棋盘区域
-                board_region = get_current_board_region()
-                if board_region is None:
-                    print("警告：连续截图模式下棋盘区域未配置，跳过本次截图")
-                    time.sleep(interval)
-                    continue
-                
-                capture_time = time.time()
-                with mss.mss() as sct:
+        # 复用同一个MSS实例。旧实现每180ms重新加载一次CoreGraphics
+        # 截图后端，虽然单次会释放图像，却会制造大量不必要的原生对象。
+        with mss.mss() as sct:
+            while not self.stop_event.is_set():
+                try:
+                    # 动态获取当前棋盘区域
+                    board_region = get_current_board_region()
+                    if board_region is None:
+                        print("警告：连续截图模式下棋盘区域未配置，跳过本次截图")
+                        time.sleep(interval)
+                        continue
+
+                    capture_time = time.time()
                     board_screenshot = sct.grab(board_region)
-                
-                # 使用全局函数处理截图
-                stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[continuous]")
-                
-                # 如果检测到稳定帧，则入队
-                if stable_frame is not None:
-                    # current_turn = None # 连续模式下的轮次由 processor 结合 marker 动态推断
-                    if self._enqueue_latest_frame((capture_time, board_screenshot)):
-                        self.last_capture_time = time.time()
-                
-                time.sleep(interval)
-            except Exception as e:
-                print(f"[continuous] 捕获异常: {e}")
-                time.sleep(interval)
+
+                    # 使用全局函数处理截图
+                    stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[continuous]")
+
+                    # 如果检测到稳定帧，则入队
+                    if stable_frame is not None:
+                        # current_turn = None # 连续模式下的轮次由 processor 结合 marker 动态推断
+                        if self._enqueue_latest_frame((capture_time, board_screenshot)):
+                            self.last_capture_time = time.time()
+
+                    time.sleep(interval)
+                except Exception as e:
+                    print(f"[continuous] 捕获异常: {e}")
+                    time.sleep(interval)
 
     def _on_retry_capture(self, message):
         """

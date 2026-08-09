@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -65,6 +66,39 @@ class FakeMouse:
 
 
 class AutoMoverTests(unittest.TestCase):
+    def test_default_window_capture_uses_bounded_mss_buffer(self):
+        class FakeShot:
+            width = 4
+            height = 3
+            bgra = bytes(range(width * height * 4))
+
+        class FakeCapture:
+            def __init__(self):
+                self.region = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def grab(self, region):
+                self.region = region
+                return FakeShot()
+
+        capture = FakeCapture()
+        with patch("mss.mss", return_value=capture):
+            image = AutoMoveController._default_window_image_provider({
+                "region": {"left": 10, "top": 20, "width": 4, "height": 3}
+            })
+
+        self.assertEqual(
+            {"left": 10, "top": 20, "width": 4, "height": 3},
+            capture.region,
+        )
+        self.assertEqual((3, 4, 3), image.shape)
+        self.assertTrue(image.flags["OWNDATA"])
+
     def test_move_orientation_matches_board_display(self):
         self.assertEqual(((9, 7), (7, 6)), move_to_grid("h0g2", True))
         self.assertEqual(((0, 1), (2, 2)), move_to_grid("h0g2", False))

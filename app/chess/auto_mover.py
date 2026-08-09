@@ -106,7 +106,7 @@ class AutoMoveController:
         move_response_timeout=8.0,
         action_poll_interval=0.06,
         move_retry_interval=0.45,
-        button_scan_interval=0.25,
+        button_scan_interval=0.75,
     ):
         self.context = context
         self.window_provider = window_provider
@@ -241,32 +241,33 @@ class AutoMoveController:
 
     @staticmethod
     def _default_window_image_provider(window_info):
-        """读取指定窗口图像，按钮检测不依赖棋盘定位区域。"""
+        """截取窗口在屏幕上的区域，避免CGWindow截图累积Mach内存。"""
         try:
-            window_id = int(window_info.get("window_id"))
-            import numpy as np
-            import Quartz
+            region = window_info.get("region", {})
+            left = round(float(region["left"]))
+            top = round(float(region["top"]))
+            width = round(float(region["width"]))
+            height = round(float(region["height"]))
+            if width <= 1 or height <= 1:
+                return None
 
-            image = Quartz.CGWindowListCreateImage(
-                Quartz.CGRectNull,
-                Quartz.kCGWindowListOptionIncludingWindow,
-                window_id,
-                Quartz.kCGWindowImageBoundsIgnoreFraming |
-                Quartz.kCGWindowImageBestResolution,
-            )
-            if image is None:
-                return None
-            width = int(Quartz.CGImageGetWidth(image))
-            height = int(Quartz.CGImageGetHeight(image))
-            bytes_per_row = int(Quartz.CGImageGetBytesPerRow(image))
-            data = bytes(
-                Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(image))
-            )
-            row_pixels = bytes_per_row // 4
-            if width <= 0 or height <= 0 or row_pixels < width:
-                return None
-            bgra = np.frombuffer(data, dtype=np.uint8).reshape(height, row_pixels, 4)
-            return bgra[:, :width, :3].copy()
+            import mss
+            import numpy as np
+
+            with mss.mss() as capture:
+                shot = capture.grab({
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                })
+                # 必须复制后再离开mss上下文，避免数组继续引用原生截图缓冲。
+                bgra = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(
+                    shot.height,
+                    shot.width,
+                    4,
+                )
+                return bgra[:, :, :3].copy()
         except Exception as exc:
             logger.debug(f"无法读取JJ窗口用于按钮检测: {exc}")
             return None

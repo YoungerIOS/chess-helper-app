@@ -1,8 +1,10 @@
 import queue
+import json
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
+from app.chess.context import ChessContext, Platform
 from app.chess.message import Message, MessageType
 from app.chess.message_bus import MessageBus
 from app.chess.screenshot import ChessCaptureManager
@@ -74,6 +76,79 @@ class BackpressureTests(unittest.TestCase):
 
             self.assertTrue(workers)
             self.assertTrue(all(not worker.is_alive() for worker in workers))
+
+    def test_continuous_capture_reuses_one_mss_instance(self):
+        class FakePlatform:
+            regions = {"board": {"left": 0, "top": 0, "width": 10, "height": 10}}
+
+        class FakeContext:
+            @staticmethod
+            def get_platform(_name):
+                return FakePlatform()
+
+            platform = "JJ"
+
+        class FakeCapture:
+            def __init__(self, stop_event):
+                self.stop_event = stop_event
+                self.grabs = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def grab(self, _region):
+                self.grabs += 1
+                if self.grabs == 3:
+                    self.stop_event.set()
+                return object()
+
+        manager = ChessCaptureManager.__new__(ChessCaptureManager)
+        manager.context = FakeContext()
+        manager.stop_event = threading.Event()
+        manager.last_capture_time = 0
+        capture = FakeCapture(manager.stop_event)
+
+        with (
+            patch("app.chess.screenshot.mss.mss", return_value=capture) as factory,
+            patch("app.chess.screenshot.filter_stable_frame", return_value=(None, None)),
+        ):
+            manager._continuous_capture_worker(interval=0)
+
+        factory.assert_called_once_with()
+        self.assertEqual(3, capture.grabs)
+
+    def test_config_reload_reuses_loaded_piece_model(self):
+        model = object()
+        platform = Platform(
+            name="JJ",
+            board_coords={"x": [1], "y": [2]},
+            regions={"board": {"left": 1}},
+            _piece_recognizer=model,
+        )
+        config = {
+            "JJ": {
+                "board_coords": {"x": [3], "y": [4]},
+                "regions": {"board": {"left": 9}},
+            },
+            "platform": "JJ",
+            "engine_params": {},
+        }
+        current = ChessContext.__new__(ChessContext)
+        current._platforms = {"JJ": platform}
+        current._engine_params_lock = threading.Lock()
+
+        with (
+            patch("app.chess.context.utils.resource_path", return_value="config.json"),
+            patch("builtins.open", mock_open(read_data=json.dumps(config))),
+        ):
+            current.load_config()
+
+        self.assertIs(platform, current._platforms["JJ"])
+        self.assertIs(model, current._platforms["JJ"]._piece_recognizer)
+        self.assertEqual({"x": [3], "y": [4]}, platform.board_coords)
 
 
 if __name__ == "__main__":

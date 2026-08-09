@@ -159,15 +159,25 @@ class ChessContext:
             with open(utils.resource_path("json", "game_config.json"), "r") as f:
                 config = json.load(f)
                 
-            # 初始化平台
-            self._platforms = {}
+            # 更新平台配置时复用已经加载的识别模型。每次开始辅助都会重新
+            # 读取配置，但ONNX Runtime会为每个新Session创建原生线程池和
+            # 内存池；反复丢弃并重建Session会让进程峰值内存持续抬升。
+            existing_platforms = self._platforms
+            updated_platforms = {}
             for platform_name, game_config in config.items():
                 if platform_name in ['TT', 'JJ']:
-                    self._platforms[platform_name] = Platform(
-                        name=platform_name,
-                        board_coords=game_config['board_coords'],
-                        regions=game_config['regions']
-                    )
+                    platform = existing_platforms.get(platform_name)
+                    if platform is None:
+                        platform = Platform(
+                            name=platform_name,
+                            board_coords=game_config['board_coords'],
+                            regions=game_config['regions']
+                        )
+                    else:
+                        platform.board_coords = game_config['board_coords']
+                        platform.regions = game_config['regions']
+                    updated_platforms[platform_name] = platform
+            self._platforms = updated_platforms
             
             # 加载引擎参数
             with self._engine_params_lock:

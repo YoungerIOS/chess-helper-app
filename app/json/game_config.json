@@ -74,20 +74,20 @@
         },
         "regions": {
             "board": {
-                "left": 1703.0,
-                "top": 394.0,
-                "width": 580.8,
-                "height": 620.0
+                "left": 1702.7,
+                "top": 392.2,
+                "width": 581.6,
+                "height": 623.0
             },
             "avatar_upper": {
-                "left": 1703.0,
-                "top": 193.1,
+                "left": 1702.7,
+                "top": 190.4,
                 "width": 129.0,
                 "height": 129.0
             },
             "avatar_lower": {
-                "left": 2167.6,
-                "top": 1091.5,
+                "left": 2168.0,
+                "top": 1093.0,
                 "width": 129.0,
                 "height": 129.0
             }
