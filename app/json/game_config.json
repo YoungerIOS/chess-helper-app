@@ -59,7 +59,6 @@
     "analysis_mode": "continuous",
     "auto_move_enabled": true,
     "capture_depth_enabled": false,
-    "game_variant": "xiangqi",
     "board_index": 0,
     "theme": "light",
     "engine_params": {

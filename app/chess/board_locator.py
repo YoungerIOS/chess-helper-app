@@ -472,28 +472,6 @@ class BoardLocator:
                     'pawns': [(左兵/卒), (右兵/卒)]
                 }
         """
-        # 揭棋开局只有将帅正面可识别，其余棋子均为暗子。利用将帅同行
-        # 的整排圆形恢复棋盘横向跨度，不再依赖“兵/车”CNN类别。
-        if self.context.game_variant == "jieqi":
-            kings_black = [p for p in piece_centers if p[3] == 'k']
-            kings_red = [p for p in piece_centers if p[3] == 'K']
-            if len(kings_black) != 1 or len(kings_red) != 1:
-                raise PieceError("揭棋定位失败：未唯一识别将帅")
-            combinations = []
-            for king in (kings_black[0], kings_red[0]):
-                same_rank = [
-                    p for p in piece_centers
-                    if p is not king and abs(p[1] - king[1]) <= 2 * king[2]
-                ]
-                if len(same_rank) < 2:
-                    continue
-                left = min(same_rank, key=lambda p: p[0])
-                right = max(same_rank, key=lambda p: p[0])
-                combinations.append({'king': king, 'rooks': [left, right], 'pawns': []})
-            if not combinations:
-                raise PieceError("揭棋定位失败：未找到暗子底线")
-            return combinations
-
         # 分类棋子
         kings_black = []   # 黑将 k
         kings_red = []     # 红帅 K
@@ -848,12 +826,6 @@ class BoardLocator:
             cv2.circle(img_np, (x, y), r, (255, 0, 0), 2)  # 蓝色圆圈
             cv2.circle(img_np, (x, y), 2, (255, 0, 0), 3)  # 蓝色圆心
             
-            if self.context.game_variant == "jieqi":
-                # 保留全部圆心用于暗子阵形几何定位；将帅仍采用CNN身份。
-                normalized_type = piece_type if piece_type in ('k', 'K') and confidence > 0.8 else '?'
-                piece_centers.append((x, y, r, normalized_type))
-                continue
-
             # 如果是将帅或兵卒且置信度高，添加到结果中
             if piece_type in ('k', 'K', 'p', 'P', 'r', 'R') and confidence > 0.9:
                 piece_centers.append((x, y, r, piece_type))
@@ -1174,12 +1146,7 @@ class BoardLocator:
                                         self.handle_locating_board_tasks(moved_coords=move_region)
 
                                 reset_border_cache(self.context.platform)
-                                # 揭棋中途无法从单帧重建暗子历史；窗口移动只需
-                                # 重置视觉缓存，保留Checker和着法历史。
-                                if self.context.game_variant == "jieqi":
-                                    self.context.reset_recognizer()
-                                else:
-                                    self.context.reset_checker()
+                                self.context.reset_checker()
                                 # 成功后更新基准为当前稳定的窗口边界，并清空待处理标志
                                 baseline_bounds = last_seen_bounds
                                 # 成功后刷新基准棋盘区域

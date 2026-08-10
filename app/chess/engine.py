@@ -62,17 +62,6 @@ class ChessEngine:
         """获取默认引擎路径"""
         from app.tools.utils import app_data_path
 
-        if context.game_variant == "jieqi":
-            candidates = [
-                app_data_path("Pikafish/PikaJieQi"),
-                resource_path("Pikafish", "PikaJieQi"),
-                resource_path("Pikafish", "pikafish-jieqi-apple-silicon"),
-            ]
-            for candidate in candidates:
-                if os.path.exists(candidate):
-                    return candidate
-            return candidates[0]
-        
         # Windows release archives contain several CPU-specific executables.
         # Prefer the fastest broadly compatible builds and never auto-select
         # AVX-512/VNNI builds, which crash with 0xC000001D on older CPUs.
@@ -464,8 +453,6 @@ class ChessEngine:
                     # 调试：打印原始 bestmove 响应
                     print(f"Debug - Engine raw response: {best_move}")
                     start_index = best_move.find('bestmove') + len('bestmove') + 1
-                    # 揭棋引擎的推荐着法仍是4位坐标；第5/6位只用于向引擎
-                    # 回放已经揭示身份的历史着法。
                     best_move = best_move[start_index:].split()[0][:4]
                     
                     # 检查是否为无效着法（如 "(none)" 或 "0000"）

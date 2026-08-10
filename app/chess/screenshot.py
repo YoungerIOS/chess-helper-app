@@ -348,28 +348,14 @@ class ChessCaptureManager:
             if engine is not None:
                 engine._send_command('stop')
 
-            if self.context.game_variant == "jieqi":
-                # 揭棋无法从一张中局截图恢复全部暗子身份，因此刷新只能
-                # 重做视觉推理，绝不能清空已积累的暗子状态与带后缀历史。
-                self.context.reset_recognizer()
-                checker = self.context.get_checker()
-                if checker is not None:
-                    checker.consecutive_drops = 0
-                    checker.consecutive_mismatches = 0
-                self.context.discard_before_timestamp = time.time()
-                print("Debug - 揭棋软刷新: 保留 History/BaseFen/Checker，仅重置视觉缓存。")
-                reason = '揭棋软刷新（保留历史）'
-            else:
-                # 普通象棋可从当前完整局面FEN重新建立状态，维持原硬刷新语义。
-                self.context.reset_checker()
-                self.context.history.clear()
-                self.context.base_fen = None
-                self.context.reset_recognizer()
-                print("Debug - 手动刷新 (Hard Reset): History, BaseFen, Checker Cleared.")
-                reason = '手动刷新重置'
+            self.context.reset_checker()
+            self.context.history.clear()
+            self.context.base_fen = None
+            self.context.reset_recognizer()
+            print("Debug - 手动刷新 (Hard Reset): History, BaseFen, Checker Cleared.")
             
             # 3. 复用重试截图逻辑（自动检测头像状态并强制截图）
-            if self._execute_retry_capture(reason):
+            if self._execute_retry_capture('手动刷新重置'):
                  return True
             return False
                 

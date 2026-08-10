@@ -366,9 +366,6 @@ def convert_move_to_chinese(move, board_array, is_red):
     if not is_my_piece:
         return None
 
-    if piece_type in ('X', 'x'):
-        return f"暗子 {move}"
-    
     piece_name = PIECE_CODES[piece_type]  
   
     # 判断移动类型（进、退、平）和构建棋谱描述

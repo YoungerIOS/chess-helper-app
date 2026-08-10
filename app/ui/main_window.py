@@ -233,12 +233,6 @@ class MainWindow(QMainWindow):
         self.capture_depth_action.setChecked(context.capture_depth_enabled)
         self.capture_depth_action.triggered.connect(self.toggle_capture_depth)
 
-        self.settings_menu.addSeparator()
-        self.jieqi_action = self.settings_menu.addAction("揭棋模式（实验）")
-        self.jieqi_action.setCheckable(True)
-        self.jieqi_action.setChecked(context.game_variant == "jieqi")
-        self.jieqi_action.triggered.connect(self.toggle_jieqi_mode)
-        
         # 创建参数选择按钮
         self.param_btn = QPushButton("引擎参数")
         self.param_btn.setFixedHeight(35)
@@ -597,7 +591,7 @@ class MainWindow(QMainWindow):
                     message_bus.publish_error(f"引擎初始化失败\n{error}")
                 
                 # 初始化局面检查器和历史记录
-                context.set_checker(PositionChecker(variant=context.game_variant))
+                context.set_checker(PositionChecker())
                 context.history = MoveHistory()
                 
                 # 执行主处理流程（阻塞调用）
@@ -908,27 +902,6 @@ class MainWindow(QMainWindow):
         )
         self.update_text(message, MessageType.STATUS)
 
-    def toggle_jieqi_mode(self, checked=None):
-        """切换普通象棋/揭棋；模式改变后必须重建引擎和棋局状态。"""
-        enabled = self.jieqi_action.isChecked() if checked is None else bool(checked)
-        self.jieqi_action.setChecked(enabled)
-        if self.is_running:
-            self.on_stop()
-        context.invalidate_analysis()
-        if hasattr(self, 'auto_mover'):
-            self.auto_mover.cancel_pending()
-        context.quit_engine()
-        context.history.clear()
-        context.base_fen = None
-        context.reset_checker()
-        context.reset_recognizer()
-        context.game_variant = "jieqi" if enabled else "xiangqi"
-        self.update_text(
-            "已切换到揭棋模式，请从完整新局开始并重新点击开始"
-            if enabled else "已切换到普通象棋模式，请重新点击开始",
-            MessageType.STATUS,
-        )
-
     def refresh_engine_param_label(self):
         """显示当前参数；固定深度模式同时显示本局吃子加成。"""
         if not hasattr(self, 'param_label') or not hasattr(self, 'selected_engine_param'):
@@ -1004,11 +977,7 @@ class MainWindow(QMainWindow):
                 try:
                     success = self.capture_manager.manually_capture_once()
                     if success:
-                        message_bus.publish_status(
-                            "正在重新识别当前局面（已保留揭棋历史）..."
-                            if context.game_variant == "jieqi"
-                            else "重置数据并重新分析..."
-                        )
+                        message_bus.publish_status("重置数据并重新分析...")
                     else:
                         message_bus.publish_error("截图服务繁忙，本次刷新未完成，请稍后重试")
                 finally:

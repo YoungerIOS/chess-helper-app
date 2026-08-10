@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QStackedLayout
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF, QTransform, QPainterPath
-from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QTimer, QSize
+from PySide6.QtCore import Qt, QRect, QPointF, QTimer, QSize
 from app.tools.utils import resource_path
 from app.chess.context import context
 import os
@@ -179,23 +179,6 @@ class BoardCanvas(QLabel):
         for piece_type, pos_x, pos_y in self.pieces:
             piece_cx = inner_left + pos_x * cell_width
             piece_cy = inner_top + pos_y * cell_height
-            if piece_type in ('X', 'x'):
-                # 暗子没有文字正面素材，直接绘制与JJ棋盘接近的木色背面。
-                # 红黑细环只表示阵营，不泄露暗子的真实身份。
-                radius = min(cell_width, cell_height) * 0.43
-                rect = QRectF(piece_cx - radius, piece_cy - radius, radius * 2, radius * 2)
-                ring = QColor('#B82222') if piece_type == 'X' else QColor('#303030')
-                painter.save()
-                painter.setRenderHint(QPainter.Antialiasing)
-                painter.setBrush(QColor('#E8BE79'))
-                painter.setPen(QPen(QColor('#9A6532'), max(1.0, radius * 0.10)))
-                painter.drawEllipse(rect)
-                painter.setBrush(Qt.NoBrush)
-                painter.setPen(QPen(ring, max(1.0, radius * 0.045)))
-                painter.drawEllipse(rect.adjusted(radius * 0.18, radius * 0.18, -radius * 0.18, -radius * 0.18))
-                painter.drawEllipse(rect.adjusted(radius * 0.28, radius * 0.28, -radius * 0.28, -radius * 0.28))
-                painter.restore()
-                continue
             if piece_type in self.piece_images:
                 piece_img = self.piece_images[piece_type]
                 # 计算棋子中心（落点在交叉点）

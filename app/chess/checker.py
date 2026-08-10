@@ -66,34 +66,7 @@ class PositionChecker:
         'R': 2, 'N': 2, 'B': 2, 'A': 2, 'K': 1, 'C': 2, 'P': 5
     }
 
-    START_JIEQI_RED = [
-        ['x', 'x', 'x', 'x', 'k', 'x', 'x', 'x', 'x'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['-', 'x', '-', '-', '-', '-', '-', 'x', '-'],
-        ['x', '-', 'x', '-', 'x', '-', 'x', '-', 'x'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['X', '-', 'X', '-', 'X', '-', 'X', '-', 'X'],
-        ['-', 'X', '-', '-', '-', '-', '-', 'X', '-'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['X', 'X', 'X', 'X', 'K', 'X', 'X', 'X', 'X'],
-    ]
-    START_JIEQI_BLACK = [
-        ['X', 'X', 'X', 'X', 'K', 'X', 'X', 'X', 'X'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['-', 'X', '-', '-', '-', '-', '-', 'X', '-'],
-        ['X', '-', 'X', '-', 'X', '-', 'X', '-', 'X'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['x', '-', 'x', '-', 'x', '-', 'x', '-', 'x'],
-        ['-', 'x', '-', '-', '-', '-', '-', 'x', '-'],
-        ['-', '-', '-', '-', '-', '-', '-', '-', '-'],
-        ['x', 'x', 'x', 'x', 'k', 'x', 'x', 'x', 'x'],
-    ]
-    JIEQI_COUNTS = {**START_COUNTS, 'x': 15, 'X': 15}
-
-    def __init__(self, variant="xiangqi"):
-        self.variant = variant if variant in ("xiangqi", "jieqi") else "xiangqi"
+    def __init__(self):
         self.is_red = True
         self._side_locked = False
         self.last_board = None  # 上一次的棋盘数组
@@ -103,9 +76,6 @@ class PositionChecker:
         self.consecutive_mismatches = 0 # 连续历史校验不一致计数
         self.in_settlement_screen = False  # 是否处于结算画面状态
         self.capture_depth_bonus = 0  # 本局我方被吃棋子带来的额外搜索深度
-        self._last_visual_hashes = None
-        self.pending_jieqi_analysis_retry = False
-        self.jieqi_analysis_retry_count = 0
         self._pending_lift_source = None
         
         # 优化：模拟状态缓存
@@ -128,9 +98,6 @@ class PositionChecker:
         self.consecutive_mismatches = 0
         self.in_settlement_screen = False  # 重置结算状态
         self.capture_depth_bonus = 0
-        self._last_visual_hashes = None
-        self.pending_jieqi_analysis_retry = False
-        self.jieqi_analysis_retry_count = 0
         self._pending_lift_source = None
         self._side_locked = False
         
@@ -140,18 +107,6 @@ class PositionChecker:
 
         # 清空缓存
         self._sim_cache = { 'base_fen': None, 'moves_str': None, 'board': None }
-
-    @property
-    def start_red(self):
-        return self.START_JIEQI_RED if self.variant == "jieqi" else self.START_RED
-
-    @property
-    def start_black(self):
-        return self.START_JIEQI_BLACK if self.variant == "jieqi" else self.START_BLACK
-
-    @property
-    def start_counts(self):
-        return self.JIEQI_COUNTS.copy() if self.variant == "jieqi" else self.START_COUNTS.copy()
 
     @staticmethod
     def _matches_start_layout(board, template, max_same_color_errors=3):
@@ -180,7 +135,7 @@ class PositionChecker:
 
     def _detect_and_normalize_start(self, board):
         """识别红/黑方开局，并以标准阵形修正少量CNN棋种误判。"""
-        for is_red, template in ((True, self.start_red), (False, self.start_black)):
+        for is_red, template in ((True, self.START_RED), (False, self.START_BLACK)):
             if not self._matches_start_layout(board, template):
                 continue
             for row in range(10):
@@ -189,291 +144,6 @@ class PositionChecker:
             self._side_locked = True
             return is_red, template
         return None, None
-
-    def normalize_visual_board(
-        self, board_array, grid_hashes=None, marker_coords=None, details=None
-    ):
-        """把揭棋画面的未翻棋子稳定表示为X/x。
-
-        棋子模型不需要新增15种暗子类别：开局由标准暗子阵形建立状态，
-        后续未移动暗子沿用X/x；暗子一旦移动，目标格的CNN结果就是其
-        揭示后的真实身份。
-        """
-        if self.variant != "jieqi" or board_array is None:
-            return board_array
-
-        board = [row[:] for row in board_array]
-        raw_board = [row[:] for row in board_array]
-        if self.last_board is None:
-            # 只要将帅方向明确，就从完整揭棋开局建立暗子状态。揭棋模式
-            # 必须从新局开始跟踪，避免对中途局面凭空补暗子。
-            has_black_top = any(board[r][c] == 'k' for r in range(3) for c in range(3, 6))
-            has_red_top = any(board[r][c] == 'K' for r in range(3) for c in range(3, 6))
-            if has_black_top != has_red_top:
-                template = self.START_JIEQI_RED if has_black_top else self.START_JIEQI_BLACK
-                self._last_visual_hashes = grid_hashes
-                return [row[:] for row in template]
-            self._last_visual_hashes = grid_hashes
-            return board
-
-        previous_hashes = self._last_visual_hashes
-        changed_hashes = set()
-        if grid_hashes is not None and previous_hashes is not None:
-            for r in range(min(10, len(grid_hashes), len(previous_hashes))):
-                for c in range(min(9, len(grid_hashes[r]), len(previous_hashes[r]))):
-                    if grid_hashes[r][c] != previous_hashes[r][c]:
-                        changed_hashes.add((r, c))
-
-        for r in range(10):
-            for c in range(9):
-                previous = self.last_board[r][c]
-                current = board[r][c]
-                unchanged = bool(
-                    grid_hashes is not None
-                    and previous_hashes is not None
-                    and r < len(grid_hashes)
-                    and r < len(previous_hashes)
-                    and c < len(grid_hashes[r])
-                    and c < len(previous_hashes[r])
-                    and grid_hashes[r][c] == previous_hashes[r][c]
-                )
-                # 软刷新会清空识别器自己的缓存，但Checker仍保存最后可信帧。
-                # 图像哈希未变化的格子直接沿用可信结果，避免一次低置信度
-                # 把大量已揭棋子误清为空格。
-                if unchanged:
-                    board[r][c] = previous
-                    continue
-                if previous not in ('X', 'x'):
-                    continue
-                # 同色的任意CNN类别都是暗子背面的误分类，继续保持暗子；
-                # 空格表示它已离开，异色棋子表示它已被吃并被对方占据。
-                if current != '-' and current.isupper() == previous.isupper():
-                    board[r][c] = previous
-
-        # 暗子移动后，落点会显示真实棋种，但起点的空格有时仍会被CNN误判
-        # 为同色棋子，上面的暗子保护便会让画面只剩一个格子变化。此时结合
-        # 移动光圈、格子哈希变化和暗子名义棋种规则，恢复唯一可信的起点。
-        marker_set = set(marker_coords or [])
-        low_confidence_predictions = {}
-        for detail in details or []:
-            error_type = getattr(getattr(detail, 'type', None), 'name', '')
-            if error_type != 'LOW_CONFIDENCE':
-                continue
-            position = getattr(detail, 'position', None)
-            piece_type = getattr(detail, 'piece_type', None)
-            confidence = float(getattr(detail, 'confidence', 0.0) or 0.0)
-            if position is not None and piece_type:
-                low_confidence_predictions[tuple(position)] = (
-                    piece_type,
-                    confidence,
-                )
-        for dst_r in range(10):
-            for dst_c in range(9):
-                revealed = board[dst_r][dst_c]
-                old_target = self.last_board[dst_r][dst_c]
-                if (
-                    revealed in ('-', 'X', 'x', 'K', 'k')
-                    or revealed == old_target
-                    or (old_target != '-' and old_target.isupper() == revealed.isupper())
-                ):
-                    continue
-
-                candidates = []
-                for src_r in range(10):
-                    for src_c in range(9):
-                        dark = self.last_board[src_r][src_c]
-                        if dark not in ('X', 'x') or dark.isupper() != revealed.isupper():
-                            continue
-                        if (src_r, src_c) == (dst_r, dst_c):
-                            continue
-
-                        step_info = {
-                            'from_pos': (src_r, src_c),
-                            'to_pos': (dst_r, dst_c),
-                            'piece': dark,
-                        }
-                        if not self.is_step_legal(
-                            self.last_board, board, self.is_red, step_info
-                        ):
-                            continue
-
-                        source = (src_r, src_c)
-                        marker_evidence = source in marker_set
-                        hash_evidence = source in changed_hashes
-                        visual_evidence = raw_board[src_r][src_c] != dark
-                        if marker_evidence or hash_evidence:
-                            candidates.append((
-                                marker_evidence,
-                                hash_evidence,
-                                visual_evidence,
-                                source,
-                            ))
-
-                if not candidates:
-                    continue
-
-                # 标记优先，其次使用哈希和原始分类变化。只有最高证据候选唯一
-                # 时才纠正，避免在多个暗子都可能到达时猜错并污染历史。
-                candidates.sort(reverse=True)
-                best_score = candidates[0][:3]
-                best = [item for item in candidates if item[:3] == best_score]
-                if len(best) != 1:
-                    continue
-
-                src_r, src_c = best[0][3]
-                board[src_r][src_c] = '-'
-                logger.info(
-                    f"揭棋补全暗子移动: 起点={(src_r, src_c)}, "
-                    f"落点={(dst_r, dst_c)}, 揭示={revealed}, "
-                    f"标记={best[0][0]}, 哈希变化={best[0][1]}"
-                )
-                # 一帧最多只补全一步棋。
-                self._last_visual_hashes = grid_hashes
-                return board
-
-        # 已揭棋子移动时，选中光圈可能令起点或落点的CNN置信度降低。
-        # Recognizer会安全回退到上一帧，因此表面上只剩一个端点变化。
-        # 结合低置信度(None哈希)、光圈、哈希变化及走法规则补全另一端，
-        # 让这种明确变化在第一张稳定帧就通过，而不是等待三轮重拍。
-        changes = [
-            (r, c, self.last_board[r][c], board[r][c])
-            for r in range(10)
-            for c in range(9)
-            if self.last_board[r][c] != board[r][c]
-        ]
-
-        def has_none_hash(pos):
-            if grid_hashes is None:
-                return False
-            r, c = pos
-            return (
-                r < len(grid_hashes)
-                and c < len(grid_hashes[r])
-                and grid_hashes[r][c] is None
-            )
-
-        def select_unique(candidates):
-            if not candidates:
-                return None
-            candidates.sort(reverse=True)
-            best_score = candidates[0][:-1]
-            best = [item for item in candidates if item[:-1] == best_score]
-            return best[0][-1] if len(best) == 1 else None
-
-        if len(changes) == 1:
-            row, col, old_piece, new_piece = changes[0]
-
-            # 起点已经变空，但落点因光圈低置信度仍被回退为空格。
-            if old_piece not in ('-', 'X', 'x') and new_piece == '-':
-                src = (row, col)
-                candidates = []
-                for dst_r in range(10):
-                    for dst_c in range(9):
-                        dst = (dst_r, dst_c)
-                        target = self.last_board[dst_r][dst_c]
-                        if dst == src or (
-                            target != '-'
-                            and target.isupper() == old_piece.isupper()
-                        ):
-                            continue
-                        marker_evidence = dst in marker_set
-                        prediction = low_confidence_predictions.get(dst)
-                        low_confidence = bool(
-                            has_none_hash(dst)
-                            and prediction
-                            and prediction[0] == old_piece
-                            and prediction[1] >= 0.25
-                        )
-                        hash_evidence = dst in changed_hashes
-                        visual_evidence = raw_board[dst_r][dst_c] != target
-                        # 落点必须有“确实看见同一棋子”的正证据。单纯哈希
-                        # 改变可能只是鼠标、光圈或悬空棋子的动画，不能据此
-                        # 猜一个落点。
-                        if not (marker_evidence or low_confidence or visual_evidence):
-                            continue
-                        step_info = {
-                            'from_pos': src,
-                            'to_pos': dst,
-                            'piece': old_piece,
-                        }
-                        if self.is_step_legal(
-                            self.last_board, board, self.is_red, step_info
-                        ):
-                            candidates.append((
-                                marker_evidence,
-                                low_confidence,
-                                hash_evidence,
-                                visual_evidence,
-                                dst,
-                            ))
-
-                dst = select_unique(candidates)
-                if dst is not None:
-                    board[dst[0]][dst[1]] = old_piece
-                    logger.info(
-                        f"揭棋补全已揭棋子落点: 起点={src}, 落点={dst}, "
-                        f"棋子={old_piece}"
-                    )
-
-            # 落点已识别，但起点因低置信度仍保留着上一帧棋子。
-            elif (
-                new_piece not in ('-', 'X', 'x')
-                and new_piece != old_piece
-                and (
-                    old_piece == '-'
-                    or old_piece.isupper() != new_piece.isupper()
-                )
-            ):
-                dst = (row, col)
-                candidates = []
-                for src_r in range(10):
-                    for src_c in range(9):
-                        src = (src_r, src_c)
-                        if src == dst or self.last_board[src_r][src_c] != new_piece:
-                            continue
-                        marker_evidence = src in marker_set
-                        prediction = low_confidence_predictions.get(src)
-                        low_confidence = bool(
-                            has_none_hash(src)
-                            and prediction
-                            and prediction[0] in ('-', '.')
-                            and prediction[1] >= 0.25
-                        )
-                        hash_evidence = src in changed_hashes
-                        visual_evidence = (
-                            raw_board[src_r][src_c]
-                            != self.last_board[src_r][src_c]
-                        )
-                        # 起点也必须有空格/移动标记的正证据，不能因为动画
-                        # 引起的哈希变化就删除一枚仍被抬在空中的棋子。
-                        if not (marker_evidence or low_confidence or visual_evidence):
-                            continue
-                        step_info = {
-                            'from_pos': src,
-                            'to_pos': dst,
-                            'piece': new_piece,
-                        }
-                        if self.is_step_legal(
-                            self.last_board, board, self.is_red, step_info
-                        ):
-                            candidates.append((
-                                marker_evidence,
-                                low_confidence,
-                                hash_evidence,
-                                visual_evidence,
-                                src,
-                            ))
-
-                src = select_unique(candidates)
-                if src is not None:
-                    board[src[0]][src[1]] = '-'
-                    logger.info(
-                        f"揭棋补全已揭棋子起点: 起点={src}, 落点={dst}, "
-                        f"棋子={new_piece}"
-                    )
-
-        self._last_visual_hashes = grid_hashes
-        return board
 
     def reset_capture_depth_bonus(self):
         self.capture_depth_bonus = 0
@@ -521,8 +191,8 @@ class PositionChecker:
         # 占位和双方颜色仍是完整开局，只是炮被误认成将等同色棋种错误，
         # 必须交给开局归一化，不能因出现两个“将”而误判为结算画面。
         start_like = (
-            self._matches_start_layout(board_array, self.start_red)
-            or self._matches_start_layout(board_array, self.start_black)
+            self._matches_start_layout(board_array, self.START_RED)
+            or self._matches_start_layout(board_array, self.START_BLACK)
         )
         if start_like and (self.last_board is None or board_array != self.last_board):
             if self.in_settlement_screen:
@@ -629,8 +299,6 @@ class PositionChecker:
             bool: 位置是否合法
         """
     
-        if piece_type in ('X', 'x'):
-            return self.variant == "jieqi"
         is_red_piece = piece_type.isupper()
         
         # 士/仕
@@ -686,7 +354,7 @@ class PositionChecker:
         # 1. 检查绝对上限（中国象棋规则：各棋子的初始数量）
         # 任何棋子数量超过初始数量都是非法的（不可能通过正常走棋产生）
         for piece, count in counts.items():
-            max_count = (self.JIEQI_COUNTS if self.variant == "jieqi" else self.START_COUNTS).get(piece, 0)
+            max_count = self.START_COUNTS.get(piece, 0)
             if count > max_count:
                 piece_names = {
                     'r': '黑车', 'n': '黑马', 'b': '黑象', 'a': '黑士', 'k': '黑将', 'c': '黑炮', 'p': '黑卒',
@@ -710,9 +378,6 @@ class PositionChecker:
             if piece.lower() == 'k':
                 continue
             if count > self.last_counts.get(piece, 0):
-                if self.variant == "jieqi" and piece not in ('X', 'x'):
-                    # 暗子揭开后，真实棋种数量从0增加是正常变化。
-                    continue
                 # 棋子数量变多是不可能的（除非是新对局/悔棋/上一帧识别错了）
                 # 但仅凭此无法判断局面是否合法，因为可能没有超出棋子数量上限
                 # 为了避免死锁（上一帧识别少了个子，这一帧恢复了，结果一直报非法），这里视为"多步变化/重置"
@@ -730,10 +395,6 @@ class PositionChecker:
             for j in range(len(array[i])):
                 piece = array[i][j]
                 if piece != '-':
-                    # 揭棋中揭开的士可离宫、象可过河，其他随机棋种也会
-                    # 出现在普通象棋不可能出现的初始位置；这里只继续约束将帅。
-                    if self.variant == "jieqi" and piece.lower() != 'k':
-                        continue
                     if not self.is_position_valid(piece, j, i, is_red_at_bottom):
                         return False, f"棋子{piece}在位置({i},{j})不合法"
         return True, "棋子位置合理"
@@ -803,8 +464,6 @@ class PositionChecker:
             if abs(r1 - r2) != 2 or abs(c1 - c2) != 2: return False
             eye_r, eye_c = (r1 + r2) // 2, (c1 + c2) // 2
             if a1[eye_r][eye_c] != '-': return False
-            if self.variant == "jieqi":
-                return True
             if is_red_piece:
                 return r2 >= 5 if is_red_at_bottom else r2 <= 4
             else:
@@ -812,8 +471,6 @@ class PositionChecker:
 
         def is_legal_advisor(r1, c1, r2, c2, is_red_piece):
             if abs(r1 - r2) != 1 or abs(c1 - c2) != 1: return False
-            if self.variant == "jieqi":
-                return True
             if not (3 <= c2 <= 5): return False
             if is_red_piece:
                 return r2 >= 7 if is_red_at_bottom else r2 <= 2
@@ -867,13 +524,6 @@ class PositionChecker:
         if piece == '-' or same_side(piece, target): return False
 
         is_red_piece = piece.isupper()
-        if self.variant == "jieqi" and piece in ('X', 'x'):
-            # 暗子首次移动按其开局位置的名义棋种行棋，落地后才揭示
-            # 随机的真实身份。
-            nominal_board = self.START_RED if is_red_at_bottom else self.START_BLACK
-            piece = nominal_board[src[0]][src[1]]
-            if piece == '-':
-                return False
         kind = piece.upper()
         ok = False
 
@@ -912,9 +562,9 @@ class PositionChecker:
             for j in range(len(a1[i])):
                 if a1[i][j] != a2[i][j]:
                     changed_positions.append((i, j, a1[i][j], a2[i][j]))
-                if red_start and a2[i][j] != self.start_red[i][j]:
+                if red_start and a2[i][j] != self.START_RED[i][j]:
                     red_start = False
-                if black_start and a2[i][j] != self.start_black[i][j]:
+                if black_start and a2[i][j] != self.START_BLACK[i][j]:
                     black_start = False
         if red_start:
             return BoardStatus(is_red_start=True, is_new_game=True, message="红方开局")
@@ -954,7 +604,6 @@ class PositionChecker:
                 'piece': moving_piece,
                 'side': 'red' if moving_piece.isupper() else 'black',
                 'captured_piece': captured_piece,
-                'revealed_piece': a2[dst[0]][dst[1]] if moving_piece in ('X', 'x') else None,
             }
             is_legal = self.is_step_legal(a1, a2, is_red_at_bottom, step_info)
             
@@ -1027,7 +676,7 @@ class PositionChecker:
             if self.last_board == start_template:
                 return BoardStatus(is_same_board=True, message="开局画面未变化")
             self.last_board = [row[:] for row in start_template]
-            self.last_counts = self.start_counts
+            self.last_counts = self.START_COUNTS.copy()
             self.red_start_count = 1 if start_side else 0
             return BoardStatus(
                 is_red_start=bool(start_side),
@@ -1040,8 +689,8 @@ class PositionChecker:
 
         # 首次初始化
         if self.last_board is None:
-            self.last_board = [row[:] for row in (self.start_red if self.is_red else self.start_black)]
-            self.last_counts = self.start_counts
+            self.last_board = [row[:] for row in (self.START_RED if self.is_red else self.START_BLACK)]
+            self.last_counts = self.START_COUNTS.copy()
             # 注意: 这里无法初始化 last_grid_hashes，因为是硬编码的局面，没有图片哈希
             # 但不影响，后续第一次识别时会全是 cache miss，从而全量识别
         
@@ -1057,15 +706,15 @@ class PositionChecker:
             if self.red_start_count < 1: # 开局帧最大允许连续出现次数(决定开局时会显示几次开局走法)
                 # 允许前两次返回红方开局
                 self.red_start_count += 1
-                self.last_board = [row[:] for row in self.start_red]
-                self.last_counts = self.start_counts
+                self.last_board = [row[:] for row in self.START_RED]
+                self.last_counts = self.START_COUNTS.copy()
                 return result
             else:
                 # 超过1次则视为相同画面
                 return BoardStatus(is_same_board=True, message="红方开局（>1次）相同画面")
         if result.is_black_start:
-            self.last_board = [row[:] for row in self.start_black]
-            self.last_counts = self.start_counts
+            self.last_board = [row[:] for row in self.START_BLACK]
+            self.last_counts = self.START_COUNTS.copy()
             return result
         
         # 2. 检测相同局面 (最高频情形)
@@ -1174,11 +823,6 @@ class PositionChecker:
                 step_info.get('to_pos'),
                 self.is_red
             )
-            if self.variant == "jieqi" and step_info.get('piece') in ('X', 'x'):
-                revealed = step_info.get('revealed_piece')
-                if revealed and revealed not in ('-', 'X', 'x'):
-                    move_str += revealed
-            
             # --- 增量模拟核心逻辑 ---
             from app.chess.simulation import ChessSimulation
             
@@ -1221,11 +865,7 @@ class PositionChecker:
             # B. 缓存失效，全量重算
             if sim_board is None:
                 if norm_base_fen == 'startpos':
-                    sim_board = [row[:] for row in (
-                        self.START_JIEQI_RED
-                        if self.variant == "jieqi"
-                        else ChessSimulation.START_RED_BOTTOM
-                    )]
+                    sim_board = [row[:] for row in ChessSimulation.START_RED_BOTTOM]
                     move_list = history_moves.split() if history_moves else []
                     for mv in move_list:
                          ChessSimulation.apply_uci_move(sim_board, mv)
