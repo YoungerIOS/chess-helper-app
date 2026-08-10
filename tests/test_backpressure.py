@@ -112,7 +112,7 @@ class BackpressureTests(unittest.TestCase):
         capture = FakeCapture(manager.stop_event)
 
         with (
-            patch("app.chess.screenshot.mss.mss", return_value=capture) as factory,
+            patch("app.chess.screenshot.mss.MSS", return_value=capture) as factory,
             patch("app.chess.screenshot.filter_stable_frame", return_value=(None, None)),
         ):
             manager._continuous_capture_worker(interval=0)

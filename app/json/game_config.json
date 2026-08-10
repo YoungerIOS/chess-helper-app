@@ -74,22 +74,22 @@
         },
         "regions": {
             "board": {
-                "left": 1702.7,
-                "top": 392.2,
-                "width": 581.6,
-                "height": 623.0
+                "left": 1747.9,
+                "top": 396.4,
+                "width": 580.4,
+                "height": 625.4
             },
             "avatar_upper": {
-                "left": 1702.7,
-                "top": 190.4,
-                "width": 129.0,
-                "height": 129.0
+                "left": 1747.9,
+                "top": 193.8,
+                "width": 128.0,
+                "height": 128.0
             },
             "avatar_lower": {
-                "left": 2168.0,
-                "top": 1093.0,
-                "width": 129.0,
-                "height": 129.0
+                "left": 2212.2,
+                "top": 1099.9,
+                "width": 128.0,
+                "height": 128.0
             }
         }
     },
@@ -102,7 +102,7 @@
     "theme": "light",
     "engine_params": {
         "movetime": "10000",
-        "depth": "20",
+        "depth": "25",
         "goParam": "depth",
         "threads": "8",
         "hash": "512",

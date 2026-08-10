@@ -87,7 +87,7 @@ class AutoMoverTests(unittest.TestCase):
                 return FakeShot()
 
         capture = FakeCapture()
-        with patch("mss.mss", return_value=capture):
+        with patch("mss.MSS", return_value=capture):
             image = AutoMoveController._default_window_image_provider({
                 "region": {"left": 10, "top": 20, "width": 4, "height": 3}
             })

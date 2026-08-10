@@ -39,6 +39,7 @@ from app.chess.recognizer import ChessRecognizer
 from app.chess.message import Message, MessageType
 from app.chess.message_bus import message_bus
 from app.chess.border_detector import reset_border_cache
+from app.chess.screen_capture import locked_grab
 
 # 跨平台窗口检测
 WIN32GUI_AVAILABLE = False
@@ -280,8 +281,8 @@ class BoardLocator:
             raise WindowError("未检测到游戏窗口")
 
         # 1. 截取搜索区域
-        with mss.mss() as sct:
-            screenshot = sct.grab(search_region)
+        with mss.MSS() as sct:
+            screenshot = locked_grab(sct, search_region, timeout=1.5)
         
         # 2. 转为OpenCV格式
         img_np = np.frombuffer(screenshot.bgra, np.uint8).reshape(screenshot.height, screenshot.width, 4)
@@ -413,8 +414,8 @@ class BoardLocator:
         
         # 10. 保存可视化结果（在开发环境和打包环境都保存）
         # 在全屏图像上绘制检测结果
-        with mss.mss() as sct:
-            full_screenshot = sct.grab(sct.monitors[1])
+        with mss.MSS() as sct:
+            full_screenshot = locked_grab(sct, sct.monitors[1], timeout=1.5)
             full_img = np.frombuffer(full_screenshot.bgra, np.uint8).reshape(full_screenshot.height, full_screenshot.width, 4)
             full_img = full_img[:, :, :3].copy()
         
@@ -907,9 +908,9 @@ class BoardLocator:
         print(f"棋盘区域: left={x}, top={y}, width={width}, height={height}")
 
         # 截取棋盘区域的图片
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             # 棋盘
-            board_screenshot = sct.grab(board_region)
+            board_screenshot = locked_grab(sct, board_region, timeout=1.5)
             board_img = np.frombuffer(board_screenshot.bgra, np.uint8).reshape(board_screenshot.height, board_screenshot.width, 4)
             board_img = board_img[:, :, :3]
             cv2.imwrite(app_cache_path('board/board.png'), board_img)
@@ -1001,11 +1002,11 @@ class BoardLocator:
         avatar_rects['lower'] = avatar_regions['lower']
 
         # 统一保存同心矩形区域图片
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             for pos in ["upper", "lower"]:
                 rect = avatar_rects.get(pos)
                 if rect:
-                    rect_img = sct.grab(rect)
+                    rect_img = locked_grab(sct, rect, timeout=1.0)
                     rect_img_np = np.frombuffer(rect_img.bgra, np.uint8).reshape(rect_img.height, rect_img.width, 4)
                     rect_img_np = rect_img_np[:, :, :3]
                     cv2.imwrite(app_cache_path(f'board/avatar_{pos}_rect.png'), rect_img_np)

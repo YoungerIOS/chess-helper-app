@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
         # 初始化状态
         self.is_running = False
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
+        self._manual_refresh_pending = False
         self._exit_started = False
         self.lines = ["", "", ""]
         self.update_text("等待获取棋局...", MessageType.STATUS)
@@ -612,6 +613,8 @@ class MainWindow(QMainWindow):
         if (
             self.is_running and
             not self.is_stopping and
+            self.capture_manager is not None and
+            self.capture_manager.ready_event.is_set() and
             context.auto_move_enabled and
             context.platform == "JJ" and
             hasattr(self, "auto_mover")
@@ -982,19 +985,37 @@ class MainWindow(QMainWindow):
     def on_manual_capture(self):
         """手动触发一次完整的监控与截图流程"""
         if self.capture_manager and self.is_running:
+            if not self.capture_manager.ready_event.is_set():
+                self.update_text("棋盘正在定位，请稍候...", MessageType.STATUS)
+                return
+            if self._manual_refresh_pending:
+                self.update_text("刷新正在进行，请稍候...", MessageType.STATUS)
+                return
+
             # 设置手动触发标志
             self.capture_manager.manual_trigger = True
-            # 执行一次完整的监控与截图流程
-            success = self.capture_manager.manually_capture_once()
-            if success:
-                self.update_text(
-                    "正在重新识别当前局面（已保留揭棋历史）..."
-                    if context.game_variant == "jieqi"
-                    else "重置数据并重新分析...",
-                    MessageType.STATUS,
-                )
-            else:
-                self.update_text("重置失败", MessageType.ERROR)
+            self._manual_refresh_pending = True
+            self.update_text("正在获取最新棋盘画面...", MessageType.STATUS)
+
+            def refresh_worker():
+                try:
+                    success = self.capture_manager.manually_capture_once()
+                    if success:
+                        message_bus.publish_status(
+                            "正在重新识别当前局面（已保留揭棋历史）..."
+                            if context.game_variant == "jieqi"
+                            else "重置数据并重新分析..."
+                        )
+                    else:
+                        message_bus.publish_error("截图服务繁忙，本次刷新未完成，请稍后重试")
+                finally:
+                    self._manual_refresh_pending = False
+
+            threading.Thread(
+                target=refresh_worker,
+                name="manual-refresh",
+                daemon=True,
+            ).start()
         else:
             self.update_text("请先点击开始按钮", MessageType.STATUS)
 

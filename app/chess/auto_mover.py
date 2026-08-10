@@ -3,6 +3,7 @@ import threading
 import time
 
 from app.tools.log_config import get_logger
+from app.chess.screen_capture import ScreenCaptureBusy, locked_grab
 
 
 logger = get_logger(__name__)
@@ -254,13 +255,13 @@ class AutoMoveController:
             import mss
             import numpy as np
 
-            with mss.mss() as capture:
-                shot = capture.grab({
+            with mss.MSS() as capture:
+                shot = locked_grab(capture, {
                     "left": left,
                     "top": top,
                     "width": width,
                     "height": height,
-                })
+                }, timeout=0.15)
                 # 必须复制后再离开mss上下文，避免数组继续引用原生截图缓冲。
                 bgra = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(
                     shot.height,
@@ -268,6 +269,9 @@ class AutoMoveController:
                     4,
                 )
                 return bgra[:, :, :3].copy()
+        except ScreenCaptureBusy:
+            # 棋盘识别优先；繁忙时跳过本轮结算按钮扫描。
+            return None
         except Exception as exc:
             logger.debug(f"无法读取JJ窗口用于按钮检测: {exc}")
             return None

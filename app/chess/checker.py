@@ -95,6 +95,7 @@ class PositionChecker:
     def __init__(self, variant="xiangqi"):
         self.variant = variant if variant in ("xiangqi", "jieqi") else "xiangqi"
         self.is_red = True
+        self._side_locked = False
         self.last_board = None  # 上一次的棋盘数组
         self.last_counts = None  # 上一次的棋子数量统计
         self.red_start_count = 0  # 红方开局帧连续出现次数 
@@ -131,6 +132,7 @@ class PositionChecker:
         self.pending_jieqi_analysis_retry = False
         self.jieqi_analysis_retry_count = 0
         self._pending_lift_source = None
+        self._side_locked = False
         
         # 清空备份
         self._backup_last_board = None 
@@ -150,6 +152,43 @@ class PositionChecker:
     @property
     def start_counts(self):
         return self.JIEQI_COUNTS.copy() if self.variant == "jieqi" else self.START_COUNTS.copy()
+
+    @staticmethod
+    def _matches_start_layout(board, template, max_same_color_errors=3):
+        """允许少量同色棋种误分类，但开局占位和双方颜色必须完全一致。"""
+        if board is None or len(board) != 10:
+            return False
+        same_color_errors = 0
+        for row in range(10):
+            if len(board[row]) != 9:
+                return False
+            for col in range(9):
+                actual = board[row][col]
+                expected = template[row][col]
+                if actual == expected:
+                    continue
+                # 空位变化意味着棋子已经移动，不能再当成初始局面。
+                if actual == '-' or expected == '-':
+                    return False
+                # 只容忍炮被看成将等“同色棋种”错误，绝不容忍颜色错误。
+                if actual.isupper() != expected.isupper():
+                    return False
+                same_color_errors += 1
+                if same_color_errors > max_same_color_errors:
+                    return False
+        return True
+
+    def _detect_and_normalize_start(self, board):
+        """识别红/黑方开局，并以标准阵形修正少量CNN棋种误判。"""
+        for is_red, template in ((True, self.start_red), (False, self.start_black)):
+            if not self._matches_start_layout(board, template):
+                continue
+            for row in range(10):
+                board[row][:] = template[row][:]
+            self.is_red = is_red
+            self._side_locked = True
+            return is_red, template
+        return None, None
 
     def normalize_visual_board(
         self, board_array, grid_hashes=None, marker_coords=None, details=None
@@ -478,6 +517,19 @@ class PositionChecker:
         kings_missing = (king_count != 1 or general_count != 1)
         piece_count = sum(1 for row in board_array for piece in row if piece != '-')
 
+        # 首帧会因为90个格子都需要推理而天然标记为“巨大变化”。如果它的
+        # 占位和双方颜色仍是完整开局，只是炮被误认成将等同色棋种错误，
+        # 必须交给开局归一化，不能因出现两个“将”而误判为结算画面。
+        start_like = (
+            self._matches_start_layout(board_array, self.start_red)
+            or self._matches_start_layout(board_array, self.start_black)
+        )
+        if start_like and (self.last_board is None or board_array != self.last_board):
+            if self.in_settlement_screen:
+                logger.info("识别到完整新局阵形，退出结算状态")
+            self.in_settlement_screen = False
+            return False
+
         # JJ 棋力评测结算页会缩小棋盘并覆盖半透明奖励层。双方将帅有时
         # 仍能被模型识别，因此不能只依赖“将帅丢失”；缩放后大量格点会
         # 同时失配，而一帧普通走子不可能造成这种变化。27 子上限刻意保守，
@@ -536,6 +588,11 @@ class PositionChecker:
         更新红黑方判断 (Latch Logic / 状态保持)
         仅当明确检测到上方将帅时才更新状态，避免因检测失败导致的误判
         """
+        # 棋盘朝向在一局内不会变化。识别模型偶尔会把炮/车误判成将帅，
+        # 因此首次可靠确定后必须锁定，不能让单帧噪声翻转我方颜色。
+        if self._side_locked:
+            return
+
         # 扫描上方九宫格 (前3行, 中间3列)
         has_black_king = False
         has_red_king = False
@@ -552,10 +609,12 @@ class PositionChecker:
             if not self.is_red:
                 logger.info("Side Detection: Detected Black King at top -> I am RED")
             self.is_red = True
+            self._side_locked = True
         elif has_red_king and not has_black_king:
             if self.is_red:
                 logger.info("Side Detection: Detected Red King at top -> I am BLACK")
             self.is_red = False
+            self._side_locked = True
         # else: 如果都没检测到，或都检测到了(异常)，保持 is_red 不变
 
     def is_position_valid(self, piece_type, x, y, is_red_at_bottom):
@@ -962,6 +1021,21 @@ class PositionChecker:
         if current_board is None:
             return None
         
+        start_side, start_template = self._detect_and_normalize_start(current_board)
+        if start_template is not None:
+            # 同一开局画面的后续帧不能重复触发引擎；首次或新一局才发布开局。
+            if self.last_board == start_template:
+                return BoardStatus(is_same_board=True, message="开局画面未变化")
+            self.last_board = [row[:] for row in start_template]
+            self.last_counts = self.start_counts
+            self.red_start_count = 1 if start_side else 0
+            return BoardStatus(
+                is_red_start=bool(start_side),
+                is_black_start=not bool(start_side),
+                is_new_game=True,
+                message="红方开局" if start_side else "黑方开局",
+            )
+
         self.update_side_detection(current_board)
 
         # 首次初始化

@@ -10,6 +10,7 @@ from app.tools.utils import app_cache_path
 from app.tools.log_config import get_logger
 from app.chess.board_locator import BoardLocator, LocationError, WindowError, PieceError, CombsError
 from app.chess.hash_checker import filter_stable_frame
+from app.chess.screen_capture import ScreenCaptureBusy, locked_grab
 
 logger = get_logger(__name__)
 
@@ -27,6 +28,9 @@ class ChessCaptureManager:
         self.stop_event = threading.Event() # 整个截图流程的停止事件
         self._stop_lock = threading.Lock()
         self._stopped_event = threading.Event()
+        # 只有棋盘定位完成并启动连续截图后，其他完整窗口截图任务才可运行。
+        # 防止结算按钮扫描抢在初始定位前占用macOS截图服务。
+        self.ready_event = threading.Event()
         # 截图属于实时数据，过期帧没有继续识别的价值。队列必须有界，
         # 否则识别速度短暂落后时，每张完整棋盘截图都会一直占用内存。
         self.process_queue = queue.Queue(maxsize=self.PROCESS_QUEUE_SIZE)
@@ -128,6 +132,7 @@ class ChessCaptureManager:
                 daemon=True
             )
             self.continuous_thread.start()
+        self.ready_event.set()
         
         # 启动重试截图线程；沿用构造时创建的有界队列。
         self._discard_pending(self.retry_queue)
@@ -160,6 +165,7 @@ class ChessCaptureManager:
         """开始截图任务"""
         self.stop_event.clear()  # 重置停止事件
         self._stopped_event.clear()
+        self.ready_event.clear()
         self.last_capture_time = time.time()  # 重置截图时间
         if not any(thread.is_alive() for thread in self.worker_threads):
             self.worker_threads = processor.start_process_worker(
@@ -175,6 +181,7 @@ class ChessCaptureManager:
                 return
 
             self.stop_event.set()
+            self.ready_event.clear()
             if hasattr(self, 'board_locator'):
                 self.board_locator.stop()
 
@@ -220,8 +227,8 @@ class ChessCaptureManager:
             bool: 是否成功入队
         """
         capture_time = time.time()
-        with mss.mss() as sct:
-            board_screenshot = sct.grab(region)
+        with mss.MSS() as sct:
+            board_screenshot = locked_grab(sct, region, timeout=1.0)
         
         # 使用全局函数处理截图
         stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[capture]", force_output=force_output)
@@ -245,7 +252,7 @@ class ChessCaptureManager:
         
         # 复用同一个MSS实例。旧实现每180ms重新加载一次CoreGraphics
         # 截图后端，虽然单次会释放图像，却会制造大量不必要的原生对象。
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             while not self.stop_event.is_set():
                 try:
                     # 动态获取当前棋盘区域
@@ -256,7 +263,7 @@ class ChessCaptureManager:
                         continue
 
                     capture_time = time.time()
-                    board_screenshot = sct.grab(board_region)
+                    board_screenshot = locked_grab(sct, board_region, timeout=0.5)
 
                     # 使用全局函数处理截图
                     stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[continuous]")
@@ -267,6 +274,9 @@ class ChessCaptureManager:
                         if self._enqueue_latest_frame((capture_time, board_screenshot)):
                             self.last_capture_time = time.time()
 
+                    time.sleep(interval)
+                except ScreenCaptureBusy:
+                    # 完整窗口扫描或定位截图尚未结束时直接丢帧，避免请求堆积。
                     time.sleep(interval)
                 except Exception as e:
                     print(f"[continuous] 捕获异常: {e}")
