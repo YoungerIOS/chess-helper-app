@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import os
-from app.tools.utils import app_cache_path
+from app.tools.utils import app_cache_path, resource_path
 from app.tools.log_config import get_logger
 from app.chess.context import context as global_context
 from app.chess.marker_detector import MarkerDetector
@@ -34,6 +34,96 @@ class ChessRecognizer:
         self.last_grid_hashes = None
         self.last_board_array = None
         self.last_marker_coords = []  # 缓存标记位置
+        self._jj_black_piece_templates = None
+
+    def _load_jj_black_piece_templates(self):
+        """加载界面自带的黑方棋子图，供JJ模型漏检时进行轻量模板复核。"""
+        if self._jj_black_piece_templates is not None:
+            return self._jj_black_piece_templates
+
+        templates = {}
+        for piece in ("r", "n", "b", "a", "k", "c", "p"):
+            path = resource_path("images", "media", f"black_{piece}.png")
+            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if image is None or image.ndim != 3 or image.shape[2] < 4:
+                continue
+            bgr = cv2.resize(image[:, :, :3], (80, 80))
+            alpha = cv2.resize(image[:, :, 3], (80, 80)) > 128
+            templates[piece] = (cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), alpha)
+        self._jj_black_piece_templates = templates
+        return templates
+
+    @staticmethod
+    def _contains_centered_piece_circle(piece_img):
+        if piece_img is None or min(piece_img.shape[:2]) < 40:
+            return False
+        gray = cv2.cvtColor(piece_img[:, :, :3], cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=max(10, min(width, height) // 3),
+            param1=80,
+            param2=18,
+            minRadius=max(10, int(min(width, height) * 0.34)),
+            maxRadius=max(12, int(min(width, height) * 0.51)),
+        )
+        if circles is None:
+            return False
+        center_x, center_y = width / 2, height / 2
+        tolerance = min(width, height) * 0.18
+        return any(
+            abs(float(x) - center_x) <= tolerance
+            and abs(float(y) - center_y) <= tolerance
+            for x, y, _ in circles[0]
+        )
+
+    @staticmethod
+    def _has_black_ink(piece_img):
+        """区分黑色字形与红色字形，避免把红炮补成黑炮。"""
+        height, width = piece_img.shape[:2]
+        y_margin = max(1, int(height * 0.18))
+        x_margin = max(1, int(width * 0.18))
+        center = piece_img[y_margin:height-y_margin, x_margin:width-x_margin, :3]
+        hsv = cv2.cvtColor(center, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = cv2.split(hsv)
+        dark_neutral = ((value < 110) & (saturation < 130)).mean()
+        red_ink = (
+            ((hue < 12) | (hue > 170))
+            & (saturation > 100)
+            & (value > 80)
+        ).mean()
+        return dark_neutral >= 0.08 and dark_neutral > red_ink * 1.5
+
+    def _recover_jj_black_cannon(self, piece_img, previous_piece="-"):
+        """模型误报空格时，以圆形、字色和模板三重证据恢复黑炮。"""
+        if self.context.platform != "JJ":
+            return False
+        if not self._contains_centered_piece_circle(piece_img):
+            return False
+        if not self._has_black_ink(piece_img):
+            return False
+        if previous_piece == "c":
+            return True
+
+        templates = self._load_jj_black_piece_templates()
+        if "c" not in templates:
+            return False
+        actual = cv2.cvtColor(
+            cv2.resize(piece_img[:, :, :3], (80, 80)),
+            cv2.COLOR_BGR2GRAY,
+        )
+        scores = {}
+        for piece, (template, mask) in templates.items():
+            actual_values = actual[mask].astype(np.float32)
+            template_values = template[mask].astype(np.float32)
+            if actual_values.std() < 1e-6 or template_values.std() < 1e-6:
+                continue
+            scores[piece] = float(np.corrcoef(actual_values, template_values)[0, 1])
+        cannon_score = scores.get("c", -1.0)
+        other_best = max((v for k, v in scores.items() if k != "c"), default=-1.0)
+        return cannon_score >= 0.20 and cannon_score - other_best >= 0.05
 
     def preprocess_image(self, img_origin):
         # img = cv2.imread(img_path)  
@@ -203,6 +293,7 @@ class ChessRecognizer:
             batch_results = self.context.piece_recognizer.recognize_batch(crops)
             for idx, res in enumerate(batch_results):
                 i, j = positions[idx]
+                piece_img = crops[idx]
                 if res is None:
                     details.append(RecognitionDetail(
                         type=RecognitionErrorType.UNKNOWN,
@@ -214,6 +305,28 @@ class ChessRecognizer:
                     
                 piece_type = res['class_name']
                 confidence = res['confidence']
+                previous_piece = (
+                    last_board_array[i][j]
+                    if last_board_array is not None
+                    else '-'
+                )
+                # JJ 新棋盘上的黑炮有两种常见漏检：一枚会被模型判成
+                # 空格/其他棋子，另一枚虽然判为 c，但置信度会略低于
+                # 通用的 0.60 写入门槛。两种情况都用同一组视觉证据复核。
+                if (
+                    (
+                        previous_piece == 'c'
+                        or piece_type == '-'
+                        or confidence <= 0.6
+                    )
+                    and self._recover_jj_black_cannon(piece_img, previous_piece)
+                ):
+                    piece_type = 'c'
+                    confidence = max(float(confidence), 0.75)
+                    logger.warning(
+                        f"JJ黑炮视觉兜底: position=({i}, {j}), "
+                        f"model_class={res['class_name']!r}, previous={previous_piece!r}"
+                    )
                 
                 if piece_type and confidence > 0.6:
                     if piece_type == 'covered':

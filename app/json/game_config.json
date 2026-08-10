@@ -74,27 +74,27 @@
         },
         "regions": {
             "board": {
-                "left": 1747.9,
-                "top": 396.4,
+                "left": 1926.9,
+                "top": 335.5,
                 "width": 580.4,
-                "height": 625.4
+                "height": 622.6
             },
             "avatar_upper": {
-                "left": 1747.9,
-                "top": 193.8,
+                "left": 1926.9,
+                "top": 133.8,
                 "width": 128.0,
                 "height": 128.0
             },
             "avatar_lower": {
-                "left": 2212.2,
-                "top": 1099.9,
+                "left": 2391.2,
+                "top": 1035.9,
                 "width": 128.0,
                 "height": 128.0
             }
         }
     },
     "platform": "JJ",
-    "analysis_mode": "continuous",
+    "analysis_mode": "timer",
     "auto_move_enabled": true,
     "capture_depth_enabled": false,
     "game_variant": "xiangqi",
@@ -102,7 +102,7 @@
     "theme": "light",
     "engine_params": {
         "movetime": "10000",
-        "depth": "25",
+        "depth": "20",
         "goParam": "depth",
         "threads": "8",
         "hash": "512",

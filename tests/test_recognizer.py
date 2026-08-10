@@ -1,5 +1,6 @@
 import unittest
 
+import cv2
 import numpy as np
 
 from app.chess.processor import ChessProcess
@@ -8,6 +9,7 @@ from app.chess.recognizer import (
     RecognitionDetail,
     RecognitionErrorType,
 )
+from app.tools.utils import resource_path
 
 
 class FakeScreenshot:
@@ -83,6 +85,31 @@ class ChessRecognizerTests(unittest.TestCase):
 
         self.assertEqual({(72, 72)}, set(jj_context.piece_recognizer.crop_shapes))
         self.assertEqual({(80, 80)}, set(tt_context.piece_recognizer.crop_shapes))
+
+    def test_jj_black_cannon_fallback_rejects_red_cannon(self):
+        recognizer = ChessRecognizer(FakeContext("JJ"))
+        black_cannon = cv2.imread(
+            resource_path("images", "media", "black_c.png"),
+            cv2.IMREAD_COLOR,
+        )
+        red_cannon = cv2.imread(
+            resource_path("images", "media", "red_C.png"),
+            cv2.IMREAD_COLOR,
+        )
+
+        self.assertIsNotNone(black_cannon)
+        self.assertIsNotNone(red_cannon)
+        self.assertTrue(recognizer._recover_jj_black_cannon(black_cannon))
+        self.assertFalse(recognizer._recover_jj_black_cannon(red_cannon))
+
+    def test_black_cannon_fallback_is_disabled_for_tt(self):
+        recognizer = ChessRecognizer(FakeContext("TT"))
+        black_cannon = cv2.imread(
+            resource_path("images", "media", "black_c.png"),
+            cv2.IMREAD_COLOR,
+        )
+
+        self.assertFalse(recognizer._recover_jj_black_cannon(black_cannon))
 
     def test_low_confidence_prediction_keeps_previous_piece(self):
         context = FakeContext("JJ")
