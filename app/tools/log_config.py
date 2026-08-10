@@ -13,6 +13,7 @@ logger.remove()
 ENABLED_MODULES = [
     "app.chess.checker",
     "app.chess.processor", 
+    "app.chess.auto_mover",
     # "app.chess.recognizer",
 ]
 

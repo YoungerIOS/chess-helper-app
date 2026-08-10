@@ -1,9 +1,11 @@
 import unittest
+import sys
 from unittest.mock import patch
 
 from app.main import check_screen_recording_permission
 
 
+@unittest.skipUnless(sys.platform == "darwin", "macOS screen recording API")
 class ScreenRecordingPermissionTests(unittest.TestCase):
     @patch("Quartz.CGRequestScreenCaptureAccess")
     @patch("Quartz.CGPreflightScreenCaptureAccess", return_value=True)

@@ -25,26 +25,7 @@
                 850
             ]
         },
-        "regions": {
-            "board": {
-                "left": 710.1,
-                "top": 191.9,
-                "width": 444.4,
-                "height": 494.8
-            },
-            "avatar_upper": {
-                "left": 591.6,
-                "top": 203.8,
-                "width": 79.0,
-                "height": 79.0
-            },
-            "avatar_lower": {
-                "left": 1192.0,
-                "top": 539.5,
-                "width": 79.0,
-                "height": 79.0
-            }
-        }
+        "regions": {}
     },
     "JJ": {
         "board_coords": {
@@ -72,26 +53,7 @@
                 818
             ]
         },
-        "regions": {
-            "board": {
-                "left": 1926.9,
-                "top": 335.5,
-                "width": 580.4,
-                "height": 622.6
-            },
-            "avatar_upper": {
-                "left": 1926.9,
-                "top": 133.8,
-                "width": 128.0,
-                "height": 128.0
-            },
-            "avatar_lower": {
-                "left": 2391.2,
-                "top": 1035.9,
-                "width": 128.0,
-                "height": 128.0
-            }
-        }
+        "regions": {}
     },
     "platform": "JJ",
     "analysis_mode": "continuous",

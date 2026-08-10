@@ -11,6 +11,24 @@ class ScreenCaptureBusy(RuntimeError):
 _capture_lock = threading.Lock()
 
 
+def normalize_region(region):
+    """Convert calculated logical coordinates into an MSS-safe pixel region.
+
+    Board location uses sub-pixel averages and therefore returns floats.  The
+    macOS fallback already coerced them, while MSS on Windows passes width and
+    height to a ctypes buffer which requires integers.
+    """
+    normalized = {
+        "left": int(round(float(region["left"]))),
+        "top": int(round(float(region["top"]))),
+        "width": int(round(float(region["width"]))),
+        "height": int(round(float(region["height"]))),
+    }
+    if normalized["width"] <= 0 or normalized["height"] <= 0:
+        raise ValueError(f"无效的截图区域: {normalized}")
+    return normalized
+
+
 def _grab_macos(region):
     """绕过macOS 26上可能永久阻塞的MSS CoreGraphics截图实现。"""
     from PIL import ImageGrab
@@ -36,6 +54,7 @@ def locked_grab(capture, region, *, timeout=1.0):
     if not _capture_lock.acquire(timeout=max(0.0, float(timeout))):
         raise ScreenCaptureBusy("截图服务正忙")
     try:
+        region = normalize_region(region)
         capture_module = type(capture).__module__
         if platform.system() == "Darwin" and capture_module.startswith("mss."):
             return _grab_macos(region)

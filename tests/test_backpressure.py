@@ -142,6 +142,8 @@ class BackpressureTests(unittest.TestCase):
 
         with (
             patch("app.chess.context.utils.resource_path", return_value="config.json"),
+            patch("app.chess.context.utils.user_config_path", return_value="config.json"),
+            patch("app.tools.config_store.os.path.exists", return_value=True),
             patch("builtins.open", mock_open(read_data=json.dumps(config))),
         ):
             current.load_config()

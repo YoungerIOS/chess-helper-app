@@ -3,6 +3,7 @@ import os
 import sys
 import subprocess
 import threading
+import glob
 from typing import Optional, Tuple, List, Callable
 from app.chess.message import Message, MessageType
 from app.chess.context import context
@@ -43,6 +44,7 @@ class ChessEngine:
             maximum=32768,
         )
         self.process: Optional[subprocess.Popen] = None
+        self.last_error = ""
         self.lock = threading.Lock()
         self.analysis_lock = threading.Lock()
         self.is_initialized = False
@@ -71,30 +73,60 @@ class ChessEngine:
                     return candidate
             return candidates[0]
         
-        # 优先使用用户数据目录中的引擎文件
+        # Windows release archives contain several CPU-specific executables.
+        # Prefer the fastest broadly compatible builds and never auto-select
+        # AVX-512/VNNI builds, which crash with 0xC000001D on older CPUs.
+        if sys.platform == "win32":
+            names = (
+                "pikafish.exe",
+                "pikafish-bmi2.exe",
+                "pikafish-avx2.exe",
+                "pikafish-sse41-popcnt.exe",
+            )
+            candidates = [app_data_path(f"Pikafish/{name}") for name in names]
+            candidates.extend(resource_path("Pikafish", "src", name) for name in names)
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    return candidate
+            return candidates[0]
+
+        # macOS/Linux legacy layout.
         user_engine_path = app_data_path("Pikafish/pikafish")
-        if os.path.exists(user_engine_path) and os.access(user_engine_path, os.X_OK):
+        if os.path.isfile(user_engine_path) and os.access(user_engine_path, os.X_OK):
             return user_engine_path
-        
-        # 备用：使用打包后的资源
         fallback_path = resource_path("Pikafish", "src", "pikafish")
-        if os.path.exists(fallback_path):
-            return fallback_path
-        
-        # 如果都不存在，返回用户数据目录路径（用于首次复制）
-        return user_engine_path
+        return fallback_path if os.path.isfile(fallback_path) else user_engine_path
+
+    def _describe_process_failure(self) -> str:
+        if self.process is None:
+            return "引擎进程未创建"
+        return_code = self.process.poll()
+        if return_code is None:
+            return "引擎未返回 UCI 就绪响应"
+        if sys.platform == "win32":
+            unsigned_code = return_code & 0xFFFFFFFF
+            if unsigned_code == 0xC000001D:
+                return "引擎包含当前 CPU 不支持的指令（0xC000001D），请改用 BMI2、AVX2 或 SSE4.1 版本"
+            return f"引擎进程已退出（0x{unsigned_code:08X}）"
+        return f"引擎进程已退出（code={return_code}）"
     
     def start(self) -> bool:
         """启动引擎"""
         with self.lock:
             try:
+                self.last_error = ""
                 if self.process is not None and self.process.poll() is None:
                     print("引擎已经在运行")
                     return True
                 
                 # 检查引擎文件是否存在
                 if not os.path.exists(self.engine_path):
-                    logger.error(f"引擎文件不存在: {self.engine_path}")
+                    engine_dir = os.path.dirname(self.engine_path)
+                    found = ", ".join(os.path.basename(path) for path in glob.glob(os.path.join(engine_dir, "pikafish*.exe")))
+                    self.last_error = f"未找到兼容的引擎: {self.engine_path}"
+                    if found:
+                        self.last_error += f"；目录中现有: {found}"
+                    logger.error(self.last_error)
                     return False
                 
                 # 确保可执行权限
@@ -104,12 +136,19 @@ class ChessEngine:
                 except Exception:
                     pass
 
+                popen_kwargs = {}
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
                 self.process = subprocess.Popen(
                     self.engine_path,
+                    cwd=os.path.dirname(os.path.abspath(self.engine_path)),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    **popen_kwargs,
                 )
                 
                 self._initialize_engine()
@@ -118,15 +157,28 @@ class ChessEngine:
                 return True
                 
             except Exception as e:
-                logger.error(f"启动引擎时出错：{e}")
-                self.process = None
+                detail = self._describe_process_failure()
+                self.last_error = f"{e}；{detail}" if str(e) else detail
+                logger.error(f"启动引擎时出错：{self.last_error}")
+                if self.process is not None and self.process.poll() is None:
+                    self.process.kill()
+                    self.process.wait(timeout=1)
                 self.is_initialized = False
                 return False
     
     def _initialize_engine(self):
         """初始化引擎设置"""
         self._send_command('uci')
-        self._wait_for_response('uciok', timeout=1)
+        uci_lines = self._wait_for_response('uciok', timeout=3)
+        if not any('uciok' in line for line in uci_lines):
+            raise RuntimeError("引擎没有完成 UCI 握手")
+
+        nnue_path = os.path.join(os.path.dirname(os.path.abspath(self.engine_path)), "pikafish.nnue")
+        if not os.path.isfile(nnue_path):
+            raise FileNotFoundError(f"NNUE 文件不存在: {nnue_path}")
+        # The engine process also runs in this directory; using the short name
+        # avoids UCI parsing issues with spaces/non-ASCII path components.
+        self._send_command('setoption name EvalFile value pikafish.nnue')
         
         self._send_command(f'setoption name Threads value {self.threads}')
         self._send_command(f'setoption name Hash value {self.hash_size}')
@@ -136,7 +188,9 @@ class ChessEngine:
         time.sleep(0.2)
         
         self._send_command('isready')
-        self._wait_for_response('readyok', timeout=1)
+        ready_lines = self._wait_for_response('readyok', timeout=10)
+        if not any('readyok' in line for line in ready_lines):
+            raise RuntimeError("引擎未能加载 NNUE 或未返回 readyok")
 
     def set_threads(self, threads: int) -> bool:
         """安全地更新线程数；引擎未运行时只更新实例配置。"""

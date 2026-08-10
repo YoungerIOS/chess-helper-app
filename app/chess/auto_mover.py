@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+import platform
 
 from app.tools.log_config import get_logger
 from app.chess.screen_capture import ScreenCaptureBusy, locked_grab
@@ -166,6 +167,9 @@ class AutoMoveController:
     def _default_user_idle_seconds():
         """返回距离最近一次真实键鼠输入的秒数，不统计合成事件。"""
         try:
+            if platform.system() == "Windows":
+                from app.chess.windows import user_idle_seconds
+                return user_idle_seconds()
             import Quartz
 
             return Quartz.CGEventSourceSecondsSinceLastEventType(
@@ -186,6 +190,9 @@ class AutoMoveController:
             return False
 
         try:
+            if platform.system() == "Windows":
+                from app.chess.windows import is_foreground_window
+                return is_foreground_window(target_window_id)
             import Quartz
 
             options = (
@@ -212,6 +219,14 @@ class AutoMoveController:
     @staticmethod
     def _default_window_clicker(window_info, point):
         """向指定进程投递鼠标点击，不移动系统光标也不切换焦点。"""
+        if platform.system() == "Windows":
+            try:
+                from app.chess.windows import click_window_point
+                click_window_point(int(window_info.get("window_id")), point)
+                return
+            except Exception as exc:
+                raise AutoMoveError(f"Windows后台点击失败: {exc}") from exc
+
         try:
             pid = int(window_info.get("pid"))
         except (AttributeError, TypeError, ValueError):

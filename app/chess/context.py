@@ -6,6 +6,7 @@ from typing import Dict, Optional, List
 from datetime import datetime
 from threading import Lock
 from app.tools import utils
+from app.tools.config_store import load_config as load_stored_config, write_json_atomic
 from app.chess.history import MoveHistory 
 
 def setup_logging():
@@ -156,8 +157,9 @@ class ChessContext:
         """从配置文件加载所有设置"""
         try:
             logger.info("开始加载配置文件...")
-            with open(utils.resource_path("json", "game_config.json"), "r") as f:
-                config = json.load(f)
+            default_path = utils.resource_path("json", "game_config.json")
+            user_path = utils.user_config_path()
+            config = load_stored_config(default_path, user_path)
                 
             # 更新平台配置时复用已经加载的识别模型。每次开始辅助都会重新
             # 读取配置，但ONNX Runtime会为每个新Session创建原生线程池和
@@ -229,7 +231,7 @@ class ChessContext:
 
             logger.info("模型初始化完成")
             
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             logger.error(f"Error loading config: {e}")
             # 使用默认值初始化
             self._platforms = {
@@ -289,11 +291,8 @@ class ChessContext:
             config = utils.convert_to_builtin_type(config)
             
             # 使用原子写入避免文件损坏
-            path = utils.resource_path("json", "game_config.json")
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(config, f, indent=4)
-            os.replace(tmp_path, path)  # 原子覆盖
+            path = utils.user_config_path()
+            write_json_atomic(path, config)
             logger.info("配置文件保存成功")
         except Exception as e:
             logger.error(f"Error saving config: {e}")

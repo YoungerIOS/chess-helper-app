@@ -587,11 +587,14 @@ class MainWindow(QMainWindow):
                 self.capture_manager.start_capture()
                 
                 # 启动引擎
-                context.set_engine(ChessEngine())
-                if context.engine.start():
+                engine = ChessEngine()
+                context.set_engine(engine)
+                if engine.start():
                     print("引擎已启动")
                 else:
-                    print("引擎启动失败")
+                    error = engine.last_error or f"无法启动 {engine.engine_path}"
+                    print(f"引擎启动失败: {error}")
+                    message_bus.publish_error(f"引擎初始化失败\n{error}")
                 
                 # 初始化局面检查器和历史记录
                 context.set_checker(PositionChecker(variant=context.game_variant))

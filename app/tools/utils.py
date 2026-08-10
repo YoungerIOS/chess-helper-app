@@ -153,6 +153,11 @@ def app_data_path(filename):
     # 确保子目录存在
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     return full_path
+
+
+def user_config_path():
+    """返回可写的用户配置路径，避免修改随应用分发的资源文件。"""
+    return app_data_path("game_config.json")
  
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  

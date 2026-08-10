@@ -66,6 +66,31 @@ class FakeMouse:
 
 
 class AutoMoverTests(unittest.TestCase):
+    def test_windows_idle_provider_uses_last_input_api(self):
+        with (
+            patch("app.chess.auto_mover.platform.system", return_value="Windows"),
+            patch("app.chess.windows.user_idle_seconds", return_value=2.75),
+        ):
+            self.assertEqual(2.75, AutoMoveController._default_user_idle_seconds())
+
+    def test_windows_foreground_provider_uses_window_id(self):
+        with (
+            patch("app.chess.auto_mover.platform.system", return_value="Windows"),
+            patch("app.chess.windows.is_foreground_window", return_value=True) as active,
+        ):
+            self.assertTrue(AutoMoveController._default_target_window_active({"window_id": 1234}))
+        active.assert_called_once_with(1234)
+
+    def test_windows_background_click_uses_window_handle(self):
+        with (
+            patch("app.chess.auto_mover.platform.system", return_value="Windows"),
+            patch("app.chess.windows.click_window_point") as click,
+        ):
+            AutoMoveController._default_window_clicker(
+                {"window_id": 1234, "pid": 99}, (320, 480)
+            )
+        click.assert_called_once_with(1234, (320, 480))
+
     def test_default_window_capture_uses_bounded_mss_buffer(self):
         class FakeShot:
             width = 4

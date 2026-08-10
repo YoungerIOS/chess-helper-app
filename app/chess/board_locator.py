@@ -34,6 +34,7 @@ import time
 import platform
 import logging
 from app.tools.utils import app_cache_path
+from app.chess.windows import enumerate_windows as enumerate_windows_windows
 from app.chess.context import context as global_context
 from app.chess.recognizer import ChessRecognizer
 from app.chess.message import Message, MessageType
@@ -41,20 +42,9 @@ from app.chess.message_bus import message_bus
 from app.chess.border_detector import reset_border_cache
 from app.chess.screen_capture import locked_grab
 
-# 跨平台窗口检测
-WIN32GUI_AVAILABLE = False
-_win32gui_module = None
-
 if platform.system() == "Darwin":  # macOS
     import Quartz  # type: ignore
-elif platform.system() == "Windows":  # Windows
-    try:
-        import importlib
-        _win32gui_module = importlib.import_module('win32gui')
-        WIN32GUI_AVAILABLE = True
-    except ImportError:
-        print("警告: win32gui模块不可用，请安装: pip install pywin32")
-else:  # Linux或其他系统
+elif platform.system() != "Windows":  # Linux或其他系统
     print("警告: 当前系统不支持窗口检测，将使用全屏检测")
 
 class LocationError(Exception):
@@ -84,7 +74,7 @@ class BoardLocator:
         
         # 游戏窗口标题关键词
         self.game_titles = {
-            "JJ": ["JJ象棋"],
+            "JJ": ["JJ象棋", "J象棋"],
             "TT": ["天天象棋"]
         }
         self.window_size = None
@@ -141,28 +131,12 @@ class BoardLocator:
             return []
 
     def find_window_by_title_windows(self, keyword):
-        """使用win32gui查找窗口（Windows）"""
-        if not WIN32GUI_AVAILABLE:
-            return []
-            
-        matches = []
-
-        def callback(hwnd, extra):
-            if _win32gui_module.IsWindowVisible(hwnd):
-                title = _win32gui_module.GetWindowText(hwnd)
-                if keyword.lower() in title.lower():
-                    rect = _win32gui_module.GetWindowRect(hwnd)
-                    # rect格式: (left, top, right, bottom)
-                    x, y, right, bottom = rect
-                    width = right - x
-                    height = bottom - y
-                    matches.append({
-                        "title": title,
-                        "bounds": (x, y, width, height)
-                    })
-
-        _win32gui_module.EnumWindows(callback, None)
-        return matches
+        """使用系统 User32/DWM API 查找窗口，无需依赖 pywin32。"""
+        keyword = keyword.casefold()
+        return [
+            window for window in enumerate_windows_windows()
+            if keyword in window["title"].casefold()
+        ]
 
     def find_window_by_title(self, keyword):
         """跨平台窗口查找"""
@@ -193,11 +167,23 @@ class BoardLocator:
         # 40:  Generic Title ("微信") + Matches Other Platform
         
         candidates = []
+        # EnumWindows is relatively expensive and previously ran once per
+        # alias. Take one snapshot so every platform is scored consistently.
+        windows_snapshot = enumerate_windows_windows() if system == "Windows" else None
         
         # 遍历所有支持的平台
         for p, titles in self.game_titles.items():
             for title in titles:
-                matches = self.find_window_by_title(title)
+                if windows_snapshot is None:
+                    matches = self.find_window_by_title(title)
+                else:
+                    alias = title.casefold()
+                    matches = [
+                        window for window in windows_snapshot
+                        if window["title"].casefold() == alias
+                        or window["title"].casefold().startswith(alias + " ")
+                        or window["title"].casefold().startswith(alias + "-")
+                    ]
                 
                 if matches:
                     score = 100  # 具体标题匹配

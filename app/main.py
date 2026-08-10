@@ -1,6 +1,26 @@
 import sys
 import traceback
 import os
+
+
+def _enable_windows_dpi_awareness():
+    """Keep Win32, MSS and mouse coordinates in physical-pixel space."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        # Per-monitor v2; available on current Windows 10/11 releases.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            pass
+
+
+# This must happen before importing Qt or creating an MSS capture instance.
+_enable_windows_dpi_awareness()
+
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt, QLoggingCategory
 
