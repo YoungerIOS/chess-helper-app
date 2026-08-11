@@ -26,8 +26,8 @@ def setup_logging():
         "log_to_console": True,
         "max_log_size_mb": 10,
         "backup_count": 5,
-        "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        "date_format": "%Y-%m-%d %H:%M:%S"
+        "log_format": "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s - %(message)s",
+        "date_format": "%H:%M:%S"
     }
     
     try:
@@ -45,6 +45,7 @@ def setup_logging():
     # 创建chess模块的日志记录器
     chess_logger = logging.getLogger('chess')
     chess_logger.setLevel(getattr(logging, log_config["log_level"].upper(), logging.INFO))
+    chess_logger.propagate = False
     
     # 清除现有处理器
     chess_logger.handlers.clear()

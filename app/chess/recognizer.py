@@ -1,10 +1,12 @@
 import cv2
 import numpy as np
 import os
+import threading
 from app.tools.utils import app_cache_path, resource_path
 from app.tools.log_config import get_logger
 from app.chess.context import context as global_context
 from app.chess.marker_detector import MarkerDetector
+from app.chess.move_tracker import LegalMoveMatcher
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -35,6 +37,92 @@ class ChessRecognizer:
         self.last_board_array = None
         self.last_marker_coords = []  # 缓存标记位置
         self._jj_black_piece_templates = None
+        self._recognition_lock = threading.RLock()
+        self.move_matcher = LegalMoveMatcher()
+        # 这组缓存只在 Checker 接受局面后提交，与“上一张看到
+        # 的图”分离，避免误识别帧污染后续跟踪。
+        self.trusted_grid_hashes = None
+        self.trusted_board_array = None
+        self.trusted_is_red_at_bottom = True
+        self.trusted_side_to_move = None
+
+    def reset(self):
+        """清除视觉与可信棋盘缓存，保留已加载模型。"""
+        with self._recognition_lock:
+            self.last_grid_hashes = None
+            self.last_board_array = None
+            self.last_marker_coords = []
+            self.trusted_grid_hashes = None
+            self.trusted_board_array = None
+            self.trusted_is_red_at_bottom = True
+            self.trusted_side_to_move = None
+
+    def commit_tracking_state(
+        self, board_array, grid_hashes, is_red_at_bottom, side_to_move=None
+    ):
+        """Checker 通过规则与历史校验后，提交新的跟踪基准。"""
+        if not board_array or not grid_hashes:
+            return
+        if len(board_array) != 10 or len(grid_hashes) != 10:
+            return
+        if any(len(row) != 9 for row in board_array):
+            return
+        if any(len(row) != 9 for row in grid_hashes):
+            return
+        with self._recognition_lock:
+            self.trusted_board_array = [row[:] for row in board_array]
+            self.trusted_grid_hashes = [row[:] for row in grid_hashes]
+            self.trusted_is_red_at_bottom = bool(is_red_at_bottom)
+            if side_to_move in ('red', 'black'):
+                self.trusted_side_to_move = side_to_move
+
+    def _confirm_fast_match(self, match, crops_by_position):
+        """
+        合法性只能用来提出候选，不能单独证明画面真的发生了
+        这步棋。使用ONNX仅复核起点与终点：起点应为空位/标记，
+        终点应为上一可信棋盘上的移动棋子。
+        """
+        src_crop = crops_by_position.get(match.from_pos)
+        dst_crop = crops_by_position.get(match.to_pos)
+        if src_crop is None or dst_crop is None:
+            return False
+
+        results = self.context.piece_recognizer.recognize_batch(
+            [src_crop, dst_crop]
+        )
+        if len(results) != 2 or any(result is None for result in results):
+            return False
+
+        src_result, dst_result = results
+        src_class = src_result.get('class_name')
+        src_confidence = float(src_result.get('confidence', 0.0))
+        dst_class = dst_result.get('class_name')
+        dst_confidence = float(dst_result.get('confidence', 0.0))
+
+        source_confirmed = (
+            src_class in ('-', '.') and src_confidence >= 0.65
+        )
+        destination_confirmed = (
+            dst_class == match.piece and dst_confidence >= 0.70
+        )
+
+        # 保留现有JJ黑炮视觉兜底，但只在规则候选本身就是
+        # 黑炮时启用，不会把其他棋子补成黑炮。
+        if not destination_confirmed and match.piece == 'c':
+            destination_confirmed = self._recover_jj_black_cannon(
+                dst_crop, previous_piece='c'
+            )
+
+        if not (source_confirmed and destination_confirmed):
+            message = (
+                f"合法着法候选视觉复核未通过: {match.piece} "
+                f"{match.from_pos}->{match.to_pos}, "
+                f"src={src_class}:{src_confidence:.2f}, "
+                f"dst={dst_class}:{dst_confidence:.2f}"
+            )
+            logger.info(message)
+            return False
+        return True
 
     def _load_jj_black_piece_templates(self):
         """加载界面自带的黑方棋子图，供JJ模型漏检时进行轻量模板复核。"""
@@ -188,6 +276,12 @@ class ChessRecognizer:
         return pieceArray
 
     def recognize_piece_from_grid(self, img, x_array, y_array):
+        # 两个处理工作线程共享同一识别器。缓存读取、模型推理和
+        # 缓存写回必须是一个原子过程，否则帧会交叉覆盖上一局面。
+        with self._recognition_lock:
+            return self._recognize_piece_from_grid_locked(img, x_array, y_array)
+
+    def _recognize_piece_from_grid_locked(self, img, x_array, y_array):
         """
         切割棋盘格点识别棋子，返回9x10棋盘数组和红黑方
         Args:
@@ -231,6 +325,7 @@ class ChessRecognizer:
         # 准备批量识别
         crops = []
         positions = []  # 与 crops 对应，存 (i, j)
+        crops_by_position = {}
         
         # 统计增量识别效果
         cached_count = 0
@@ -265,6 +360,7 @@ class ChessRecognizer:
                 x2 = adjusted_center_x + cut_radius
                 y2 = adjusted_center_y + cut_radius
                 piece_img = resized_img[y1:y2, x1:x2]
+                crops_by_position[(i, j)] = piece_img
                 
                 # 计算当前格子的哈希
                 curr_hash = compute_image_hash(piece_img)
@@ -288,6 +384,51 @@ class ChessRecognizer:
                     positions.append((i, j))
                     predicted_count += 1
         
+        # JJ快速路径：不识别变化格的类别，而是尝试用唯一的
+        # 合法着法解释这些视觉变化。匹配失败时继续执行原有
+        # 局部批量ONNX识别。
+        fast_match = None
+        if (
+            self.context.platform == "JJ"
+            and self.trusted_board_array is not None
+            and self.trusted_grid_hashes is not None
+        ):
+            fast_match = self.move_matcher.match(
+                self.trusted_board_array,
+                self.trusted_grid_hashes,
+                current_grid_hashes,
+                self.trusted_is_red_at_bottom,
+                self.trusted_side_to_move,
+            )
+
+        if (
+            fast_match is not None
+            and self._confirm_fast_match(fast_match, crops_by_position)
+        ):
+            pieceArray = [row[:] for row in fast_match.board]
+            marker_coords = []
+            details.append(RecognitionDetail(
+                type=RecognitionErrorType.MARKER_MISSING,
+                position=(-1, -1),
+                message=(
+                    f"合法着法快速匹配: {fast_match.from_pos} -> "
+                    f"{fast_match.to_pos}, score={fast_match.score}, "
+                    f"margin={fast_match.margin}"
+                ),
+                confidence=1.0,
+                piece_type=fast_match.piece,
+            ))
+            message = (
+                f"合法着法视觉快速路径: {fast_match.piece} "
+                f"{fast_match.from_pos}->{fast_match.to_pos}, "
+                f"changed={fast_match.changed_positions}, score={fast_match.score}"
+            )
+            logger.info(message)
+            self.last_grid_hashes = current_grid_hashes
+            self.last_board_array = pieceArray
+            self.last_marker_coords = []
+            return pieceArray, marker_coords, current_grid_hashes, details
+
         if crops:
             logger.debug(f"增量识别: 缓存命中 {cached_count} 格, 哈希变动(重算) {predicted_count} 格")
             batch_results = self.context.piece_recognizer.recognize_batch(crops)
@@ -389,7 +530,9 @@ class ChessRecognizer:
 
         # 打印时转换为 1-indexed 方便阅读
         display_coords = [(r+1, c+1) for r, c in marker_coords]
-        logger.info(f"检测到 {len(marker_coords)} 个标记--------------------------------------{display_coords}")
+        logger.debug(
+            f"移动标记: count={len(marker_coords)}, positions={display_coords}"
+        )
         
         # 更新内部缓存
         self.last_grid_hashes = current_grid_hashes

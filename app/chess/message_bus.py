@@ -7,6 +7,10 @@ import queue
 import threading
 from typing import Callable, Any, Dict
 from app.chess.message import Message, MessageType
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class MessageBus:
@@ -44,7 +48,7 @@ class MessageBus:
             try:
                 callback(message)
             except Exception as e:
-                print(f"消息订阅者回调失败: {e}")
+                logger.exception("消息订阅者回调失败")
     
     def subscribe(self, message_type: MessageType, callback: Callable[[Message], None]):
         """订阅特定类型的消息"""

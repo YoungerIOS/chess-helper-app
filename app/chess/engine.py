@@ -105,7 +105,7 @@ class ChessEngine:
             try:
                 self.last_error = ""
                 if self.process is not None and self.process.poll() is None:
-                    print("引擎已经在运行")
+                    logger.info("引擎已经在运行")
                     return True
                 
                 # 检查引擎文件是否存在
@@ -451,13 +451,13 @@ class ChessEngine:
                      best_move = None
                 else:
                     # 调试：打印原始 bestmove 响应
-                    print(f"Debug - Engine raw response: {best_move}")
+                    logger.debug(f"引擎原始响应: {best_move}")
                     start_index = best_move.find('bestmove') + len('bestmove') + 1
                     best_move = best_move[start_index:].split()[0][:4]
                     
                     # 检查是否为无效着法（如 "(none)" 或 "0000"）
                     if best_move.startswith('(') or best_move == '0000' or not best_move[0].isalpha():
-                        print(f"Debug - Engine returned invalid move: {best_move}")
+                        logger.warning(f"引擎返回无效着法: {best_move}")
                         best_move = ""  # 返回空，让调用者处理
             
             # 提取 PV 中的第一个着法

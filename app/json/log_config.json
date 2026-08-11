@@ -4,6 +4,6 @@
     "log_to_console": true,
     "max_log_size_mb": 10,
     "backup_count": 5,
-    "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    "date_format": "%Y-%m-%d %H:%M:%S"
-} 
+    "log_format": "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s - %(message)s",
+    "date_format": "%H:%M:%S"
+}

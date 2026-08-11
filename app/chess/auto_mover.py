@@ -459,8 +459,11 @@ class AutoMoveController:
             self.execute(move, is_red, analysis_token, generation)
             self._notify(True, f"已自动走子：{move}")
         except AutoMoveUserBusy as exc:
-            logger.info(f"用户正在操作电脑，跳过自动走子: {exc}")
-            self._notify(False, "检测到你正在使用电脑，已跳过自动走子")
+            logger.info(f"本次兼容自动走子流程已停止: {exc}")
+            self._notify(
+                False,
+                f"本次自动走子流程已停止：{exc}；后续建议仍会继续尝试",
+            )
         except AutoMoveCancelled as exc:
             logger.debug(f"自动走子已取消: {exc}")
         except Exception as exc:
@@ -554,6 +557,7 @@ class AutoMoveController:
         self._wait_for_user_idle(analysis_token, generation, window_info)
         controller = self.mouse_factory()
         original_position = controller.position
+        last_automatic_position = None
         try:
             attempts = (
                 ("完整点击", (start_point, end_point)),
@@ -562,14 +566,21 @@ class AutoMoveController:
                 ("完整重试", (start_point, end_point)),
             )
             for attempt_index, (attempt_name, points) in enumerate(attempts):
-                # 第一次已等待空闲；重试前若用户恢复操作则立即放弃。
-                if attempt_index and self.user_idle_provider() < self.idle_required:
-                    raise AutoMoveUserBusy("重试前检测到新的键鼠输入")
+                # 系统空闲时间也可能包含本程序刚发出的合成鼠标事件，不能用它
+                # 判断重试期间的用户输入，否则首轮点击会被误报成用户操作。
+                # 此处改为检测光标是否偏离了程序最后放置的位置。
+                if (
+                    attempt_index and
+                    last_automatic_position is not None and
+                    self._cursor_was_moved(controller.position, last_automatic_position)
+                ):
+                    raise AutoMoveUserBusy("检测到用户移动鼠标")
                 if attempt_index and not self.target_window_active_provider(window_info):
                     raise AutoMoveUserBusy("重试前目标窗口已不在最前面")
                 logger.debug(f"空闲自动走子尝试: {attempt_name}, points={points}")
                 for index, point in enumerate(points):
                     self._click_point(controller, point)
+                    last_automatic_position = point
                     if index < len(points) - 1:
                         self.sleeper(self.click_interval)
                     self._ensure_current(analysis_token, generation)
@@ -592,6 +603,18 @@ class AutoMoveController:
         finally:
             self.sleeper(0.15)
             controller.position = original_position
+
+    @staticmethod
+    def _cursor_was_moved(current_position, expected_position, tolerance=6):
+        """判断用户是否在兼容点击的视觉确认期间移动了系统光标。"""
+        try:
+            return (
+                abs(float(current_position[0]) - float(expected_position[0])) > tolerance or
+                abs(float(current_position[1]) - float(expected_position[1])) > tolerance
+            )
+        except (IndexError, TypeError, ValueError):
+            # 无法读取光标位置时采取保守策略，停止继续控制系统鼠标。
+            return True
 
     def _execute_window_move(
         self,

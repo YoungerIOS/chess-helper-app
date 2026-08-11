@@ -897,10 +897,11 @@ class PositionChecker:
             if sim_fen and sim_fen != visual_fen:
                 # 再次确认：如果是开局阶段，可能存在误判，放宽标准？
                 # 暂时保持严格校验
-                logger.warning(f"History Mismatch! Sim: {sim_fen} vs Visual: {visual_fen}")
-                logger.warning(f"  Pending Move: {move_str}")
-                logger.warning(f"  History Base: {base_fen}")
-                logger.warning(f"  History Moves: {history_moves}")
+                logger.warning(
+                    f"历史局面不一致: simulated={sim_fen}, visual={visual_fen}, "
+                    f"pending_move={move_str}, base_fen={base_fen}, "
+                    f"history_moves={history_moves}"
+                )
                 
                 result.is_history_mismatch = True
                 result.message += " (历史不一致)"

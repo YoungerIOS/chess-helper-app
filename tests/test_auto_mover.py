@@ -193,6 +193,62 @@ class AutoMoverTests(unittest.TestCase):
 
         self.assertEqual([(166, 222), (211, 308), (211, 308)], clicks)
 
+    def test_own_synthetic_input_does_not_cancel_destination_retry(self):
+        context = FakeContext(is_red=False)
+        context.checker.last_board_array_for_engine[0][1] = "n"
+        context.checker.last_board[0][1] = "n"
+        mouse = FakeMouse()
+        clicks = []
+        idle_readings = iter((99.0, 0.0, 0.0))
+
+        def clicker(current_mouse):
+            clicks.append(current_mouse.position)
+            if len(clicks) == 3:
+                context.checker.last_board[0][1] = "-"
+                context.checker.last_board[2][2] = "n"
+
+        controller = AutoMoveController(
+            context,
+            mouse_factory=lambda: mouse,
+            clicker=clicker,
+            user_idle_provider=lambda: next(idle_readings),
+            target_window_active_provider=lambda _window: True,
+            sleeper=lambda _seconds: None,
+            verify_timeout=0,
+        )
+
+        controller.execute("h0g2", False, 7)
+
+        self.assertEqual([(166, 222), (211, 308), (211, 308)], clicks)
+
+    def test_user_mouse_movement_stops_destination_retry(self):
+        context = FakeContext(is_red=False)
+        context.checker.last_board_array_for_engine[0][1] = "n"
+        context.checker.last_board[0][1] = "n"
+        mouse = FakeMouse()
+        clicks = []
+
+        def clicker(current_mouse):
+            clicks.append(current_mouse.position)
+            if len(clicks) == 2:
+                current_mouse.position = (700, 700)
+
+        controller = AutoMoveController(
+            context,
+            mouse_factory=lambda: mouse,
+            clicker=clicker,
+            user_idle_provider=lambda: 99.0,
+            target_window_active_provider=lambda _window: True,
+            sleeper=lambda _seconds: None,
+            verify_timeout=0,
+        )
+
+        with self.assertRaisesRegex(AutoMoveUserBusy, "用户移动鼠标"):
+            controller.execute("h0g2", False, 7)
+
+        self.assertEqual([(166, 222), (211, 308)], clicks)
+        self.assertEqual((10, 20), mouse.position)
+
     def test_stale_analysis_is_cancelled_before_clicking(self):
         context = FakeContext(is_red=False)
         context.checker.last_board_array_for_engine[0][1] = "n"

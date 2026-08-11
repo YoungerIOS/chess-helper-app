@@ -20,6 +20,10 @@ from app.ui.board_display import BoardDisplay
 from app.chess.processor import ChessProcess
 from app.chess.auto_mover import AutoMoveController
 from app.themes.theme_manager import ThemeManager
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 class MainWindow(QMainWindow):
     resume_polling_signal = Signal()  # 定义信号用于在主线程恢复轮询
@@ -66,8 +70,7 @@ class MainWindow(QMainWindow):
         # 设置窗口高度为棋盘高度加上其他UI元素的高度
         height = board_height + other_heights
         
-        print(f"Screen size: {screen_width}x{screen_height}")
-        print(f"Window size: {width}x{height}")
+        logger.debug(f"屏幕尺寸={screen_width}x{screen_height}, 窗口尺寸={width}x{height}")
         
         # 设置窗口固定大小
         self.setFixedSize(width, height)
@@ -388,7 +391,7 @@ class MainWindow(QMainWindow):
             notify_always: 是否即使平台未变化也显示通知
             schedule_next: 如果未检测到，是否调度下一次检测（2秒后）
         """
-        print(f"DEBUG: check_platform_change is_running={self.is_running}, schedule_next={schedule_next}")
+        logger.debug(f"检查平台变化: is_running={self.is_running}, schedule_next={schedule_next}")
         try:
             # 1. 尝试查找当前平台窗口
             current_found = self.platform_detector.find_game_window(context.platform)
@@ -404,7 +407,7 @@ class MainWindow(QMainWindow):
 
                 # 如果检测到的平台与当前上下文不一致，则切换
                 if detected_platform != context.platform:
-                    print(f"Auto-switch platform: {context.platform} -> {detected_platform}")
+                    logger.info(f"自动切换平台: {context.platform} -> {detected_platform}")
                     context.set_platform(detected_platform)
                     self.update_text(f"自动切换到游戏: {platform_display_name}", MessageType.STATUS)
                 else:
@@ -420,14 +423,14 @@ class MainWindow(QMainWindow):
                 elif notify_always:
                     self.update_text("未检测到象棋游戏窗口", MessageType.ERROR)
                     if schedule_next:
-                         print("未检测到象棋游戏窗口，2秒后重试...")
+                         logger.debug("未检测到象棋游戏窗口，2秒后重试")
                 
             # 只要不是正在运行状态，且要求调度，就继续轮询（允许用户先开一个游戏再换另一个）
             if schedule_next and not self.is_running:
                 QTimer.singleShot(2000, lambda: self.check_platform_change(notify_always=False, schedule_next=True))
                     
-        except Exception as e:
-            print(f"自动检测平台失败: {e}")
+        except Exception:
+            logger.exception("自动检测平台失败")
 
     
     def on_engine_param_changed(self, param):
@@ -553,12 +556,12 @@ class MainWindow(QMainWindow):
                 context.quit_engine()  # 线程安全地退出引擎
                 context.reset_checker() # 线程安全地重置检查器
                 context.history.clear()  # 停止时清空历史
-            except Exception as e:
-                print(f"停止操作失败: {e}")
+            except Exception:
+                logger.exception("停止操作失败")
             finally:
                 self.is_stopping = False
                 # 停止完成后，通过信号触发主线程恢复平台轮询检测
-                print("停止完成，正在恢复平台轮询...")
+                logger.info("停止完成，恢复平台轮询")
                 self.resume_polling_signal.emit()
         
         # 在后台线程中执行停止操作
@@ -584,10 +587,10 @@ class MainWindow(QMainWindow):
                 engine = ChessEngine()
                 context.set_engine(engine)
                 if engine.start():
-                    print("引擎已启动")
+                    logger.info("引擎已启动")
                 else:
                     error = engine.last_error or f"无法启动 {engine.engine_path}"
-                    print(f"引擎启动失败: {error}")
+                    logger.error(f"引擎启动失败: {error}")
                     message_bus.publish_error(f"引擎初始化失败\n{error}")
                 
                 # 初始化局面检查器和历史记录
@@ -596,8 +599,8 @@ class MainWindow(QMainWindow):
                 
                 # 执行主处理流程（阻塞调用）
                 self.capture_manager.main_process_flow()
-            except Exception as e:
-                print(f"开始操作发生错误: {e}")
+            except Exception:
+                logger.exception("开始操作失败")
         
         # 在后台线程中执行所有操作
         start_thread = threading.Thread(target=start_worker, daemon=True)
@@ -812,15 +815,15 @@ class MainWindow(QMainWindow):
                 board_region = platform.regions.get("board")
                 
                 if not board_region or 'left' not in board_region or 'top' not in board_region:
-                    print("棋盘区域配置无效，无法创建定位点")
+                    logger.warning("棋盘区域配置无效，无法创建定位点")
                     return
                     
                 x = board_region['left']
                 y = board_region['top']
                 window_x = x - width/2
                 window_y = y - height/2
-            except Exception as e:
-                print(f"创建定位点失败: {e}")
+            except Exception:
+                logger.exception("创建定位点失败")
                 # 如果创建失败，尝试创建临时定位点
                 self.create_position_dot(is_temp=True)
                 return
@@ -1008,8 +1011,8 @@ class MainWindow(QMainWindow):
              threading.Thread(target=process.request_alternative_move, daemon=True).start()
              
              self.update_text("正在计算变招...", MessageType.STATUS)
-        except Exception as e:
-             print(f"变招请求失败: {e}")
+        except Exception:
+             logger.exception("变招请求失败")
              self.update_text(f"变招失败: {e}", MessageType.ERROR)
 
     def show_param_menu(self):
@@ -1123,7 +1126,7 @@ class MainWindow(QMainWindow):
         """更换主题"""
         new_theme = ThemeManager.toggle_theme()
         self.update_icons()
-        print(f"Theme switched to: {new_theme}")
+        logger.info(f"主题已切换: {new_theme}")
 
     def update_icons(self):
         """根据当前主题更新图标"""
@@ -1170,8 +1173,8 @@ class MainWindow(QMainWindow):
                 if capture_manager is not None:
                     capture_manager.stop_capture(timeout=0.8)
                 context.quit_engine(fast=True)
-            except Exception as exc:
-                print(f"退出清理失败: {exc}")
+            except Exception:
+                logger.exception("退出清理失败")
 
         # 非daemon保证Python会完成子进程清理，但窗口与Qt事件循环可以先
         # 立即退出，用户不会看到界面卡住。
@@ -1267,7 +1270,7 @@ class ManualPositioner(QObject):
     
     def start_positioning(self):
         """开始手动定位"""
-        print("开始手动定位")
+        logger.info("开始手动定位")
         self.cancel_positioning()
         
         # 重置定位状态
@@ -1288,7 +1291,7 @@ class ManualPositioner(QObject):
 
         # 启动鼠标监听
         self.start_mouse_listener()
-        print("手动定位已启动")
+        logger.info("手动定位已启动")
     
     def cancel_positioning(self):
         """取消定位过程"""
@@ -1303,7 +1306,7 @@ class ManualPositioner(QObject):
         self.cleanup_position_dot()
         
         self.main_window.text_display.setText('<span style="color: blue;">定位已取消</span>')
-        print("手动定位已取消")
+        logger.info("手动定位已取消")
     
     def create_position_dot(self, is_temp=False, x=None, y=None):
         """创建定位点"""
@@ -1362,15 +1365,15 @@ class ManualPositioner(QObject):
                 board_region = platform.regions.get("board")
                 
                 if not board_region or 'x' not in board_region or 'y' not in board_region:
-                    print("棋盘区域配置无效，无法创建定位点")
+                    logger.warning("棋盘区域配置无效，无法创建定位点")
                     return
                     
                 x = board_region['x']
                 y = board_region['y']
                 window_x = x - width/2
                 window_y = y - height/2
-            except Exception as e:
-                print(f"创建定位点失败: {e}")
+            except Exception:
+                logger.exception("创建定位点失败")
                 return
         
         # 设置位置和显示
@@ -1393,8 +1396,8 @@ class ManualPositioner(QObject):
                 self.position_dot.hide()
                 self.position_dot.deleteLater()
                 self.position_dot = None
-            except Exception as e:
-                print(f"清理定位点时出错: {e}")
+            except Exception:
+                logger.exception("清理定位点失败")
     
     def is_temp_position_dot(self):
         """检查当前定位点是否为临时定位点"""
@@ -1472,8 +1475,8 @@ class ManualPositioner(QObject):
             if not self.mouse_listener.is_alive():
                  raise Exception("监听器启动失败(可能未获得辅助功能权限)")
                  
-        except Exception as e:
-            print(f"启动鼠标监听失败: {e}")
+        except Exception:
+            logger.exception("启动鼠标监听失败")
             self.main_window.update_text("无法启动鼠标监听，请检查 系统设置->隐私与安全性->辅助功能", MessageType.ERROR)
             
             # 尝试打开系统设置辅助功能页面 (仅尝试，不保证成功)
@@ -1500,7 +1503,7 @@ class ManualPositioner(QObject):
         if not pressed:
             return True
 
-        print(f"Mouse click detected: {button} at {x}, {y}")
+        logger.debug(f"检测到鼠标点击: button={button}, position=({x}, {y})")
             
         if button == mouse.Button.left:
             # 左键点击：确认位置
@@ -1511,7 +1514,7 @@ class ManualPositioner(QObject):
             return True # 继续监听，直到逻辑决定停止
         elif button == mouse.Button.right:
             # 右键点击：取消定位
-            print("Right click detected, posting cancel event")
+            logger.debug("检测到右键，取消手动定位")
             QApplication.instance().postEvent(self.main_window, QEvent(CANCEL_POSITION_EVENT))
             return False # 停止监听
         return True
@@ -1538,8 +1541,8 @@ class ManualPositioner(QObject):
             # 完成2角定位，计算棋盘区域
             try:
                 success = self.process_two_corner_positioning()
-            except Exception as e:
-                print(f'2角定位处理失败: {e}')
+            except Exception:
+                logger.exception("两角定位处理失败")
                 success = False
             
             # 重置定位状态
@@ -1563,7 +1566,7 @@ class ManualPositioner(QObject):
     def process_two_corner_positioning(self):
         """处理2角定位，计算棋盘区域并更新配置"""
         if len(self.positioning_coords) != 2:
-            print("2角定位坐标不足")
+            logger.warning("两角定位坐标不足")
             return False
         
         # 解包2个角的坐标
@@ -1578,7 +1581,7 @@ class ManualPositioner(QObject):
         
         # 验证棋盘尺寸的合理性
         if width < 200 or height < 200:
-            print(f"棋盘尺寸过小: {width}x{height}")
+            logger.warning(f"棋盘尺寸过小: {width}x{height}")
             return False
         
         # 创建棋盘区域配置（使用x, y, width, height格式）
@@ -1599,11 +1602,11 @@ class ManualPositioner(QObject):
             # 保存配置
             self.context.save_config()
             
-            print(f"2角定位成功，棋盘区域: {board_region}")
+            logger.info(f"两角定位成功: {board_region}")
             return True
             
-        except Exception as e:
-            print(f"更新棋盘区域配置失败: {e}")
+        except Exception:
+            logger.exception("更新棋盘区域配置失败")
             return False
     
     def cleanup(self):

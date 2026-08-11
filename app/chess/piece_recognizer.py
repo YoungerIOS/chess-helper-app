@@ -4,6 +4,10 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 from app.tools.utils import resource_path
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 class ChessPieceRecognizer:
     def __init__(self, platform="TT"):
@@ -93,7 +97,7 @@ class ChessPieceRecognizer:
                 'class_index': int(predicted_idx)
             }
         except Exception as e:
-            print(f"内存图像识别时出错: {str(e)}")
+            logger.exception("内存图像识别失败")
             return None
 
     def recognize_batch(self, image_arrays_or_pils):
@@ -113,7 +117,7 @@ class ChessPieceRecognizer:
                 batch_tensors.append(t)
                 valid_indices.append(idx)
             except Exception as e:
-                print(f"批量预处理失败 idx={idx}: {e}")
+                logger.exception(f"批量预处理失败: idx={idx}")
                 results[idx] = None
 
         if not batch_tensors:
@@ -146,7 +150,7 @@ class ChessPieceRecognizer:
                 }
                 
         except Exception as e:
-            print(f"批量推理失败: {e}")
+            logger.exception("批量推理失败")
             
         return results
 
@@ -156,7 +160,7 @@ class ChessPieceRecognizer:
             image = Image.open(image_path)
             return self.recognize_from_array(image)
         except Exception as e:
-            print(f"识别图片时出错: {str(e)}")
+            logger.exception("识别图片失败")
             return None
 
 # 使用示例

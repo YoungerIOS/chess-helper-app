@@ -95,7 +95,7 @@ class ChessCaptureManager:
             try:
                 success = self.board_locator.handle_locating_board_tasks()
                 if success:
-                    print("初始定位成功")
+                    logger.info("初始定位成功")
                     break
             except WindowError as e:
                 message_bus.publish_error(f"未检测到游戏窗口\n请确保游戏已打开")
@@ -124,7 +124,7 @@ class ChessCaptureManager:
         self.context.load_config()
 
         # 默认使用连续截图模式
-        print("Debug - 启动连续截图模式")
+        logger.info("启动连续截图模式")
         # 启动连续截图线程
         if self.continuous_thread is None or not self.continuous_thread.is_alive():
             self.continuous_thread = threading.Thread(
@@ -186,12 +186,12 @@ class ChessCaptureManager:
                 self.board_locator.stop()
 
             # 先同时唤醒所有可能阻塞的消费者，再统一等待；不能给每个线程
-            # 单独等待2秒，否则4个worker会让关闭时间线性累加。
+            # 单独等待2秒，否则多个后台线程会让关闭时间线性累加。
             # 有界队列可能正满。停止时先丢弃过期任务，再放入哨兵，保证
             # 消费者不会因put阻塞而拖住退出流程。
             self._discard_pending(self.process_queue)
             self._discard_pending(self.result_queue)
-            for _ in range(2):
+            for _ in range(processor.PROCESS_WORKER_COUNT):
                 self.process_queue.put_nowait("STOP")
             self.result_queue.put_nowait("STOP")
             if hasattr(self, 'retry_queue'):
@@ -258,7 +258,7 @@ class ChessCaptureManager:
                     # 动态获取当前棋盘区域
                     board_region = get_current_board_region()
                     if board_region is None:
-                        print("警告：连续截图模式下棋盘区域未配置，跳过本次截图")
+                        logger.warning("连续截图模式下棋盘区域未配置，跳过本次截图")
                         time.sleep(interval)
                         continue
 
@@ -279,7 +279,7 @@ class ChessCaptureManager:
                     # 完整窗口扫描或定位截图尚未结束时直接丢帧，避免请求堆积。
                     time.sleep(interval)
                 except Exception as e:
-                    print(f"[continuous] 捕获异常: {e}")
+                    logger.exception("连续截图捕获异常")
                     time.sleep(interval)
 
     def _on_retry_capture(self, message):
@@ -298,7 +298,7 @@ class ChessCaptureManager:
                     # 一个重试已经待执行时，更多同类请求没有额外价值。
                     logger.debug("合并重复的重试截图请求")
             else:
-                print("警告：重试队列不存在，无法处理重试截图")
+                logger.warning("重试队列不存在，无法处理重试截图")
                 
     def _retry_capture_worker(self):
         """专门的重试截图线程"""
@@ -321,7 +321,7 @@ class ChessCaptureManager:
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"重试线程出错: {e}")
+                logger.exception("重试线程出错")
 
     def _execute_retry_capture(self, reason):
         """执行重试截图"""
@@ -330,11 +330,11 @@ class ChessCaptureManager:
         board_region = platform.regions.get("board") if platform else None
         
         if board_region is None:
-            print("警告：棋盘区域未配置，无法重试截图")
+            logger.warning("棋盘区域未配置，无法重试截图")
             return False
         
         # 不再依赖头像状态，直接截图，由Processor根据标记判断轮次
-        print(f"执行重试截图任务,理由:--- ({reason})")
+        logger.info(f"执行重试截图任务: {reason}")
         return self._capture_and_enqueue(board_region, force_output=True)
     
     def manually_capture_once(self):
@@ -352,7 +352,7 @@ class ChessCaptureManager:
             self.context.history.clear()
             self.context.base_fen = None
             self.context.reset_recognizer()
-            print("Debug - 手动刷新 (Hard Reset): History, BaseFen, Checker Cleared.")
+            logger.info("手动刷新：已重置历史、基准FEN和棋盘检查器")
             
             # 3. 复用重试截图逻辑（自动检测头像状态并强制截图）
             if self._execute_retry_capture('手动刷新重置'):
@@ -360,5 +360,5 @@ class ChessCaptureManager:
             return False
                 
         except Exception as e:
-            print(f"执行单次截图流程失败: {e}")
+            logger.exception("执行单次截图流程失败")
             return False

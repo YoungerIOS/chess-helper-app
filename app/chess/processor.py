@@ -12,6 +12,12 @@ import threading, queue, time
 
 logger = get_logger(__name__)
 
+# 识别、规则校验和可信状态提交是一条有顺序的状态机。
+# 多个消费者会让后截取的帧先更新 last_board，造成假的多步
+# 变化。合法着法快速路径已显著降低单帧开销，因此使用单一
+# 有序消费者，上游继续使用有界队列淘汰过期帧。
+PROCESS_WORKER_COUNT = 1
+
 
 @dataclass
 class BoardAnalysisState:
@@ -78,6 +84,45 @@ class ChessProcess:
                 base_fen=self.context.base_fen,
                 history_moves=history_moves
             )
+
+            # 只有通过棋规、轮次和历史一致性校验的局面，才能成为
+            # 下一次视觉跟踪的可信基准。非法帧不会污染跟踪状态。
+            should_commit_tracking = bool(
+                status
+                and not (
+                    status.is_illegal_board
+                    or status.is_illegal_change
+                    or status.is_history_mismatch
+                    or status.is_multi_step
+                )
+                and (
+                    status.is_same_board
+                    or status.is_new_game
+                    or status.is_red_start
+                    or status.is_black_start
+                    or status.is_my_step
+                    or status.is_opponent_step
+                )
+            )
+            if (
+                should_commit_tracking
+                and hasattr(self.recognizer, 'commit_tracking_state')
+            ):
+                next_side_to_move = None
+                if status.is_red_start or status.is_black_start or status.is_new_game:
+                    next_side_to_move = 'red'
+                if status.is_my_step or status.is_opponent_step:
+                    moved_side = status.step_info.get('side')
+                    if moved_side in ('red', 'black'):
+                        next_side_to_move = (
+                            'black' if moved_side == 'red' else 'red'
+                        )
+                self.recognizer.commit_tracking_state(
+                    board,
+                    grid_hashes,
+                    self.checker.is_red,
+                    next_side_to_move,
+                )
                     
         return BoardAnalysisState(
             board_array=board, 
@@ -747,7 +792,6 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
     result_dict = {}
     result_lock = threading.Lock()
     result_ready = threading.Condition(result_lock)
-    NUM_WORKERS = 2
 
     def put_latest_result(item):
         """结果消费落后时淘汰最旧结果，避免实时流水线无限积压。"""
@@ -854,8 +898,8 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 logger.error(f"结果处理线程出错: {e}")
 
     threads = []
-    for _ in range(NUM_WORKERS): 
-        t = threading.Thread(target=process_worker, daemon=True) # 2个线程,负责识别与检查
+    for _ in range(PROCESS_WORKER_COUNT):
+        t = threading.Thread(target=process_worker, daemon=True)
         t.start()
         threads.append(t)
     t = threading.Thread(target=result_sort_worker, daemon=True) # 1个线程,负责排序

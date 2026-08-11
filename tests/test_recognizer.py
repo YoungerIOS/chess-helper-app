@@ -1,9 +1,11 @@
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from app.chess.processor import ChessProcess
+from app.chess.checker import PositionChecker
 from app.chess.recognizer import (
     ChessRecognizer,
     RecognitionDetail,
@@ -23,13 +25,27 @@ class RecordingPieceRecognizer:
     def __init__(self, low_confidence_first=False):
         self.crop_shapes = []
         self.low_confidence_first = low_confidence_first
+        self.batch_calls = 0
+        self.forced_classes = None
 
     def recognize_batch(self, crops):
+        self.batch_calls += 1
         self.crop_shapes = [crop.shape[:2] for crop in crops]
         results = [
             {"class_name": "-", "confidence": 1.0, "class_index": 7}
             for _ in crops
         ]
+        if self.forced_classes is not None:
+            classes = list(self.forced_classes[:len(crops)])
+            classes.extend(["-"] * (len(crops) - len(classes)))
+            results = [
+                {
+                    "class_name": class_name,
+                    "confidence": 1.0,
+                    "class_index": 0,
+                }
+                for class_name in classes
+            ]
         if self.low_confidence_first:
             results[0] = {"class_name": "A", "confidence": 0.5, "class_index": 9}
         return results
@@ -146,6 +162,67 @@ class ChessRecognizerTests(unittest.TestCase):
         self.assertIsNotNone(board)
         self.assertEqual([], markers)
         self.assertFalse(is_massive_change)
+
+    def test_jj_legal_move_fast_path_only_confirms_endpoints_with_onnx(self):
+        context = FakeContext("JJ")
+        context.piece_recognizer.forced_classes = ["-", "P"]
+        recognizer = ChessRecognizer(context)
+        board = [row[:] for row in PositionChecker.START_RED]
+        base_hash = "0000000000000000"
+        trusted_hashes = [[base_hash] * 9 for _ in range(10)]
+        current_hashes = [row[:] for row in trusted_hashes]
+        current_hashes[6][0] = "ffffffffffffffff"
+        current_hashes[5][0] = "00000000ffffffff"
+        recognizer.commit_tracking_state(
+            board, trusted_hashes, is_red_at_bottom=True, side_to_move="red"
+        )
+        flattened_hashes = [
+            value for row in current_hashes for value in row
+        ]
+
+        with patch(
+            "app.tools.utils.compute_image_hash",
+            side_effect=flattened_hashes,
+        ):
+            recognized, markers, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual(1, context.piece_recognizer.batch_calls)
+        self.assertEqual("-", recognized[6][0])
+        self.assertEqual("P", recognized[5][0])
+        self.assertEqual([], markers)
+
+    def test_jj_fast_path_rejects_unconfirmed_legal_candidate(self):
+        context = FakeContext("JJ")
+        # 画面并没有显示兵到达终点；仅凭哈希与合法性不得
+        # 直接更新棋盘。后续会回退到原有局部识别。
+        context.piece_recognizer.forced_classes = ["-", "-"]
+        recognizer = ChessRecognizer(context)
+        board = [row[:] for row in PositionChecker.START_RED]
+        base_hash = "0000000000000000"
+        trusted_hashes = [[base_hash] * 9 for _ in range(10)]
+        current_hashes = [row[:] for row in trusted_hashes]
+        current_hashes[6][0] = "ffffffffffffffff"
+        current_hashes[5][0] = "00000000ffffffff"
+        recognizer.commit_tracking_state(
+            board, trusted_hashes, is_red_at_bottom=True, side_to_move="red"
+        )
+        flattened_hashes = [
+            value for row in current_hashes for value in row
+        ]
+
+        with patch(
+            "app.tools.utils.compute_image_hash",
+            side_effect=flattened_hashes,
+        ):
+            recognized, _, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual("-", recognized[6][0])
+        self.assertEqual("-", recognized[5][0])
+        self.assertGreaterEqual(context.piece_recognizer.batch_calls, 2)
 
 
 if __name__ == "__main__":
