@@ -146,6 +146,8 @@ class AutoMoveController:
         self._last_button_scan_at = 0.0
         self._rematch_button_seen = False
         self._rematch_button_click_attempts = 0
+        self._reward_popup_seen = False
+        self._reward_popup_click_attempts = 0
         self._background_click_supported = None
         self._background_click_window_key = None
 
@@ -355,8 +357,83 @@ class AutoMoveController:
             logger.debug(f"绿色再来一局按钮识别失败: {exc}")
             return None
 
+    @staticmethod
+    def find_reward_popup_close_in_image(image):
+        """识别结算页“段位保护/快速升级”等奖励弹层右上方的金色叉。"""
+        if image is None or getattr(image, "ndim", 0) != 3:
+            return None
+        height, width = image.shape[:2]
+        if width < 200 or height < 300:
+            return None
+
+        try:
+            import cv2
+            import numpy as np
+
+            # 叉号位于奖励弹层右上边缘。限制搜索区域能够排除窗口标题栏按钮、
+            # 弹层标题和“领取”按钮；颜色范围兼容亮黄、米黄两种皮肤。
+            left = int(width * 0.82)
+            right = int(width * 0.94)
+            top = int(height * 0.29)
+            bottom = int(height * 0.43)
+            hsv = cv2.cvtColor(image[top:bottom, left:right, :3], cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv,
+                np.array((12, 25, 155), dtype=np.uint8),
+                np.array((50, 255, 255), dtype=np.uint8),
+            )
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            )
+            count, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
+
+            candidates = []
+            for index in range(1, count):
+                x, y, box_width, box_height, area = map(int, stats[index])
+                if box_width <= 0 or box_height <= 0:
+                    continue
+                pixel_aspect = box_width / box_height
+                fill_ratio = area / (box_width * box_height)
+                width_ratio = box_width / width
+                height_ratio = box_height / height
+                center_x = left + float(centroids[index][0])
+                center_y = top + float(centroids[index][1])
+                normalized_x = center_x / width
+                normalized_y = center_y / height
+
+                if not (0.85 <= normalized_x <= 0.92):
+                    continue
+                if not (0.32 <= normalized_y <= 0.40):
+                    continue
+                if not (0.015 <= width_ratio <= 0.050):
+                    continue
+                if not (0.008 <= height_ratio <= 0.030):
+                    continue
+                if not (0.70 <= pixel_aspect <= 1.35):
+                    continue
+                if not (0.20 <= fill_ratio <= 0.75):
+                    continue
+
+                # 两张实测皮肤的叉号中心均接近 (0.883, 0.367)，在满足
+                # 形状约束后选择最接近该锚点的候选。
+                distance = (
+                    ((normalized_x - 0.883) / 0.07) ** 2 +
+                    ((normalized_y - 0.367) / 0.08) ** 2
+                )
+                candidates.append((distance, round(center_x), round(center_y)))
+
+            if not candidates:
+                return None
+            _, center_x, center_y = min(candidates)
+            return center_x, center_y
+        except Exception as exc:
+            logger.debug(f"结算奖励弹层关闭按钮识别失败: {exc}")
+            return None
+
     def scan_rematch_button(self):
-        """异步扫描一次完整JJ窗口；只有看见绿色按钮才点击。"""
+        """异步扫描JJ结算页；先关闭奖励弹层，再点击“再来一局”。"""
         if (
             not self.context.auto_move_enabled or
             self.context.platform != "JJ" or
@@ -383,7 +460,56 @@ class AutoMoveController:
             if not window_info or window_info.get("platform") != "JJ":
                 return
             image = self.window_image_provider(window_info)
+            if image is None:
+                return
+
             image_point = self.find_rematch_button_in_image(image)
+            checker = self.context.get_checker()
+            settlement_confirmed = bool(
+                image_point is not None or
+                getattr(checker, "in_settlement_screen", False)
+            )
+            popup_close_point = (
+                self.find_reward_popup_close_in_image(image)
+                if settlement_confirmed else None
+            )
+            if popup_close_point is not None:
+                if (
+                    not self.context.auto_move_enabled or
+                    self.context.platform != "JJ" or
+                    not self.can_execute()
+                ):
+                    return
+
+                # 弹层会覆盖“再来一局”；同一帧只允许点击关闭按钮，等待下次
+                # 截图确认弹层消失后才继续续局，防止点击“领取”或透传到底层。
+                self._rematch_button_seen = False
+                self._rematch_button_click_attempts = 0
+                click_point = self._image_point_to_screen(
+                    image,
+                    window_info,
+                    popup_close_point,
+                )
+                if not self._reward_popup_seen:
+                    self._reward_popup_seen = True
+                    logger.info(
+                        f"视觉识别到结算奖励弹层关闭按钮: "
+                        f"image={popup_close_point}, screen={click_point}"
+                    )
+                    self._notify(True, "检测到结算奖励弹层，正在自动关闭...")
+                self._reward_popup_click_attempts += 1
+                self._click_scanned_control(
+                    window_info,
+                    click_point,
+                    self._reward_popup_click_attempts,
+                )
+                return
+
+            if self._reward_popup_seen:
+                self._reward_popup_seen = False
+                self._reward_popup_click_attempts = 0
+                logger.info("结算奖励弹层已关闭，继续检测“再来一局”")
+
             if image_point is None:
                 if self._rematch_button_seen:
                     self._rematch_button_seen = False
@@ -398,12 +524,7 @@ class AutoMoveController:
             ):
                 return
 
-            image_height, image_width = image.shape[:2]
-            window = window_info.get("region", {})
-            click_point = (
-                round(float(window["left"]) + image_point[0] / image_width * float(window["width"])),
-                round(float(window["top"]) + image_point[1] / image_height * float(window["height"])),
-            )
+            click_point = self._image_point_to_screen(image, window_info, image_point)
             if not self._rematch_button_seen:
                 self._rematch_button_seen = True
                 logger.info(
@@ -412,17 +533,32 @@ class AutoMoveController:
                 )
                 self._notify(True, "检测到“再来一局”，正在自动续局...")
             self._rematch_button_click_attempts += 1
-            if self._rematch_button_click_attempts <= 2:
-                self.window_clicker(window_info, click_point)
-            else:
-                # 微信画布若不接受进程定向事件，连续看见按钮三次后使用
-                # 已验证可用的兼容点击；仍先检查用户空闲并恢复原光标。
-                self._compatibility_click_point(window_info, click_point)
+            self._click_scanned_control(
+                window_info,
+                click_point,
+                self._rematch_button_click_attempts,
+            )
         except Exception as exc:
-            logger.error(f"绿色再来一局按钮自动点击失败: {exc}")
+            logger.error(f"JJ结算页自动操作失败: {exc}")
         finally:
             with self._lock:
                 self._button_scan_pending = False
+
+    @staticmethod
+    def _image_point_to_screen(image, window_info, image_point):
+        image_height, image_width = image.shape[:2]
+        window = window_info.get("region", {})
+        return (
+            round(float(window["left"]) + image_point[0] / image_width * float(window["width"])),
+            round(float(window["top"]) + image_point[1] / image_height * float(window["height"])),
+        )
+
+    def _click_scanned_control(self, window_info, click_point, attempt_count):
+        """先尝试不占用光标的进程点击，必要时回退到安全兼容点击。"""
+        if self._background_click_supported is False or attempt_count > 2:
+            self._compatibility_click_point(window_info, click_point)
+        else:
+            self.window_clicker(window_info, click_point)
 
     def cancel_pending(self):
         with self._lock:
@@ -431,6 +567,8 @@ class AutoMoveController:
             self._button_scan_pending = False
             self._rematch_button_seen = False
             self._rematch_button_click_attempts = 0
+            self._reward_popup_seen = False
+            self._reward_popup_click_attempts = 0
 
     def schedule(self, move, is_red, analysis_token):
         """安排一次自动走子；重复消息或过期分析不会再次执行。"""

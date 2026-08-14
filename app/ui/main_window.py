@@ -608,8 +608,8 @@ class MainWindow(QMainWindow):
 
     def check_queue(self):
         """检查结果队列"""
-        # 独立扫描完整JJ窗口中的绿色“再来一局”按钮。这个入口不依赖
-        # 棋盘格点或结算状态，因此结算页缩小棋盘也不会漏掉。
+        # 独立扫描完整JJ结算页：先关闭段位保护/快速升级等奖励弹层，
+        # 再点击绿色“再来一局”。这个入口不依赖棋盘格点或结算状态。
         if (
             self.is_running and
             not self.is_stopping and

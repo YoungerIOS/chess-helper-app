@@ -402,6 +402,105 @@ class AutoMoverTests(unittest.TestCase):
             AutoMoveController.find_rematch_button_in_image(image),
         )
 
+    def test_reward_popup_close_is_detected_by_color_shape_and_position(self):
+        image = np.zeros((2200, 1200, 3), dtype=np.uint8)
+        image[:] = (35, 30, 40)
+        center = (1060, 807)
+        color = (80, 220, 255)
+        cv2.line(image, (1044, 791), (1076, 823), color, 10)
+        cv2.line(image, (1076, 791), (1044, 823), color, 10)
+
+        self.assertEqual(
+            center,
+            AutoMoveController.find_reward_popup_close_in_image(image),
+        )
+
+    def test_reward_popup_close_rejects_same_shape_outside_close_area(self):
+        image = np.zeros((2200, 1200, 3), dtype=np.uint8)
+        image[:] = (35, 30, 40)
+        color = (80, 220, 255)
+        cv2.line(image, (944, 791), (976, 823), color, 10)
+        cv2.line(image, (976, 791), (944, 823), color, 10)
+
+        self.assertIsNone(
+            AutoMoveController.find_reward_popup_close_in_image(image),
+        )
+
+    def test_popup_like_shape_is_not_clicked_during_active_game(self):
+        context = FakeContext(is_red=False)
+        image = np.zeros((2200, 1200, 3), dtype=np.uint8)
+        image[:] = (35, 30, 40)
+        color = (80, 220, 255)
+        cv2.line(image, (1044, 791), (1076, 823), color, 10)
+        cv2.line(image, (1076, 791), (1044, 823), color, 10)
+        clicks = []
+
+        controller = AutoMoveController(
+            context,
+            window_provider=lambda: {
+                "platform": "JJ",
+                "pid": 1234,
+                "window_id": 5678,
+                "region": {
+                    "left": 100,
+                    "top": 50,
+                    "width": 600,
+                    "height": 1100,
+                },
+            },
+            window_image_provider=lambda _window: image,
+            window_clicker=lambda _window, point: clicks.append(point),
+        )
+        controller._button_scan_pending = True
+
+        controller._run_button_scan()
+
+        self.assertEqual([], clicks)
+        self.assertFalse(controller._reward_popup_seen)
+
+    def test_reward_popup_is_closed_before_visible_rematch_button(self):
+        context = FakeContext(is_red=False)
+        image = np.zeros((2200, 1200, 3), dtype=np.uint8)
+        image[:] = (35, 30, 40)
+        cv2.rectangle(image, (360, 1870), (840, 2046), (55, 105, 55), -1)
+        color = (80, 220, 255)
+        cv2.line(image, (1044, 791), (1076, 823), color, 10)
+        cv2.line(image, (1076, 791), (1044, 823), color, 10)
+        clicks = []
+
+        controller = AutoMoveController(
+            context,
+            window_provider=lambda: {
+                "platform": "JJ",
+                "pid": 1234,
+                "window_id": 5678,
+                "region": {
+                    "left": 100,
+                    "top": 50,
+                    "width": 600,
+                    "height": 1100,
+                },
+            },
+            window_image_provider=lambda _window: image,
+            window_clicker=lambda _window, point: clicks.append(point),
+        )
+        controller._button_scan_pending = True
+
+        controller._run_button_scan()
+
+        self.assertEqual([(630, 454)], clicks)
+        self.assertTrue(controller._reward_popup_seen)
+        self.assertFalse(controller._rematch_button_seen)
+
+        # 下一帧弹层消失后才允许点击底层“再来一局”。
+        image[770:845, 1020:1100] = (35, 30, 40)
+        controller._button_scan_pending = True
+        controller._run_button_scan()
+
+        self.assertEqual([(630, 454), (400, 1029)], clicks)
+        self.assertFalse(controller._reward_popup_seen)
+        self.assertTrue(controller._rematch_button_seen)
+
     def test_visual_button_scan_clicks_detected_center_without_settlement_state(self):
         context = FakeContext(is_red=False)
         self.assertFalse(context.checker.in_settlement_screen)
