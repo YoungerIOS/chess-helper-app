@@ -21,6 +21,7 @@ class SettlementDetectionTests(unittest.TestCase):
 
         self.assertTrue(checker.check_settlement(board, is_massive_change=True))
         self.assertTrue(checker.in_settlement_screen)
+        self.assertEqual("settlement", checker.settlement_reason)
 
     def test_complete_new_board_is_not_mistaken_for_settlement(self):
         checker = PositionChecker()
@@ -38,6 +39,44 @@ class SettlementDetectionTests(unittest.TestCase):
             checker.check_settlement(checker.START_RED, is_massive_change=True)
         )
         self.assertTrue(checker.in_settlement_screen)
+
+    def test_empty_massive_board_is_classified_as_board_loss(self):
+        checker = PositionChecker()
+        board = [["-"] * 9 for _ in range(10)]
+
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("board_lost", checker.settlement_reason)
+
+    def test_sparse_massive_board_missing_a_king_is_board_loss(self):
+        checker = PositionChecker()
+        board = [["-"] * 9 for _ in range(10)]
+        board[9][4] = "K"
+        board[6][0] = "P"
+
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("board_lost", checker.settlement_reason)
+
+    def test_settlement_escalates_to_board_loss_when_board_disappears(self):
+        checker = PositionChecker()
+        checker.last_board = [row[:] for row in checker.START_RED]
+        self.assertTrue(
+            checker.check_settlement(checker.START_RED, is_massive_change=True)
+        )
+        self.assertEqual("settlement", checker.settlement_reason)
+
+        empty = [["-"] * 9 for _ in range(10)]
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        self.assertEqual("board_lost", checker.settlement_reason)
+
+    def test_reset_clears_settlement_reason(self):
+        checker = PositionChecker()
+        checker.settlement_reason = "board_lost"
+        checker.in_settlement_screen = True
+
+        checker.reset()
+
+        self.assertIsNone(checker.settlement_reason)
+        self.assertFalse(checker.in_settlement_screen)
 
 
 if __name__ == "__main__":

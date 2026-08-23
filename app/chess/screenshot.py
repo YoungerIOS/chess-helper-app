@@ -1,16 +1,23 @@
-import mss
-import time
 import queue
-import threading  
-import app.chess.processor as processor
-from app.chess.message import Message, MessageType, TurnState
-from app.chess.message_bus import message_bus
+import threading
+import time
+
+import mss
+
+from app.chess import processor
+from app.chess.board_locator import (
+    BoardLocator,
+    CombsError,
+    LocationError,
+    PieceError,
+    WindowError,
+)
 from app.chess.context import context
-from app.tools.utils import app_cache_path
-from app.tools.log_config import get_logger
-from app.chess.board_locator import BoardLocator, LocationError, WindowError, PieceError, CombsError
-from app.chess.hash_checker import filter_stable_frame
+from app.chess.hash_checker import filter_stable_frame, has_pending_visual_change
+from app.chess.message import Message, MessageType
+from app.chess.message_bus import message_bus
 from app.chess.screen_capture import ScreenCaptureBusy, locked_grab
+from app.tools.log_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -25,7 +32,7 @@ class ChessCaptureManager:
     def __init__(self):
         self.context = context
         self.manual_trigger = False  # 手动触发标志
-        self.stop_event = threading.Event() # 整个截图流程的停止事件
+        self.stop_event = threading.Event()  # 整个截图流程的停止事件
         self._stop_lock = threading.Lock()
         self._stopped_event = threading.Event()
         # 只有棋盘定位完成并启动连续截图后，其他完整窗口截图任务才可运行。
@@ -39,21 +46,21 @@ class ChessCaptureManager:
         self._dropped_frames = 0
         # 初始化棋盘定位器
         self.board_locator = BoardLocator(self.context)
-        
+
         # 连续模式截图线程
         self.continuous_thread = None
-        
+
         # 订阅重试截图消息
         message_bus.subscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
-        
+
         # 初始定位完成事件，用于通知截图主循环
         self._located_event = threading.Event()
-        
+
         # 监控截图线程空闲时长
         self.last_capture_time = time.time()
         self.capture_timeout = 120  # 120秒无截图自动停止
-        
-        # 初始化重试队列 
+
+        # 初始化重试队列
         self.retry_queue = queue.Queue(maxsize=self.RETRY_QUEUE_SIZE)
 
     @staticmethod
@@ -86,9 +93,9 @@ class ChessCaptureManager:
                     continue
         return False
 
-    def main_process_flow(self): 
+    def main_process_flow(self):
         # 首先进行初始定位,循环尝试,直到成功
-        while not self.stop_event.is_set(): 
+        while not self.stop_event.is_set():
             # 如果已有定位成功的事件（可能来自手动定位），直接跳出
             if self._located_event.is_set():
                 break
@@ -110,15 +117,15 @@ class ChessCaptureManager:
                 message_bus.publish_error(f"{e}")
                 message_bus.publish(Message(MessageType.STOP))
             except Exception as e:
-                message_bus.publish_error(f"{e}")   
+                message_bus.publish_error(f"{e}")
                 message_bus.publish(Message(MessageType.STOP))
-        
+
         if self.stop_event.is_set():
             return
-        
+
         # 重置事件，避免影响后续逻辑
         self._located_event.clear()
-        
+
         # 定位成功后，加载配置并开始截图
         # 定位成功后，加载配置并开始截图
         self.context.load_config()
@@ -128,20 +135,18 @@ class ChessCaptureManager:
         # 启动连续截图线程
         if self.continuous_thread is None or not self.continuous_thread.is_alive():
             self.continuous_thread = threading.Thread(
-                target=self._continuous_capture_worker,
-                daemon=True
+                target=self._continuous_capture_worker, daemon=True
             )
             self.continuous_thread.start()
         self.ready_event.set()
-        
+
         # 启动重试截图线程；沿用构造时创建的有界队列。
         self._discard_pending(self.retry_queue)
         self.retry_thread = threading.Thread(
-            target=self._retry_capture_worker,
-            daemon=True
+            target=self._retry_capture_worker, daemon=True
         )
         self.retry_thread.start()
-            
+
         # 启动窗口移动监控
         try:
             self.board_locator.monitor_window_movement(self.stop_event)
@@ -158,7 +163,7 @@ class ChessCaptureManager:
             message_bus.publish_error(f"{e}")
             message_bus.publish(Message(MessageType.STOP))
         except Exception as e:
-            message_bus.publish_error(f"{e}")   
+            message_bus.publish_error(f"{e}")
             message_bus.publish(Message(MessageType.STOP))
 
     def start_capture(self):
@@ -182,7 +187,7 @@ class ChessCaptureManager:
 
             self.stop_event.set()
             self.ready_event.clear()
-            if hasattr(self, 'board_locator'):
+            if hasattr(self, "board_locator"):
                 self.board_locator.stop()
 
             # 先同时唤醒所有可能阻塞的消费者，再统一等待；不能给每个线程
@@ -194,13 +199,13 @@ class ChessCaptureManager:
             for _ in range(processor.PROCESS_WORKER_COUNT):
                 self.process_queue.put_nowait("STOP")
             self.result_queue.put_nowait("STOP")
-            if hasattr(self, 'retry_queue'):
+            if hasattr(self, "retry_queue"):
                 self._discard_pending(self.retry_queue)
                 self.retry_queue.put_nowait("STOP")
 
             deadline = time.monotonic() + max(0.0, float(timeout))
-            threads = list(getattr(self, 'worker_threads', []))
-            retry_thread = getattr(self, 'retry_thread', None)
+            threads = list(getattr(self, "worker_threads", []))
+            retry_thread = getattr(self, "retry_thread", None)
             if retry_thread is not None:
                 threads.append(retry_thread)
             if self.continuous_thread is not None:
@@ -217,8 +222,27 @@ class ChessCaptureManager:
             alive = [thread.name for thread in threads if thread.is_alive()]
             if alive:
                 logger.warning(f"截图管理器停止后仍有后台线程存活: {alive}")
+            self.context.close_jj_v2_recorder(timeout=1.0)
+            self.context.close_jj_v2_shadow_runner(timeout=1.0)
             message_bus.unsubscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
             self._stopped_event.set()
+
+    def _record_jj_v2_frame(self, screenshot, capture_time, region, stable):
+        """采集失败不能影响实时识别主流程。"""
+        try:
+            get_recorder = getattr(self.context, "get_jj_v2_recorder", None)
+            if get_recorder is None:
+                return
+            recorder = get_recorder()
+            if recorder is not None:
+                recorder.record_frame(
+                    screenshot,
+                    captured_at=capture_time,
+                    stable=stable,
+                    board_region=region,
+                )
+        except Exception:
+            logger.exception("JJ v2数据帧采集失败")
 
     def _capture_and_enqueue(self, region, force_output=False):
         """
@@ -229,10 +253,19 @@ class ChessCaptureManager:
         capture_time = time.time()
         with mss.MSS() as sct:
             board_screenshot = locked_grab(sct, region, timeout=1.0)
-        
+
         # 使用全局函数处理截图
-        stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[capture]", force_output=force_output)
-        
+        stable_frame, curr_hash = filter_stable_frame(
+            board_screenshot, "[capture]", force_output=force_output
+        )
+        if stable_frame is not None or has_pending_visual_change(curr_hash):
+            self._record_jj_v2_frame(
+                board_screenshot,
+                capture_time,
+                region,
+                stable_frame is not None,
+            )
+
         # 如果检测到稳定帧，则入队
         if stable_frame is not None:
             if not self._enqueue_latest_frame((capture_time, board_screenshot)):
@@ -240,16 +273,17 @@ class ChessCaptureManager:
             # 更新最后截图时间
             self.last_capture_time = time.time()
             return True
-        
+
         return False
 
     def _continuous_capture_worker(self, interval=0.18):
         """连续截图线程：每0.18秒截取一次棋盘，使用稳定帧检测，仅将稳定帧入队"""
+
         def get_current_board_region():
             """动态获取当前棋盘区域坐标"""
             platform = self.context.get_platform(self.context.platform)
             return platform.regions.get("board") if platform else None
-        
+
         # 复用同一个MSS实例。旧实现每180ms重新加载一次CoreGraphics
         # 截图后端，虽然单次会释放图像，却会制造大量不必要的原生对象。
         with mss.MSS() as sct:
@@ -266,7 +300,16 @@ class ChessCaptureManager:
                     board_screenshot = locked_grab(sct, board_region, timeout=0.5)
 
                     # 使用全局函数处理截图
-                    stable_frame, curr_hash = filter_stable_frame(board_screenshot, "[continuous]")
+                    stable_frame, curr_hash = filter_stable_frame(
+                        board_screenshot, "[continuous]"
+                    )
+                    if stable_frame is not None or has_pending_visual_change(curr_hash):
+                        self._record_jj_v2_frame(
+                            board_screenshot,
+                            capture_time,
+                            board_region,
+                            stable_frame is not None,
+                        )
 
                     # 如果检测到稳定帧，则入队
                     if stable_frame is not None:
@@ -290,7 +333,7 @@ class ChessCaptureManager:
         """
         if message.type == MessageType.RETRY_CAPTURE:
             # 将重试任务放入队列
-            if hasattr(self, 'retry_queue'):
+            if hasattr(self, "retry_queue"):
                 # print("Debug - 收到重试截图请求，安排重新截图")
                 try:
                     self.retry_queue.put_nowait(message)
@@ -299,7 +342,7 @@ class ChessCaptureManager:
                     logger.debug("合并重复的重试截图请求")
             else:
                 logger.warning("重试队列不存在，无法处理重试截图")
-                
+
     def _retry_capture_worker(self):
         """专门的重试截图线程"""
         while True:
@@ -328,15 +371,15 @@ class ChessCaptureManager:
         # 获取当前棋盘区域
         platform = self.context.get_platform(self.context.platform)
         board_region = platform.regions.get("board") if platform else None
-        
+
         if board_region is None:
             logger.warning("棋盘区域未配置，无法重试截图")
             return False
-        
+
         # 不再依赖头像状态，直接截图，由Processor根据标记判断轮次
         logger.info(f"执行重试截图任务: {reason}")
         return self._capture_and_enqueue(board_region, force_output=True)
-    
+
     def manually_capture_once(self):
         """
         执行一次完整的监控与截图流程，模拟重试逻辑
@@ -346,19 +389,19 @@ class ChessCaptureManager:
             self.context.invalidate_analysis()
             engine = self.context.get_engine()
             if engine is not None:
-                engine._send_command('stop')
+                engine._send_command("stop")
 
             self.context.reset_checker()
             self.context.history.clear()
             self.context.base_fen = None
             self.context.reset_recognizer()
             logger.info("手动刷新：已重置历史、基准FEN和棋盘检查器")
-            
+
             # 3. 复用重试截图逻辑（自动检测头像状态并强制截图）
-            if self._execute_retry_capture('手动刷新重置'):
-                 return True
+            if self._execute_retry_capture("手动刷新重置"):
+                return True
             return False
-                
+
         except Exception as e:
             logger.exception("执行单次截图流程失败")
             return False

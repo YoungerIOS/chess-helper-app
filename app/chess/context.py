@@ -134,6 +134,15 @@ class ChessContext:
     _theme: str = "light"  # 当前主题
     _auto_move_enabled: bool = False  # 自动走子默认关闭
     _capture_depth_enabled: bool = False  # 我方被吃子时动态增加搜索深度
+    _jj_v2_recording_enabled: bool = False
+    _jj_v2_record_unstable: bool = True
+    _jj_v2_dataset_dir: str = ""
+    _jj_v2_recorder: Optional[object] = None
+    _jj_v2_shadow_enabled: bool = False
+    _jj_v2_recommendation_enabled: bool = False
+    _jj_v2_shadow_model_path: str = ""
+    _jj_v2_shadow_output_dir: str = ""
+    _jj_v2_shadow_runner: Optional[object] = None
     
     
     def __post_init__(self):
@@ -211,6 +220,69 @@ class ChessContext:
             logger.info(f"自动走子设置为: {self._auto_move_enabled}")
             self._capture_depth_enabled = bool(config.get('capture_depth_enabled', False))
             logger.info(f"被吃子加深设置为: {self._capture_depth_enabled}")
+            jj_v2_config = config.get('jj_v2', {}) or {}
+            recording_enabled = bool(jj_v2_config.get('recording_enabled', False))
+            recording_changed = (
+                recording_enabled != getattr(self, '_jj_v2_recording_enabled', False)
+                or bool(jj_v2_config.get('record_unstable', True))
+                != getattr(self, '_jj_v2_record_unstable', True)
+                or str(jj_v2_config.get('dataset_dir', '') or '')
+                != getattr(self, '_jj_v2_dataset_dir', '')
+            )
+            if recording_changed:
+                self.close_jj_v2_recorder()
+            self._jj_v2_recording_enabled = recording_enabled
+            self._jj_v2_record_unstable = bool(
+                jj_v2_config.get('record_unstable', True)
+            )
+            self._jj_v2_dataset_dir = str(
+                jj_v2_config.get('dataset_dir', '') or ''
+            )
+            shadow_enabled = bool(jj_v2_config.get('shadow_enabled', False))
+            recommendation_enabled = bool(
+                jj_v2_config.get('recommendation_enabled', False)
+            )
+            shadow_model_path = str(jj_v2_config.get('shadow_model_path', '') or '')
+            shadow_output_dir = str(jj_v2_config.get('shadow_output_dir', '') or '')
+            shadow_map_path = os.path.join(
+                os.path.dirname(os.path.abspath(os.path.expanduser(shadow_model_path))),
+                'jj_v2_piece_map.json',
+            ) if shadow_model_path else ''
+            if shadow_enabled and not (
+                os.path.isfile(os.path.abspath(os.path.expanduser(shadow_model_path)))
+                and os.path.isfile(shadow_map_path)
+            ):
+                logger.error("JJ v2影子模式未启动：候选模型或类别映射路径无效")
+                shadow_enabled = False
+            shadow_changed = (
+                shadow_enabled != getattr(self, '_jj_v2_shadow_enabled', False)
+                or shadow_model_path != getattr(self, '_jj_v2_shadow_model_path', '')
+                or shadow_output_dir != getattr(self, '_jj_v2_shadow_output_dir', '')
+            )
+            if shadow_changed:
+                self.close_jj_v2_shadow_runner()
+            self._jj_v2_shadow_enabled = shadow_enabled
+            self._jj_v2_recommendation_enabled = bool(
+                recommendation_enabled and shadow_enabled
+            )
+            self._jj_v2_shadow_model_path = shadow_model_path
+            self._jj_v2_shadow_output_dir = shadow_output_dir
+            if (
+                self.platform == 'JJ'
+                and self._auto_move_enabled
+                and not (
+                    self._jj_v2_shadow_enabled
+                    and self._jj_v2_recommendation_enabled
+                )
+            ):
+                self._auto_move_enabled = False
+                logger.warning("JJ自动走子缺少新版原子门控，已强制关闭")
+            logger.info(
+                f"JJ v2数据采集: enabled={self._jj_v2_recording_enabled}, "
+                f"record_unstable={self._jj_v2_record_unstable}; "
+                f"shadow_enabled={self._jj_v2_shadow_enabled}; "
+                f"recommendation_enabled={self._jj_v2_recommendation_enabled}"
+            )
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
@@ -248,6 +320,15 @@ class ChessContext:
             self._analysis_mode = "timer"
             self._auto_move_enabled = False
             self._capture_depth_enabled = False
+            self._jj_v2_recording_enabled = False
+            self._jj_v2_record_unstable = True
+            self._jj_v2_dataset_dir = ""
+            self._jj_v2_shadow_enabled = False
+            self._jj_v2_recommendation_enabled = False
+            self._jj_v2_shadow_model_path = ""
+            self._jj_v2_shadow_output_dir = ""
+            self.close_jj_v2_recorder()
+            self.close_jj_v2_shadow_runner()
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
@@ -271,6 +352,15 @@ class ChessContext:
             config['analysis_mode'] = self._analysis_mode
             config['auto_move_enabled'] = self._auto_move_enabled
             config['capture_depth_enabled'] = self._capture_depth_enabled
+            config['jj_v2'] = {
+                'recording_enabled': self._jj_v2_recording_enabled,
+                'record_unstable': self._jj_v2_record_unstable,
+                'dataset_dir': self._jj_v2_dataset_dir,
+                'shadow_enabled': self._jj_v2_shadow_enabled,
+                'recommendation_enabled': self._jj_v2_recommendation_enabled,
+                'shadow_model_path': self._jj_v2_shadow_model_path,
+                'shadow_output_dir': self._jj_v2_shadow_output_dir,
+            }
     
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
@@ -291,21 +381,38 @@ class ChessContext:
         except Exception as e:
             logger.error(f"Error saving config: {e}")
     
-    def set_platform(self, platform_name: str) -> None:
+    def set_platform(self, platform_name: str) -> bool:
         """设置当前平台"""
         if platform_name not in self._platforms:
             error_msg = f"未知的平台: {platform_name}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
-        # 获取目标平台
-        platform = self._platforms[platform_name]
+        if platform_name == self.platform:
+            return False
+
+        previous_platform = self.platform
+        auto_move_was_enabled = bool(self._auto_move_enabled)
         
-        # 更新当前平台信息
+        # 平台变化意味着窗口、坐标和视觉历史全部失效。先撤销自动点击
+        # 授权和分析令牌，再切换平台；即使两个平台的门控都已配置，也
+        # 必须由用户在新平台重新显式开启。
+        self._auto_move_enabled = False
+        self.invalidate_analysis()
         self.platform = platform_name
+        self.reset_checker()
+        self.reset_recognizer()
+        if self.history is not None:
+            self.history.clear()
+        self.base_fen = None
         
         # 保存配置
         self.save_config()
+        logger.warning(
+            f"平台切换已撤销旧分析和自动走子授权: "
+            f"{previous_platform} -> {platform_name}"
+        )
+        return auto_move_was_enabled
     
     def get_platform(self, platform_name: str) -> Platform:
         """获取指定平台"""
@@ -355,7 +462,18 @@ class ChessContext:
 
     @auto_move_enabled.setter
     def auto_move_enabled(self, enabled: bool) -> None:
-        self._auto_move_enabled = bool(enabled)
+        enabled = bool(enabled)
+        if (
+            enabled
+            and getattr(self, 'platform', None) == 'JJ'
+            and not (
+                getattr(self, '_jj_v2_shadow_enabled', False)
+                and getattr(self, '_jj_v2_recommendation_enabled', False)
+            )
+        ):
+            logger.warning("拒绝开启JJ自动走子：必须启用新版影子识别和推荐模式")
+            enabled = False
+        self._auto_move_enabled = enabled
         self.save_config()
 
     @property
@@ -366,6 +484,127 @@ class ChessContext:
     def capture_depth_enabled(self, enabled: bool) -> None:
         self._capture_depth_enabled = bool(enabled)
         self.save_config()
+
+    @property
+    def jj_v2_recording_enabled(self) -> bool:
+        return self._jj_v2_recording_enabled
+
+    @jj_v2_recording_enabled.setter
+    def jj_v2_recording_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if not enabled:
+            self.close_jj_v2_recorder(timeout=1.0)
+        self._jj_v2_recording_enabled = enabled
+        self.save_config()
+
+    def get_jj_v2_recorder(self):
+        """按需创建新版 JJ 数据记录器；禁用时不引入任何磁盘写入。"""
+        if (
+            self.platform != 'JJ'
+            or not getattr(self, '_jj_v2_recording_enabled', False)
+        ):
+            return None
+        recorder = getattr(self, '_jj_v2_recorder', None)
+        if recorder is None:
+            from app.chess.jj_v2.recorder import JJV2DatasetRecorder
+
+            dataset_dir = self._jj_v2_dataset_dir or utils.app_data_path(
+                'jj_v2_datasets'
+            )
+            recorder = JJV2DatasetRecorder(
+                dataset_dir,
+                include_unstable=self._jj_v2_record_unstable,
+                grid_coords=self.get_platform('JJ').board_coords,
+            )
+            self._jj_v2_recorder = recorder
+            logger.info(f"JJ v2数据会话已创建: {recorder.session_dir}")
+        return recorder
+
+    def close_jj_v2_recorder(self, timeout: float = 5.0) -> None:
+        recorder = getattr(self, '_jj_v2_recorder', None)
+        self._jj_v2_recorder = None
+        if recorder is not None:
+            recorder.close(timeout=timeout)
+            logger.info(
+                f"JJ v2数据会话已关闭: {recorder.session_dir}, "
+                f"dropped={recorder.dropped_samples}, "
+                f"failed={getattr(recorder, 'failed_samples', 0)}"
+            )
+
+    @property
+    def jj_v2_shadow_enabled(self) -> bool:
+        return self._jj_v2_shadow_enabled
+
+    @jj_v2_shadow_enabled.setter
+    def jj_v2_shadow_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled:
+            model_path = os.path.abspath(os.path.expanduser(self._jj_v2_shadow_model_path))
+            map_path = os.path.join(os.path.dirname(model_path), 'jj_v2_piece_map.json')
+            if not (os.path.isfile(model_path) and os.path.isfile(map_path)):
+                logger.error("拒绝开启JJ v2影子模式：候选模型或类别映射不存在")
+                enabled = False
+        if not enabled:
+            self.close_jj_v2_shadow_runner(timeout=1.0)
+        self._jj_v2_shadow_enabled = enabled
+        if not enabled:
+            self._jj_v2_recommendation_enabled = False
+        # 切换识别链路会让既有自动走子授权失效；用户需在完整门控就绪后重开。
+        self._auto_move_enabled = False
+        self.save_config()
+
+    @property
+    def jj_v2_recommendation_enabled(self) -> bool:
+        return self._jj_v2_recommendation_enabled
+
+    @jj_v2_recommendation_enabled.setter
+    def jj_v2_recommendation_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled and not self._jj_v2_shadow_enabled:
+            logger.error("拒绝开启新版JJ推荐模式：必须先启用有效的影子模型")
+            enabled = False
+        self._jj_v2_recommendation_enabled = enabled
+        # 推荐链路发生切换时取消旧授权，避免跨模式遗留自动点击。
+        self._auto_move_enabled = False
+        self.save_config()
+
+    @property
+    def jj_v2_guarded_auto_ready(self) -> bool:
+        """JJ 自动点击是否正由新版识别和合法原子候选共同保护。"""
+        return bool(
+            self.platform == 'JJ'
+            and self._jj_v2_shadow_enabled
+            and self._jj_v2_recommendation_enabled
+        )
+
+    def get_jj_v2_shadow_runner(self):
+        if self.platform != 'JJ' or not self._jj_v2_shadow_enabled:
+            return None
+        runner = self._jj_v2_shadow_runner
+        if runner is None:
+            from app.chess.jj_v2.shadow import JJV2ShadowRunner
+
+            output_dir = self._jj_v2_shadow_output_dir or utils.app_data_path(
+                'jj_v2_shadow'
+            )
+            runner = JJV2ShadowRunner(
+                self._jj_v2_shadow_model_path,
+                output_dir,
+                grid_coords=self.get_platform('JJ').board_coords,
+            )
+            self._jj_v2_shadow_runner = runner
+            logger.info(f"JJ v2影子会话已创建: {runner.session_dir}")
+        return runner
+
+    def close_jj_v2_shadow_runner(self, timeout: float = 3.0) -> None:
+        runner = getattr(self, '_jj_v2_shadow_runner', None)
+        self._jj_v2_shadow_runner = None
+        if runner is not None:
+            runner.close(timeout=timeout)
+            logger.info(
+                f"JJ v2影子会话已关闭: {runner.session_dir}, "
+                f"processed={runner.processed_frames}, dropped={runner.dropped_frames}"
+            )
 
     def next_analysis_token(self) -> int:
         with self._analysis_token_lock:
@@ -378,6 +617,16 @@ class ChessContext:
     def is_analysis_token_current(self, token: int) -> bool:
         with self._analysis_token_lock:
             return token == self.analysis_token
+
+    def stop_auto_move_for_safety(self, reason: str) -> bool:
+        """在视觉连续性失效时撤销自动点击授权。"""
+        if not getattr(self, '_auto_move_enabled', False):
+            return False
+        self._auto_move_enabled = False
+        self.invalidate_analysis()
+        self.save_config()
+        logger.warning(f"自动走子安全熔断: {reason}")
+        return True
     
 
     

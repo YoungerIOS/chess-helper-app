@@ -235,7 +235,13 @@ class BoardLocator:
 
         # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
         if self.context and self.context.platform != p:
-            self.context.set_platform(p)
+            safety_stopped = self.context.set_platform(p)
+            if safety_stopped:
+                message_bus.publish(Message(
+                    MessageType.STATUS,
+                    "检测到游戏平台切换；自动走子已安全关闭，请重新开启",
+                    safety_stop_auto=True,
+                ))
             
         return window_info
 
@@ -1091,6 +1097,16 @@ class BoardLocator:
                     size_changed = abs(dw_seen) >= size_threshold or abs(dh_seen) >= size_threshold
 
                     if win_moved or size_changed:
+                        safety_reason = (
+                            "游戏窗口尺寸发生变化"
+                            if size_changed else "游戏窗口位置发生变化"
+                        )
+                        if self.context.stop_auto_move_for_safety(safety_reason):
+                            message_bus.publish(Message(
+                                MessageType.STATUS,
+                                f"{safety_reason}；自动走子已安全关闭，重新定位后请手动开启",
+                                safety_stop_auto=True,
+                            ))
                         pending_move = pending_move or win_moved
                         pending_resize = pending_resize or size_changed
                         last_change_time = now
@@ -1143,6 +1159,10 @@ class BoardLocator:
 
                                 reset_border_cache(self.context.platform)
                                 self.context.reset_checker()
+                                self.context.reset_recognizer()
+                                if getattr(self.context, 'history', None) is not None:
+                                    self.context.history.clear()
+                                self.context.base_fen = None
                                 # 成功后更新基准为当前稳定的窗口边界，并清空待处理标志
                                 baseline_bounds = last_seen_bounds
                                 # 成功后刷新基准棋盘区域

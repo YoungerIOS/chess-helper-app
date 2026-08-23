@@ -595,6 +595,10 @@ class AutoMoveController:
                 self.sleeper(self.delay)
             self._ensure_current(analysis_token, generation)
             self.execute(move, is_red, analysis_token, generation)
+            logger.info(
+                "自动走子事务确认成功: "
+                f"move={move}, token={analysis_token}, generation={generation}"
+            )
             self._notify(True, f"已自动走子：{move}")
         except AutoMoveUserBusy as exc:
             logger.info(f"本次兼容自动走子流程已停止: {exc}")

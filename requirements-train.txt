@@ -1,0 +1,6 @@
+# 新版 JJ 棋子模型的离线训练依赖；主程序运行时不需要安装。
+torch
+onnx
+onnxruntime
+numpy
+Pillow

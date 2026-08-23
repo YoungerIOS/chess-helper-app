@@ -16,6 +16,7 @@ class BoardStatus:
     is_red_start: bool = False
     is_black_start: bool = False
     is_history_mismatch: bool = False # 历史校验是否不一致
+    is_turn_mismatch: bool = False  # 识别到的走子方与可信轮次不一致
     step_info: Optional[Dict[str, Any]] = field(default_factory=dict)
     message: str = ""
     
@@ -29,6 +30,7 @@ class BoardStatus:
         return not (self.is_illegal_board or 
                     self.is_illegal_change or 
                     self.is_history_mismatch or 
+                    self.is_turn_mismatch or
                     self.is_multi_step)
     
 
@@ -75,6 +77,7 @@ class PositionChecker:
         self.consecutive_drops = 0 # 连续丢帧重拍计数(防卡死)
         self.consecutive_mismatches = 0 # 连续历史校验不一致计数
         self.in_settlement_screen = False  # 是否处于结算画面状态
+        self.settlement_reason = None
         self.capture_depth_bonus = 0  # 本局我方被吃棋子带来的额外搜索深度
         self._pending_lift_source = None
         
@@ -97,6 +100,7 @@ class PositionChecker:
         self.consecutive_drops = 0
         self.consecutive_mismatches = 0
         self.in_settlement_screen = False  # 重置结算状态
+        self.settlement_reason = None
         self.capture_depth_bonus = 0
         self._pending_lift_source = None
         self._side_locked = False
@@ -198,6 +202,7 @@ class PositionChecker:
             if self.in_settlement_screen:
                 logger.info("识别到完整新局阵形，退出结算状态")
             self.in_settlement_screen = False
+            self.settlement_reason = None
             return False
 
         # JJ 棋力评测结算页会缩小棋盘并覆盖半透明奖励层。双方将帅有时
@@ -212,6 +217,12 @@ class PositionChecker:
         )
         if sparse_settlement and not self.in_settlement_screen:
             self.in_settlement_screen = True
+            # 只有双方将帅仍可见时，才把稀疏巨大变化视为可信结算画面。
+            # 丢失任一将帅更可能是窗口被遮挡、页面退出或模型在非棋盘
+            # 画面上的幻觉，必须按视觉连续性丢失进行安全熔断。
+            self.settlement_reason = (
+                "board_lost" if kings_missing else "settlement"
+            )
             logger.info(
                 f"进入结算画面 (巨大变化 + 结算特征: {piece_count}子, "
                 f"将{king_count}个/帅{general_count}个)"
@@ -224,6 +235,9 @@ class PositionChecker:
             if is_massive_change:
                 # 巨大变化 + 将帅丢失 = 进入结算状态
                 self.in_settlement_screen = True
+                # 即使此前已经进入普通结算状态，后续画面丢失将帅也要
+                # 升级为 board_lost，不能继续保留自动走子授权。
+                self.settlement_reason = "board_lost"
                 logger.debug(f"进入结算画面 (巨大变化 + 将{king_count}个/帅{general_count}个)")
             
             if self.in_settlement_screen:
@@ -237,6 +251,7 @@ class PositionChecker:
                 # 从结算状态恢复（新对局开始）
                 logger.debug("将帅恢复，退出结算状态")
                 self.in_settlement_screen = False
+                self.settlement_reason = None
             
             if is_massive_change:
                 # 巨大变化 + 将帅存在 = 可能是新对局
@@ -655,7 +670,14 @@ class PositionChecker:
         # 默认返回多步移动
         return BoardStatus(is_illegal_change=True, message='非法或未知局面')
 
-    def check_board(self, current_board, marker_coords=None, base_fen=None, history_moves=None):
+    def check_board(
+        self,
+        current_board,
+        marker_coords=None,
+        base_fen=None,
+        history_moves=None,
+        expected_side_to_move=None,
+    ):
         """
         检查当前局面是否合法
         Args:
@@ -663,6 +685,7 @@ class PositionChecker:
             marker_coords: 标记坐标列表 (可选)
             base_fen: 历史基准FEN (可选)
             history_moves: 历史着法字符串 (可选)
+            expected_side_to_move: 可信的下一走方，'red' 或 'black' (可选)
         Returns:
             BoardStatus: 检查结果
         """
@@ -727,6 +750,26 @@ class PositionChecker:
             # 3.1 棋盘变化已成功推断出走棋
             inferred_side = result.step_info.get('side')  # 'red' or 'black'
             inferred_is_my_step = result.is_my_step
+
+            # 棋子走法合法不代表轮次合法。尤其是 JJ v2 候选在主识别器
+            # 完成快速路径后才可能替换棋盘，必须在最终提交点再次验证。
+            if (
+                expected_side_to_move in ('red', 'black')
+                and inferred_side != expected_side_to_move
+            ):
+                logger.warning(
+                    f"走子方与可信轮次不一致: expected={expected_side_to_move}, "
+                    f"inferred={inferred_side}"
+                )
+                return BoardStatus(
+                    is_illegal_change=True,
+                    is_turn_mismatch=True,
+                    step_info=dict(result.step_info or {}),
+                    message=(
+                        f"走子方与可信轮次不一致: 应为{expected_side_to_move}, "
+                        f"识别为{inferred_side}"
+                    ),
+                )
             
             # 3.2 如果有标记，用标记验证推断结果
             if self.last_board and marker_coords:

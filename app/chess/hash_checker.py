@@ -101,3 +101,12 @@ _stable_detector = StableFrameDetector(hash_size=20, stable_count=2, diff_thresh
 def filter_stable_frame(board_screenshot, log_prefix="[board]", force_output=False):
     """便捷函数，使用全局稳定帧检测器实例，处理棋盘截图"""
     return _stable_detector.process_screenshot(board_screenshot, log_prefix, force_output)
+
+
+def has_pending_visual_change(curr_hash) -> bool:
+    """当前画面是否明显偏离最后一次已确认稳定画面。"""
+    if curr_hash is None or _stable_detector.last_confirmed_hash is None:
+        return True
+    return (
+        _stable_detector.last_confirmed_hash - curr_hash
+    ) > _stable_detector.diff_threshold

@@ -47,6 +47,24 @@ class TurnDetectionTests(unittest.TestCase):
 
         self.assertFalse(checker.is_red)
 
+    def test_wrong_side_candidate_is_rejected_without_updating_trusted_board(self):
+        checker = PositionChecker()
+        start = [row[:] for row in checker.START_RED]
+        self.assertTrue(checker.check_board(start).is_red_start)
+
+        wrong_side = [row[:] for row in start]
+        wrong_side[5][0] = wrong_side[6][0]
+        wrong_side[6][0] = "-"
+
+        status = checker.check_board(
+            wrong_side,
+            expected_side_to_move="black",
+        )
+
+        self.assertTrue(status.is_turn_mismatch)
+        self.assertTrue(status.is_illegal_change)
+        self.assertEqual(start, checker.last_board)
+
 
 if __name__ == "__main__":
     unittest.main()

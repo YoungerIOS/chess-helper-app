@@ -1,6 +1,6 @@
+import os
 import sys
 import traceback
-import os
 
 
 def _enable_windows_dpi_awareness():
@@ -9,6 +9,7 @@ def _enable_windows_dpi_awareness():
         return
     try:
         import ctypes
+
         # Per-monitor v2; available on current Windows 10/11 releases.
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except (AttributeError, OSError):
@@ -21,8 +22,8 @@ def _enable_windows_dpi_awareness():
 # This must happen before importing Qt or creating an MSS capture instance.
 _enable_windows_dpi_awareness()
 
+from PySide6.QtCore import QLoggingCategory
 from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Qt, QLoggingCategory
 
 # Ensure bundled app can import packages
 if getattr(sys, "frozen", False):
@@ -51,8 +52,9 @@ QLoggingCategory.setFilterRules("qt.gui.icc.warning=false")
 def _ensure_engine_files():
     """静默确保引擎文件存在于用户数据目录中"""
     try:
-        from app.tools.utils import app_data_path, resource_path
         import shutil
+
+        from app.tools.utils import app_data_path, resource_path
 
         # 检查用户数据目录中的引擎文件
         user_engine_path = app_data_path("Pikafish/pikafish")
@@ -82,10 +84,9 @@ def _ensure_engine_files():
                 shutil.copy2(src_nnue, user_nnue_path)
                 logger.info("NNUE文件已静默复制到用户数据目录")
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         # 静默处理错误，不影响应用启动
         logger.debug(f"引擎文件复制失败（不影响应用启动）: {e}")
-        pass
 
 
 def check_screen_recording_permission():
@@ -101,15 +102,24 @@ def check_screen_recording_permission():
     try:
         import Quartz
 
-        if Quartz.CGPreflightScreenCaptureAccess():
+        # PyObjC 会在运行时动态导出这两个 CoreGraphics API，但其类型桩
+        # 不一定声明它们。动态获取既避免 Pylance 误报，也兼容缺少该
+        # API 的旧系统；不要用整行 type: ignore 掩盖其他属性错误。
+        preflight_access = getattr(Quartz, "CGPreflightScreenCaptureAccess", None)
+        request_access = getattr(Quartz, "CGRequestScreenCaptureAccess", None)
+        if not callable(preflight_access) or not callable(request_access):
+            logger.warning("当前系统不提供屏幕录制权限检查 API")
+            return
+
+        if preflight_access():
             logger.info("屏幕录制权限检查: 已授权")
             return
 
-        if Quartz.CGRequestScreenCaptureAccess():
+        if request_access():
             logger.info("屏幕录制权限检查: 已授权")
         else:
             logger.warning("屏幕录制权限尚未授权，请在系统设置中允许本应用录制屏幕")
-    except Exception as e:
+    except (ImportError, AttributeError, OSError, TypeError) as e:
         logger.warning(f"无法读取屏幕录制权限状态: {e}")
 
 
@@ -117,18 +127,18 @@ def excepthook(exctype, value, tb):
     # 写日志
     try:
         logger.error("Uncaught exception:", exc_info=(exctype, value, tb))
-    except Exception:
-        pass
+    except (AttributeError, OSError, RuntimeError, TypeError) as exc:
+        logger.exception("显示异常消息框失败: %s", exc)
     # 弹消息框，便于双击启动时看到错误
     try:
         msg = "\n".join(traceback.format_exception(exctype, value, tb)[-3:])
         m = QMessageBox()
         m.setWindowTitle("程序异常退出")
         m.setText("发生未捕获异常，程序将退出。\n" + msg)
-        m.setIcon(QMessageBox.Critical)
+        m.setIcon(QMessageBox.Icon.Critical)
         m.exec()
-    except Exception:
-        pass
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.exception("显示异常消息框失败: %s", exc)
     # 退出
     sys.__excepthook__(exctype, value, tb)
 

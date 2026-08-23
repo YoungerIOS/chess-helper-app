@@ -57,8 +57,17 @@
     },
     "platform": "JJ",
     "analysis_mode": "continuous",
-    "auto_move_enabled": true,
+    "auto_move_enabled": false,
     "capture_depth_enabled": false,
+    "jj_v2": {
+        "recording_enabled": false,
+        "record_unstable": true,
+        "dataset_dir": "",
+        "shadow_enabled": false,
+        "recommendation_enabled": false,
+        "shadow_model_path": "",
+        "shadow_output_dir": ""
+    },
     "board_index": 0,
     "theme": "light",
     "engine_params": {

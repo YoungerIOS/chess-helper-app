@@ -27,6 +27,8 @@ class BoardAnalysisState:
     marker_coords: Optional[list] = None
     timestamp: float = 0.0
     is_settlement_screen: bool = False  # 结算画面标记
+    settlement_reason: Optional[str] = None
+    jj_v2_shadow_result: Optional[dict] = None
 
 class ChessProcess:
 
@@ -65,24 +67,51 @@ class ChessProcess:
         """主流程入口，处理图像并返回相应消息"""
         # 1. 识别棋盘和棋子 (同时获取标记)
         board, marker_coords, grid_hashes, is_massive_change = self._recognize_pieces(img)
+        board, shadow_result = self._apply_jj_v2_recommendation(
+            img,
+            board,
+            capture_time,
+        )
         
         # 2. 结算画面检测 + 棋盘状态检查（都需要加锁保护 checker 状态）
         history_moves = self.history.get_moves_str() if self.history else ""
         with self.context._checker_lock:
             # 2.1 结算画面检测（包括 board=None 的情况）
             if self.checker.check_settlement(board, is_massive_change):
-                return BoardAnalysisState(timestamp=capture_time, is_settlement_screen=True)
+                settlement_reason = getattr(
+                    self.checker, 'settlement_reason', None
+                )
+                if settlement_reason == 'board_lost':
+                    self.context.stop_auto_move_for_safety(
+                        "棋盘画面完全消失"
+                    )
+                return self._record_jj_v2_analysis(BoardAnalysisState(
+                    img=img,
+                    timestamp=capture_time,
+                    is_settlement_screen=True,
+                    settlement_reason=settlement_reason,
+                    jj_v2_shadow_result=shadow_result,
+                ))
             
             # 识别失败且不在结算状态，直接返回
             if board is None:
-                return BoardAnalysisState(timestamp=capture_time)
+                return self._record_jj_v2_analysis(
+                    BoardAnalysisState(
+                        img=img,
+                        timestamp=capture_time,
+                        jj_v2_shadow_result=shadow_result,
+                    )
+                )
 
             # 2.2 检查棋盘状态
             status = self.checker.check_board(
                 board, 
                 marker_coords, 
                 base_fen=self.context.base_fen,
-                history_moves=history_moves
+                history_moves=history_moves,
+                expected_side_to_move=getattr(
+                    self.recognizer, 'trusted_side_to_move', None
+                ),
             )
 
             # 只有通过棋规、轮次和历史一致性校验的局面，才能成为
@@ -124,13 +153,84 @@ class ChessProcess:
                     next_side_to_move,
                 )
                     
-        return BoardAnalysisState(
+        return self._record_jj_v2_analysis(BoardAnalysisState(
             board_array=board, 
             board_status=status, 
             img=img, 
             marker_coords=marker_coords,
-            timestamp=capture_time
-        )
+            timestamp=capture_time,
+            jj_v2_shadow_result=shadow_result,
+        ))
+
+    def _apply_jj_v2_recommendation(self, img, primary_board, capture_time):
+        """同步采用完整合法候选；棋规校验仍由正式 Checker 最终裁决。"""
+        if (
+            not getattr(self.context, 'jj_v2_recommendation_enabled', False)
+            or primary_board is None
+            or img is None
+        ):
+            return primary_board, None
+        try:
+            runner = self.context.get_jj_v2_shadow_runner()
+            if runner is None:
+                return primary_board, None
+            result = runner.analyze_candidate(
+                img,
+                captured_at=capture_time,
+                primary_board=primary_board,
+            )
+            decision = result.get('gate_decision') or {}
+            if decision.get('mode') == 'atomic_legal_move':
+                logger.info(
+                    "新版JJ推荐模式采用原子合法候选: "
+                    f"{decision.get('piece')} "
+                    f"{decision.get('from_pos')}->{decision.get('to_pos')}"
+                )
+                return result['gated_board'], result
+            return primary_board, result
+        except Exception:
+            logger.exception("新版JJ推荐候选分析失败，保留原识别棋盘")
+            return primary_board, None
+
+    def _record_jj_v2_analysis(self, state: BoardAnalysisState):
+        """把识别结果关联到采集时间；记录失败时仍返回原状态。"""
+        try:
+            get_recorder = getattr(self.context, 'get_jj_v2_recorder', None)
+            if get_recorder is None:
+                return state
+            recorder = get_recorder()
+            if recorder is not None:
+                recorder.record_analysis(
+                    captured_at=state.timestamp,
+                    board=state.board_array,
+                    marker_coords=state.marker_coords,
+                    status=state.board_status,
+                    is_settlement_screen=state.is_settlement_screen,
+                )
+        except Exception:
+            logger.exception("JJ v2分析结果采集失败")
+        try:
+            get_shadow = getattr(self.context, 'get_jj_v2_shadow_runner', None)
+            if get_shadow is not None and state.img is not None:
+                runner = get_shadow()
+                if runner is not None:
+                    if state.jj_v2_shadow_result is not None:
+                        runner.record_precomputed(
+                            state.jj_v2_shadow_result,
+                            primary_status=state.board_status,
+                            is_settlement_screen=state.is_settlement_screen,
+                        )
+                    else:
+                        runner.submit(
+                            state.img,
+                            captured_at=state.timestamp,
+                            primary_board=state.board_array,
+                            primary_status=state.board_status,
+                            is_settlement_screen=state.is_settlement_screen,
+                        )
+        except Exception:
+            logger.exception("JJ v2影子识别提交失败")
+        return state
     
     def _recognize_pieces(self, img) -> Optional[list]:
         # 识别棋盘和棋子
@@ -195,7 +295,15 @@ class ChessProcess:
         # 1. 结算状态
         if state.is_settlement_screen:
             message_bus.publish(Message(MessageType.MOVE_TEXT, ""))  # 清空着法文本
-            message_bus.publish(Message(MessageType.NON_GAME_SCREEN, MessageContent.NON_GAME_SCREEN))
+            board_lost = state.settlement_reason == 'board_lost'
+            message_bus.publish(Message(
+                MessageType.NON_GAME_SCREEN,
+                (
+                    "棋盘画面已丢失；自动走子已安全关闭，请重新定位后手动开启"
+                    if board_lost else MessageContent.NON_GAME_SCREEN
+                ),
+                safety_stop_auto=board_lost,
+            ))
             return BoardAnalysisState()
         
         status = state.board_status
@@ -322,6 +430,15 @@ class ChessProcess:
                 self.checker.consecutive_drops = 0
                 return BoardAnalysisState()
 
+            # 错误轮次永远不能通过连续异常计数进入强制同步，否则漏识别
+            # 一步后可能把同一方的下一步误当成可信局面并触发自动走子。
+            if getattr(status, 'is_turn_mismatch', False):
+                self.checker.consecutive_drops = 0
+                self.context.discard_before_timestamp = time.time()
+                message_bus.publish(Message(MessageType.RETRY_CAPTURE, message))
+                logger.warning(f"拒绝错误轮次候选并请求重拍: {message}")
+                return BoardAnalysisState()
+
             logger.warning(f"转入非法状态处理，原因: {message}")
             
             # --- 强制同步逻辑 ---
@@ -392,6 +509,11 @@ class ChessProcess:
     def _handle_my_move(self, state):
         # 处理己方走棋
         # print("Debug - 我方走棋")
+
+        # 一旦画面确认我方已经落子，上一轮仍在计算或尚未消费的推荐
+        # 都已经过期。立即作废令牌并清空文字，避免显示旧箭头/旧着法。
+        self.context.invalidate_analysis()
+        message_bus.publish(Message(MessageType.MOVE_TEXT, ""))
 
         message_bus.publish(Message(
             MessageType.CHANGE,
@@ -561,6 +683,20 @@ class ChessProcess:
                     return
                 
                 logger.debug(f"Engine Analysis Done: {move}")
+                guarded_auto = bool(
+                    getattr(self.context, 'auto_move_enabled', False)
+                    and getattr(self.context, 'jj_v2_guarded_auto_ready', False)
+                )
+                recommendation_only = bool(
+                    getattr(self.context, 'jj_v2_recommendation_enabled', False)
+                    and not guarded_auto
+                )
+                logger.info(
+                    "引擎推荐已生成: "
+                    f"move={move}, token={analysis_token}, "
+                    f"recommendation_only={recommendation_only}, "
+                    f"guarded_auto={guarded_auto}"
+                )
                 self.checker.consecutive_mismatches = 0
                 # 检查是否已在结算画面
                 if self.checker.in_settlement_screen:
@@ -573,7 +709,14 @@ class ChessProcess:
                     move,
                     is_red=is_red,
                     analysis_token=analysis_token,
-                    auto_execute=True,
+                    auto_execute=(
+                        bool(getattr(self.context, 'auto_move_enabled', False))
+                        and (
+                            self.context.platform != 'JJ'
+                            or guarded_auto
+                        )
+                    ),
+                    recommendation_only=recommendation_only,
                 ))
                 message_bus.publish(Message(MessageType.STATUS, "推荐走法："))
                 

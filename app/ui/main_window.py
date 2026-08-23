@@ -236,6 +236,28 @@ class MainWindow(QMainWindow):
         self.capture_depth_action.setChecked(context.capture_depth_enabled)
         self.capture_depth_action.triggered.connect(self.toggle_capture_depth)
 
+        self.settings_menu.addSeparator()
+        self.jj_v2_recording_action = self.settings_menu.addAction("采集新版JJ训练数据")
+        self.jj_v2_recording_action.setCheckable(True)
+        self.jj_v2_recording_action.setChecked(context.jj_v2_recording_enabled)
+        self.jj_v2_recording_action.triggered.connect(self.toggle_jj_v2_recording)
+
+        self.jj_v2_shadow_action = self.settings_menu.addAction("新版JJ影子识别（不走子）")
+        self.jj_v2_shadow_action.setCheckable(True)
+        self.jj_v2_shadow_action.setChecked(context.jj_v2_shadow_enabled)
+        self.jj_v2_shadow_action.triggered.connect(self.toggle_jj_v2_shadow)
+
+        self.jj_v2_recommendation_action = self.settings_menu.addAction(
+            "新版JJ推荐模式（不点击）"
+        )
+        self.jj_v2_recommendation_action.setCheckable(True)
+        self.jj_v2_recommendation_action.setChecked(
+            context.jj_v2_recommendation_enabled
+        )
+        self.jj_v2_recommendation_action.triggered.connect(
+            self.toggle_jj_v2_recommendation
+        )
+
         # 创建参数选择按钮
         self.param_btn = QPushButton("引擎参数")
         self.param_btn.setFixedHeight(35)
@@ -408,8 +430,19 @@ class MainWindow(QMainWindow):
                 # 如果检测到的平台与当前上下文不一致，则切换
                 if detected_platform != context.platform:
                     logger.info(f"自动切换平台: {context.platform} -> {detected_platform}")
-                    context.set_platform(detected_platform)
-                    self.update_text(f"自动切换到游戏: {platform_display_name}", MessageType.STATUS)
+                    safety_stopped = context.set_platform(detected_platform)
+                    if safety_stopped:
+                        self._apply_auto_move_safety_stop(reset_visual_state=True)
+                        self.update_text(
+                            f"自动切换到游戏: {platform_display_name}；"
+                            "自动走子已关闭，请重新开启",
+                            MessageType.STATUS,
+                        )
+                    else:
+                        self.update_text(
+                            f"自动切换到游戏: {platform_display_name}",
+                            MessageType.STATUS,
+                        )
                 else:
                      # 即使未变化，也显示当前检测到的平台（因为可能是启动时的确认，或者是轮询成功的通知）
                      self.update_text(f"检测到游戏: {platform_display_name}", MessageType.STATUS)
@@ -656,12 +689,16 @@ class MainWindow(QMainWindow):
                     self.update_text(result.content, result.type)
                 elif result.type == MessageType.STATUS:
                     # 显示状态消息
+                    if result.kwargs.get('safety_stop_auto'):
+                        self._apply_auto_move_safety_stop()
                     self.update_text(result.content, result.type)
                 elif result.type == MessageType.ERROR:
                     # 显示错误消息
                     self.update_text(result.content, result.type)
                 elif result.type == MessageType.NON_GAME_SCREEN:
                     # 非棋局画面：清空棋盘并显示提示
+                    if result.kwargs.get('safety_stop_auto'):
+                        self._apply_auto_move_safety_stop(reset_visual_state=True)
                     self.board_display.clear_board()
                     self.update_text(result.content, MessageType.STATUS)
                 elif result.type == MessageType.PARAM_UPDATE:
@@ -880,12 +917,43 @@ class MainWindow(QMainWindow):
     def toggle_auto_move(self, checked=None):
         """启用或关闭自动走子；关闭时立即取消尚未执行的任务。"""
         enabled = self.auto_move_action.isChecked() if checked is None else bool(checked)
+        if (
+            enabled
+            and context.platform == 'JJ'
+            and not context.jj_v2_guarded_auto_ready
+        ):
+            self.auto_move_action.setChecked(False)
+            self.update_text(
+                "JJ自动走子未开启：请先启用新版影子识别和推荐模式",
+                MessageType.STATUS,
+            )
+            return
         self.auto_move_action.setChecked(enabled)
         context.auto_move_enabled = enabled
         if not enabled and hasattr(self, 'auto_mover'):
             self.auto_mover.cancel_pending()
-        message = "自动走子已开启（下一次推荐生效）" if enabled else "自动走子已关闭"
+        message = (
+            "新版门控自动走子已开启（下一次推荐生效）"
+            if enabled and context.platform == 'JJ'
+            else "自动走子已开启（下一次推荐生效）"
+            if enabled
+            else "自动走子已关闭"
+        )
         self.update_text(message, MessageType.STATUS)
+
+    def _apply_auto_move_safety_stop(self, reset_visual_state=False):
+        """同步安全熔断到界面，并清除不再可信的待执行状态。"""
+        self.auto_move_action.setChecked(False)
+        context.stop_auto_move_for_safety("界面确认视觉连续性失效")
+        context.invalidate_analysis()
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
+        if reset_visual_state:
+            context.reset_checker()
+            context.reset_recognizer()
+            if context.history is not None:
+                context.history.clear()
+            context.base_fen = None
 
     def toggle_capture_depth(self, checked=None):
         """切换我方被吃棋子后的动态搜索加深。"""
@@ -903,6 +971,58 @@ class MainWindow(QMainWindow):
             "被吃子加深已开启（本局从0重新计数）"
             if enabled else "被吃子加深已关闭"
         )
+        self.update_text(message, MessageType.STATUS)
+
+    def toggle_jj_v2_recording(self, checked=None):
+        """显式控制训练数据写盘，避免默认采集占用大量空间。"""
+        enabled = (
+            self.jj_v2_recording_action.isChecked()
+            if checked is None else bool(checked)
+        )
+        self.jj_v2_recording_action.setChecked(enabled)
+        context.jj_v2_recording_enabled = enabled
+        if enabled:
+            message = "新版JJ训练数据采集已开启；开始辅助后写入独立会话"
+        else:
+            message = "新版JJ训练数据采集已关闭，当前会话正在收尾"
+        self.update_text(message, MessageType.STATUS)
+
+    def toggle_jj_v2_shadow(self, checked=None):
+        """控制新版识别；关闭时同时关闭推荐及自动走子。"""
+        enabled = (
+            self.jj_v2_shadow_action.isChecked()
+            if checked is None else bool(checked)
+        )
+        self.jj_v2_shadow_action.setChecked(enabled)
+        context.jj_v2_shadow_enabled = enabled
+        enabled = context.jj_v2_shadow_enabled
+        self.jj_v2_shadow_action.setChecked(enabled)
+        self.auto_move_action.setChecked(False)
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
+        if enabled:
+            message = "新版JJ影子识别已开启（尚未允许自动走子）"
+        else:
+            self.jj_v2_recommendation_action.setChecked(False)
+            message = "新版JJ影子识别已关闭或候选模型路径无效"
+        self.update_text(message, MessageType.STATUS)
+
+    def toggle_jj_v2_recommendation(self, checked=None):
+        """同步采用通过棋规的原子候选，只展示引擎推荐。"""
+        enabled = (
+            self.jj_v2_recommendation_action.isChecked()
+            if checked is None else bool(checked)
+        )
+        context.jj_v2_recommendation_enabled = enabled
+        enabled = context.jj_v2_recommendation_enabled
+        self.jj_v2_recommendation_action.setChecked(enabled)
+        self.auto_move_action.setChecked(False)
+        if hasattr(self, 'auto_mover'):
+            self.auto_mover.cancel_pending()
+        if enabled:
+            message = "新版JJ推荐模式已开启（合法原子门控；自动走子仍默认关闭）"
+        else:
+            message = "新版JJ推荐模式已关闭"
         self.update_text(message, MessageType.STATUS)
 
     def refresh_engine_param_label(self):
@@ -1198,7 +1318,13 @@ class MainWindow(QMainWindow):
         
         # 更新平台
         platform = "JJ" if game == "JJ象棋" else "TT"
-        context.set_platform(platform)
+        safety_stopped = context.set_platform(platform)
+        if safety_stopped:
+            self._apply_auto_move_safety_stop(reset_visual_state=True)
+            self.update_text(
+                "游戏平台已切换；自动走子已关闭，请重新开启",
+                MessageType.STATUS,
+            )
 
     def closeEvent(self, event):
         """窗口关闭时处理"""

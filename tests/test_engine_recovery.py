@@ -19,6 +19,10 @@ class FakeHistory:
     def get_moves_str(self):
         return self.moves
 
+    def add_and_get_all(self, _before, move, _after, _is_red):
+        self.moves = f"{self.moves} {move}".strip()
+        return self.moves
+
 
 class FakeEngine:
     def __init__(self):
@@ -168,6 +172,57 @@ class EngineRecoveryTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual(("movetime", "5000"), calls[0][1]["search_override"])
         self.assertEqual(1, calls[0][1]["engine_retry"])
+
+    def test_confirmed_own_move_invalidates_and_clears_old_recommendation(self):
+        state = BoardAnalysisState(
+            board_array=self.board,
+            board_status=BoardStatus(
+                is_my_step=True,
+                step_info={
+                    "from_pos": (6, 0),
+                    "to_pos": (5, 0),
+                    "piece": "P",
+                    "side": "red",
+                },
+            ),
+        )
+        published = []
+
+        with patch.object(message_bus, "publish", side_effect=published.append):
+            self.process._handle_my_move(state)
+
+        self.assertEqual(1, self.context.invalidated)
+        self.assertTrue(any(
+            message.type == MessageType.MOVE_TEXT and message.content == ""
+            for message in published
+        ))
+
+    def test_turn_mismatch_never_accumulates_force_sync_drops(self):
+        self.checker.consecutive_drops = 2
+        trusted = [row[:] for row in self.board]
+        self.checker.last_board = trusted
+        mismatch = [row[:] for row in trusted]
+        mismatch[5][0] = mismatch[6][0]
+        mismatch[6][0] = "-"
+        state = BoardAnalysisState(
+            board_array=mismatch,
+            board_status=BoardStatus(
+                is_illegal_change=True,
+                is_turn_mismatch=True,
+                step_info={"side": "red"},
+                message="wrong turn",
+            ),
+        )
+        published = []
+
+        with patch.object(message_bus, "publish", side_effect=published.append):
+            self.process._handle_illegal_board(state)
+
+        self.assertEqual(0, self.checker.consecutive_drops)
+        self.assertEqual(trusted, self.checker.last_board)
+        self.assertTrue(any(
+            message.type == MessageType.RETRY_CAPTURE for message in published
+        ))
 
 
 if __name__ == "__main__":
