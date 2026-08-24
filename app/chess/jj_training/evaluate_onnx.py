@@ -1,4 +1,4 @@
-"""CLI: 用 ONNX Runtime 评估 JJ v2 候选模型。"""
+"""CLI: 用 ONNX Runtime 评估 JJ 候选模型。"""
 
 import argparse
 import json
@@ -7,7 +7,7 @@ from .onnx_eval import evaluate_onnx
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="独立评估新版 JJ ONNX 模型")
+    parser = argparse.ArgumentParser(description="独立评估JJ ONNX 模型")
     parser.add_argument("dataset_dir")
     parser.add_argument("model_path")
     parser.add_argument("--games", type=int, nargs="+")

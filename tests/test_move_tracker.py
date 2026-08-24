@@ -75,6 +75,32 @@ class LegalMoveMatcherTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(((6, 0), (5, 0)), (match.from_pos, match.to_pos))
 
+    def test_tolerates_ten_changed_cells_when_only_one_move_is_plausible(self):
+        changes = {
+            (6, 0): "ffffffffffffffff",
+            (5, 0): "00000000ffffffff",
+            (7, 1): "000000000000ffff",
+            (7, 2): "00000000000000ff",
+            (8, 1): "00000000000ffff0",
+            (8, 2): "0000000000000ff0",
+            (5, 1): "0000000000ffff00",
+            (5, 2): "000000000000ff00",
+            (4, 1): "000000000ffff000",
+            (4, 2): "000000000000f0f0",
+        }
+        current = self.current_hashes(changes)
+
+        match = self.matcher.match(
+            self.board,
+            self.trusted_hashes,
+            current,
+            is_red_at_bottom=True,
+            side_to_move="red",
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(((6, 0), (5, 0)), (match.from_pos, match.to_pos))
+
     def test_rejects_ambiguous_equal_scoring_moves(self):
         current = self.current_hashes({
             (6, 0): "000000000000ffff",
@@ -117,8 +143,9 @@ class LegalMoveMatcherTests(unittest.TestCase):
     def test_rejects_massive_change_for_full_recognition_fallback(self):
         changes = {
             (row, col): "ffffffffffffffff"
-            for row in range(3)
-            for col in range(3)
+            for row in range(4)
+            for col in range(4)
+            if col < 9
         }
         current = self.current_hashes(changes)
 

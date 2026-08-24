@@ -36,18 +36,38 @@ class BackpressureTests(unittest.TestCase):
 
         self.assertEqual(1, manager.retry_queue.qsize())
 
-    def test_ui_queue_is_bounded_without_blocking_publishers(self):
+    def test_engine_telemetry_is_coalesced_outside_control_queue(self):
         bus = MessageBus()
         ui_queue = queue.Queue(maxsize=1)
         bus.set_ui_queue(ui_queue)
-        bus.publish(Message(MessageType.ENGINE_INFO, {"depth": 1}))
-        bus.publish(Message(MessageType.ENGINE_INFO, {"depth": 2}))
+        first = Message(MessageType.ENGINE_INFO, {"depth": 1})
+        latest = Message(MessageType.ENGINE_INFO, {"depth": 2})
+        bus.publish(first)
+        bus.publish(latest)
 
-        self.assertEqual(1, ui_queue.qsize())
+        self.assertEqual(0, ui_queue.qsize())
+        self.assertIs(latest, bus.take_latest_engine_info())
+        self.assertIsNone(bus.take_latest_engine_info())
 
         bus.publish(Message(MessageType.ERROR, "important"))
         delivered = ui_queue.get_nowait()
         self.assertEqual(MessageType.ERROR, delivered.type)
+
+    def test_control_messages_keep_fifo_order_while_telemetry_is_busy(self):
+        bus = MessageBus()
+        ui_queue = queue.Queue(maxsize=3)
+        bus.set_ui_queue(ui_queue)
+
+        bus.publish(Message(MessageType.CHANGE, "轮到我方"))
+        for depth in range(100):
+            bus.publish(Message(MessageType.ENGINE_INFO, {"depth": depth}))
+        bus.publish(Message(MessageType.MOVE_CODE, "c7c9"))
+
+        self.assertEqual(MessageType.CHANGE, ui_queue.get_nowait().type)
+        self.assertEqual(MessageType.MOVE_CODE, ui_queue.get_nowait().type)
+        self.assertEqual(
+            {"depth": 99}, bus.take_latest_engine_info().content
+        )
 
     def test_capture_workers_start_lazily(self):
         with (

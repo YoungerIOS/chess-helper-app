@@ -1,9 +1,8 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QStackedLayout
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF, QTransform, QPainterPath
-from PySide6.QtCore import Qt, QRect, QPointF, QTimer, QSize
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QTransform, QPainterPath
+from PySide6.QtCore import Qt, QPointF, QTimer
 from app.tools.utils import resource_path
 from app.chess.context import context
-import os
 import math
 
 class BoardCanvas(QLabel):

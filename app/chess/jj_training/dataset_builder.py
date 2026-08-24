@@ -1,4 +1,4 @@
-"""从 JJ v2 回放会话生成可审计的90格棋子分类数据集。"""
+"""从 JJ 回放会话生成可审计的90格棋子分类数据集。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import imagehash
 from PIL import Image
 
 from app.chess.checker import PositionChecker
-from .replay import JJV2ReplayDataset
+from .replay import JJReplayDataset
 
 
 DEFAULT_GRID = {
@@ -53,7 +53,7 @@ class DatasetBuildSummary:
     output_dir: str
 
 
-class JJV2DatasetBuilder:
+class JJDatasetBuilder:
     """
     将回放事件转换为棋子分类样本。
 
@@ -94,7 +94,7 @@ class JJV2DatasetBuilder:
             import onnxruntime as ort
 
             model_path = os.path.abspath(os.path.expanduser(audit_model_path))
-            map_path = os.path.join(os.path.dirname(model_path), "jj_v2_piece_map.json")
+            map_path = os.path.join(os.path.dirname(model_path), "jj_piece_map.json")
             with open(map_path, encoding="utf-8") as file:
                 self._audit_class_map = json.load(file)
             self._audit_session = ort.InferenceSession(
@@ -295,7 +295,7 @@ class JJV2DatasetBuilder:
         total_games = 0
 
         for session_dir in session_dirs:
-            dataset = JJV2ReplayDataset(session_dir)
+            dataset = JJReplayDataset(session_dir)
             session_count += 1
             session_id = os.path.basename(dataset.session_dir)
             grid = self._load_grid(dataset.session_dir)

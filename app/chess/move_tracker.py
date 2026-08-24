@@ -34,7 +34,7 @@ class LegalMoveMatcher:
         min_cell_distance: int = 5,
         min_total_score: int = 18,
         min_score_margin: int = 4,
-        max_changed_cells: int = 8,
+        max_changed_cells: int = 12,
     ):
         self.min_cell_distance = min_cell_distance
         self.min_total_score = min_total_score

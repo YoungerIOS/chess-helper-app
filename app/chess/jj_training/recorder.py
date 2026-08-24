@@ -1,4 +1,4 @@
-"""非阻塞记录新版 JJ 对局帧和识别结果，供离线训练与回放。"""
+"""非阻塞记录JJ 对局帧和识别结果，供离线训练与回放。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.tools.log_config import get_logger
 logger = get_logger(__name__)
 
 
-class JJV2DatasetRecorder:
+class JJDatasetRecorder:
     """
     将捕获与分析事件写入一个可回放的数据集会话。
 
@@ -60,7 +60,7 @@ class JJV2DatasetRecorder:
         self._write_session_metadata()
         self._worker = threading.Thread(
             target=self._writer_loop,
-            name="jj-v2-dataset-writer",
+            name="jj-training-writer",
             daemon=True,
         )
         self._worker.start()
@@ -70,7 +70,7 @@ class JJV2DatasetRecorder:
             "format_version": self.FORMAT_VERSION,
             "session_id": self.session_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "platform": "JJ_V2",
+            "platform": "JJ_TRAINING",
             "image_format": "JPEG",
             "grid_coords": self._json_safe(self.grid_coords),
         }
@@ -171,9 +171,9 @@ class JJV2DatasetRecorder:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         if isinstance(value, dict):
-            return {str(key): JJV2DatasetRecorder._json_safe(item) for key, item in value.items()}
+            return {str(key): JJDatasetRecorder._json_safe(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
-            return [JJV2DatasetRecorder._json_safe(item) for item in value]
+            return [JJDatasetRecorder._json_safe(item) for item in value]
         return str(value)
 
     def _write_event(self, event: Dict[str, Any]) -> None:
@@ -213,7 +213,7 @@ class JJV2DatasetRecorder:
                 self.failed_samples += 1
                 self.last_write_error = str(exc)
                 logger.exception(
-                    f"JJ v2数据样本写入失败: type={event.get('type')}"
+                    f"JJ数据样本写入失败: type={event.get('type')}"
                 )
             finally:
                 self._queue.task_done()

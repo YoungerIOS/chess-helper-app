@@ -1,20 +1,36 @@
-"""用轻量 HOG+kNN 快速评估 JJ v2 数据是否具备可学习性。"""
+"""用轻量 HOG+kNN 快速评估 JJ 数据是否具备可学习性。"""
 
 from __future__ import annotations
 
 import json
 import os
 from collections import Counter, defaultdict
-from typing import Dict, List, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
 
+CLASS_ORDER = [
+    "-",
+    ".",
+    "a",
+    "b",
+    "c",
+    "k",
+    "n",
+    "p",
+    "r",
+    "A",
+    "B",
+    "C",
+    "K",
+    "N",
+    "P",
+    "R",
+]
 
-CLASS_ORDER = ["-", ".", "a", "b", "c", "k", "n", "p", "r", "A", "B", "C", "K", "N", "P", "R"]
 
-
-def load_labels(dataset_dir: str) -> List[Dict]:
+def load_labels(dataset_dir: str) -> list[dict]:
     labels_path = os.path.join(dataset_dir, "labels.jsonl")
     records = []
     with open(labels_path, encoding="utf-8") as file:
@@ -45,8 +61,8 @@ def hog_feature(path: str) -> np.ndarray:
     cells = []
     for top in range(0, 96, 8):
         for left in range(0, 96, 8):
-            cell_bins = bins[top:top + 8, left:left + 8].reshape(-1)
-            cell_magnitude = magnitude[top:top + 8, left:left + 8].reshape(-1)
+            cell_bins = bins[top : top + 8, left : left + 8].reshape(-1)
+            cell_magnitude = magnitude[top : top + 8, left : left + 8].reshape(-1)
             histogram = np.bincount(
                 cell_bins,
                 weights=cell_magnitude,
@@ -59,7 +75,7 @@ def hog_feature(path: str) -> np.ndarray:
     return feature.astype(np.float32)
 
 
-def _balanced_training(records: List[Dict], max_per_class: int) -> List[Dict]:
+def _balanced_training(records: list[dict], max_per_class: int) -> list[dict]:
     grouped = defaultdict(list)
     for record in records:
         grouped[record["label"]].append(record)
@@ -75,7 +91,7 @@ def evaluate_baseline(
     output_dir: Optional[str] = None,
     holdout_game: Optional[int] = None,
     max_train_per_class: int = 200,
-) -> Dict:
+) -> dict:
     dataset_dir = os.path.abspath(os.path.expanduser(dataset_dir))
     output_dir = os.path.abspath(os.path.expanduser(output_dir or dataset_dir))
     os.makedirs(output_dir, exist_ok=True)
@@ -97,7 +113,9 @@ def evaluate_baseline(
     present_labels = {record["label"] for record in training}
     validation = [record for record in validation if record["label"] in present_labels]
     label_to_index = {
-        label: index for index, label in enumerate(CLASS_ORDER) if label in present_labels
+        label: index
+        for index, label in enumerate(CLASS_ORDER)
+        if label in present_labels
     }
     index_to_label = {index: label for label, index in label_to_index.items()}
 
@@ -105,9 +123,9 @@ def evaluate_baseline(
     train_y = np.array(
         [label_to_index[record["label"]] for record in training], dtype=np.int32
     )
-    validation_x = np.stack([
-        hog_feature(record["absolute_path"]) for record in validation
-    ])
+    validation_x = np.stack(
+        [hog_feature(record["absolute_path"]) for record in validation]
+    )
     validation_y = [record["label"] for record in validation]
 
     similarities = validation_x @ train_x.T
@@ -119,10 +137,10 @@ def evaluate_baseline(
     )[:, -neighbor_count:]
     predictions = []
     for row, indices in enumerate(neighbor_indices):
-        votes = defaultdict(float)
+        votes: dict[int, float] = defaultdict(float)
         for index in indices:
             votes[int(train_y[index])] += max(0.0, float(similarities[row, index]))
-        predicted_index = max(votes, key=votes.get)
+        predicted_index = max(votes, key=lambda index: votes[index])
         predictions.append(index_to_label[predicted_index])
 
     correct = Counter()
@@ -136,28 +154,35 @@ def evaluate_baseline(
         if expected == predicted:
             correct[expected] += 1
         else:
-            errors.append({
-                "path": record["path"],
-                "game_index": record["game_index"],
-                "frame_id": record["frame_id"],
-                "row": record["row"],
-                "col": record["col"],
-                "label_source": record["label_source"],
-                "expected": expected,
-                "predicted": predicted,
-                "nearest_similarity": float(np.max(similarities[row])),
-            })
+            errors.append(
+                {
+                    "path": record["path"],
+                    "game_index": record["game_index"],
+                    "frame_id": record["frame_id"],
+                    "row": record["row"],
+                    "col": record["col"],
+                    "label_source": record["label_source"],
+                    "expected": expected,
+                    "predicted": predicted,
+                    "nearest_similarity": float(np.max(similarities[row])),
+                }
+            )
 
     metrics = {
         "holdout_game": holdout_game,
         "training_samples": len(training),
         "validation_samples": len(validation),
-        "accuracy": sum(expected == predicted for expected, predicted in zip(validation_y, predictions)) / len(validation),
+        "accuracy": sum(
+            expected == predicted
+            for expected, predicted in zip(validation_y, predictions)
+        )
+        / len(validation),
         "training_class_counts": dict(Counter(record["label"] for record in training)),
         "validation_class_counts": dict(totals),
         "per_class_accuracy": {
             label: correct[label] / totals[label]
-            for label in CLASS_ORDER if totals[label]
+            for label in CLASS_ORDER
+            if totals[label]
         },
         "confusion": {
             f"{expected}->{predicted}": count
@@ -171,9 +196,13 @@ def evaluate_baseline(
         features=train_x,
         labels=train_y,
     )
-    with open(os.path.join(output_dir, "baseline_metrics.json"), "w", encoding="utf-8") as file:
+    with open(
+        os.path.join(output_dir, "baseline_metrics.json"), "w", encoding="utf-8"
+    ) as file:
         json.dump(metrics, file, ensure_ascii=False, indent=2)
-    with open(os.path.join(output_dir, "baseline_errors.jsonl"), "w", encoding="utf-8") as file:
+    with open(
+        os.path.join(output_dir, "baseline_errors.jsonl"), "w", encoding="utf-8"
+    ) as file:
         for error in errors:
             file.write(json.dumps(error, ensure_ascii=False))
             file.write("\n")

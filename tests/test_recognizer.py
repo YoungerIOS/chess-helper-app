@@ -6,6 +6,7 @@ import numpy as np
 
 from app.chess.processor import ChessProcess
 from app.chess.checker import PositionChecker
+from app.chess.piece_recognizer import ChessPieceRecognizer
 from app.chess.recognizer import (
     ChessRecognizer,
     RecognitionDetail,
@@ -118,6 +119,41 @@ class ChessRecognizerTests(unittest.TestCase):
         self.assertTrue(recognizer._recover_jj_black_cannon(black_cannon))
         self.assertFalse(recognizer._recover_jj_black_cannon(red_cannon))
 
+    def test_jj_king_inside_palace_is_not_recovered_as_cannon(self):
+        recognizer = ChessRecognizer(FakeContext("JJ"))
+        black_king = cv2.imread(
+            resource_path("images", "media", "black_k.png"),
+            cv2.IMREAD_COLOR,
+        )
+
+        self.assertFalse(recognizer._recover_jj_black_cannon(
+            black_king,
+            position=(0, 4),
+            model_piece="k",
+        ))
+
+    def test_jj_production_model_recognizes_locator_key_pieces(self):
+        recognizer = ChessPieceRecognizer("JJ")
+        expected = {
+            "black_k.png": "k",
+            "red_K.png": "K",
+            "black_c.png": "c",
+            "red_C.png": "C",
+        }
+
+        self.assertTrue(recognizer.model_path.endswith("jj_piece_model.onnx"))
+        for filename, piece in expected.items():
+            image = cv2.imread(
+                resource_path("images", "media", filename),
+                cv2.IMREAD_COLOR,
+            )
+            result = recognizer.recognize_from_array(image)
+            self.assertIsNotNone(result)
+            if result is None:
+                self.fail(f"JJ production model returned no result for {filename}")
+            self.assertEqual(piece, result["class_name"])
+            self.assertGreater(result["confidence"], 0.90)
+
     def test_black_cannon_fallback_is_disabled_for_tt(self):
         recognizer = ChessRecognizer(FakeContext("TT"))
         black_cannon = cv2.imread(
@@ -126,6 +162,54 @@ class ChessRecognizerTests(unittest.TestCase):
         )
 
         self.assertFalse(recognizer._recover_jj_black_cannon(black_cannon))
+
+    def test_high_confidence_black_cannon_skips_visual_fallback(self):
+        context = FakeContext("JJ")
+        context.piece_recognizer.forced_classes = ["c"] * 90
+        recognizer = ChessRecognizer(context)
+
+        with patch.object(
+            recognizer, "_recover_jj_black_cannon", return_value=True
+        ) as fallback:
+            board, _, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual("c", board[0][0])
+        fallback.assert_not_called()
+
+    def test_black_cannon_can_recover_from_king_misclassification(self):
+        context = FakeContext("JJ")
+        context.piece_recognizer.forced_classes = ["k"] + ["c"] * 89
+        recognizer = ChessRecognizer(context)
+
+        with patch.object(
+            recognizer, "_recover_jj_black_cannon", return_value=True
+        ) as fallback:
+            board, _, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual("c", board[0][0])
+        fallback.assert_called_once()
+
+    def test_previous_black_cannon_does_not_override_confident_prediction(self):
+        context = FakeContext("JJ")
+        context.piece_recognizer.forced_classes = ["R"] + ["c"] * 89
+        recognizer = ChessRecognizer(context)
+        recognizer.last_grid_hashes = [["old"] * 9 for _ in range(10)]
+        recognizer.last_board_array = [["-"] * 9 for _ in range(10)]
+        recognizer.last_board_array[0][0] = "c"
+
+        with patch.object(
+            recognizer, "_recover_jj_black_cannon", return_value=True
+        ) as fallback:
+            board, _, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual("R", board[0][0])
+        fallback.assert_not_called()
 
     def test_low_confidence_prediction_keeps_previous_piece(self):
         context = FakeContext("JJ")
@@ -149,6 +233,79 @@ class ChessRecognizerTests(unittest.TestCase):
             FakeScreenshot(), self.X_COORDS, self.Y_COORDS
         )
         self.assertEqual([(72, 72)], context.piece_recognizer.crop_shapes)
+
+    def test_jj_same_color_piece_drift_keeps_trusted_piece_type(self):
+        context = FakeContext("JJ")
+        context.piece_recognizer.forced_classes = ["a"]
+        recognizer = ChessRecognizer(context)
+        board = [["-"] * 9 for _ in range(10)]
+        board[0][0] = "r"
+        base_hash = "0000000000000000"
+        trusted_hashes = [[base_hash] * 9 for _ in range(10)]
+        current_hashes = [row[:] for row in trusted_hashes]
+        current_hashes[0][0] = "ffffffffffffffff"
+        recognizer.commit_tracking_state(
+            board, trusted_hashes, is_red_at_bottom=True, side_to_move="black"
+        )
+
+        with patch(
+            "app.tools.utils.compute_image_hash",
+            side_effect=[value for row in current_hashes for value in row],
+        ):
+            recognized, _, _, _ = recognizer.recognize_piece_from_grid(
+                FakeScreenshot(), self.X_COORDS, self.Y_COORDS
+            )
+
+        self.assertEqual("r", recognized[0][0])
+        self.assertEqual(1, context.piece_recognizer.batch_calls)
+
+    def test_jj_unexplained_cross_color_piece_drift_is_reverted(self):
+        recognizer = ChessRecognizer(FakeContext("JJ"))
+        trusted = [["-"] * 9 for _ in range(10)]
+        trusted[0][2] = "C"
+        recognizer.trusted_board_array = [row[:] for row in trusted]
+        observed = [row[:] for row in trusted]
+        observed[0][2] = "a"
+
+        stabilized = recognizer._stabilize_unexplained_piece_appearances(observed)
+
+        self.assertEqual("C", stabilized[0][2])
+
+    def test_jj_persistent_piece_drift_is_released_for_controlled_resync(self):
+        recognizer = ChessRecognizer(FakeContext("JJ"))
+        trusted = [["-"] * 9 for _ in range(10)]
+        trusted[0][1] = "r"
+        recognizer.trusted_board_array = [row[:] for row in trusted]
+        observed = [row[:] for row in trusted]
+        observed[0][1] = "n"
+
+        first = recognizer._stabilize_unexplained_piece_appearances(observed)
+        second = recognizer._stabilize_unexplained_piece_appearances(observed)
+        third = recognizer._stabilize_unexplained_piece_appearances(observed)
+
+        self.assertEqual("r", first[0][1])
+        self.assertEqual("r", second[0][1])
+        self.assertEqual("n", third[0][1])
+
+    def test_jj_legitimate_capture_is_not_reverted(self):
+        recognizer = ChessRecognizer(FakeContext("JJ"))
+        trusted = [["-"] * 9 for _ in range(10)]
+        trusted[0][4] = "k"
+        trusted[9][4] = "K"
+        trusted[5][4] = "P"
+        trusted[5][0] = "R"
+        trusted[2][0] = "n"
+        recognizer.trusted_board_array = [row[:] for row in trusted]
+        recognizer.trusted_is_red_at_bottom = True
+        recognizer.trusted_side_to_move = "red"
+        observed = [row[:] for row in trusted]
+        observed[5][0] = "-"
+        observed[2][0] = "R"
+
+        stabilized = recognizer._stabilize_unexplained_piece_appearances(observed)
+
+        self.assertEqual("-", stabilized[5][0])
+        self.assertEqual("R", stabilized[2][0])
 
     def test_missing_marker_is_not_a_fatal_recognition_error(self):
         process = ChessProcess.__new__(ChessProcess)

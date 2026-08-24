@@ -1,4 +1,4 @@
-"""训练并评估新版 JJ 棋子分类 CNN。
+"""训练并评估JJ 棋子分类 CNN。
 
 训练依赖是可选的，运行主程序不需要安装 PyTorch。数据始终按完整对局
 切分，避免同一局相邻帧同时落入训练集和验证集造成虚高。
@@ -259,7 +259,7 @@ def train_cnn(
 
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     model.eval().cpu()
-    onnx_path = os.path.join(output_dir, "jj_v2_piece_model.onnx")
+    onnx_path = os.path.join(output_dir, "jj_piece_model.onnx")
     torch.onnx.export(
         model,
         (torch.zeros(1, 3, INPUT_SIZE, INPUT_SIZE),),
@@ -271,7 +271,7 @@ def train_cnn(
         dynamo=False,
     )
     class_map = {str(index): label for index, label in enumerate(CLASS_ORDER)}
-    with open(os.path.join(output_dir, "jj_v2_piece_map.json"), "w", encoding="utf-8") as file:
+    with open(os.path.join(output_dir, "jj_piece_map.json"), "w", encoding="utf-8") as file:
         json.dump(class_map, file, ensure_ascii=False, indent=2)
     metrics = {
         "dataset_dir": dataset_dir,

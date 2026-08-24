@@ -222,15 +222,14 @@ class ChessCaptureManager:
             alive = [thread.name for thread in threads if thread.is_alive()]
             if alive:
                 logger.warning(f"截图管理器停止后仍有后台线程存活: {alive}")
-            self.context.close_jj_v2_recorder(timeout=1.0)
-            self.context.close_jj_v2_shadow_runner(timeout=1.0)
+            self.context.close_jj_training_recorder(timeout=1.0)
             message_bus.unsubscribe(MessageType.RETRY_CAPTURE, self._on_retry_capture)
             self._stopped_event.set()
 
-    def _record_jj_v2_frame(self, screenshot, capture_time, region, stable):
+    def _record_jj_training_frame(self, screenshot, capture_time, region, stable):
         """采集失败不能影响实时识别主流程。"""
         try:
-            get_recorder = getattr(self.context, "get_jj_v2_recorder", None)
+            get_recorder = getattr(self.context, "get_jj_training_recorder", None)
             if get_recorder is None:
                 return
             recorder = get_recorder()
@@ -242,7 +241,7 @@ class ChessCaptureManager:
                     board_region=region,
                 )
         except Exception:
-            logger.exception("JJ v2数据帧采集失败")
+            logger.exception("JJ训练数据帧采集失败")
 
     def _capture_and_enqueue(self, region, force_output=False):
         """
@@ -259,7 +258,7 @@ class ChessCaptureManager:
             board_screenshot, "[capture]", force_output=force_output
         )
         if stable_frame is not None or has_pending_visual_change(curr_hash):
-            self._record_jj_v2_frame(
+            self._record_jj_training_frame(
                 board_screenshot,
                 capture_time,
                 region,
@@ -304,7 +303,7 @@ class ChessCaptureManager:
                         board_screenshot, "[continuous]"
                     )
                     if stable_frame is not None or has_pending_visual_change(curr_hash):
-                        self._record_jj_v2_frame(
+                        self._record_jj_training_frame(
                             board_screenshot,
                             capture_time,
                             board_region,

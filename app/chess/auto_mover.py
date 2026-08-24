@@ -1,3 +1,4 @@
+import importlib
 import re
 import threading
 import time
@@ -171,8 +172,11 @@ class AutoMoveController:
         try:
             if platform.system() == "Windows":
                 from app.chess.windows import user_idle_seconds
+
                 return user_idle_seconds()
-            import Quartz
+            # Quartz is an optional macOS dependency; load it dynamically so
+            # static analysis does not require it on every platform.
+            Quartz = __import__("Quartz")
 
             return Quartz.CGEventSourceSecondsSinceLastEventType(
                 Quartz.kCGEventSourceStateHIDSystemState,
@@ -186,6 +190,8 @@ class AutoMoveController:
     def _default_target_window_active(window_info):
         """确认目标棋盘窗口是最前面的普通窗口，避免抢走其他应用焦点。"""
         target_window_id = window_info.get("window_id") if window_info else None
+        if target_window_id is None:
+            return False
         try:
             target_window_id = int(target_window_id)
         except (TypeError, ValueError):
@@ -194,8 +200,9 @@ class AutoMoveController:
         try:
             if platform.system() == "Windows":
                 from app.chess.windows import is_foreground_window
+
                 return is_foreground_window(target_window_id)
-            import Quartz
+            Quartz = __import__("Quartz")
 
             options = (
                 Quartz.kCGWindowListOptionOnScreenOnly
@@ -206,14 +213,14 @@ class AutoMoveController:
                 Quartz.kCGNullWindowID,
             )
             for window in windows:
-                if int(window.get('kCGWindowLayer', 0) or 0) != 0:
+                if int(window.get("kCGWindowLayer", 0) or 0) != 0:
                     continue
-                bounds = window.get('kCGWindowBounds', {})
-                if float(bounds.get('Width', 0) or 0) <= 1:
+                bounds = window.get("kCGWindowBounds", {})
+                if float(bounds.get("Width", 0) or 0) <= 1:
                     continue
-                if float(bounds.get('Height', 0) or 0) <= 1:
+                if float(bounds.get("Height", 0) or 0) <= 1:
                     continue
-                return int(window.get('kCGWindowNumber', -1)) == target_window_id
+                return int(window.get("kCGWindowNumber", -1)) == target_window_id
         except Exception:
             return False
         return False
@@ -224,6 +231,7 @@ class AutoMoveController:
         if platform.system() == "Windows":
             try:
                 from app.chess.windows import click_window_point
+
                 click_window_point(int(window_info.get("window_id")), point)
                 return
             except Exception as exc:
@@ -235,7 +243,7 @@ class AutoMoveController:
             raise AutoMoveError("游戏窗口缺少进程信息，无法后台点击")
 
         try:
-            import Quartz
+            Quartz = __import__("Quartz")
 
             down = Quartz.CGEventCreateMouseEvent(
                 None,
@@ -273,12 +281,16 @@ class AutoMoveController:
             import numpy as np
 
             with mss.MSS() as capture:
-                shot = locked_grab(capture, {
-                    "left": left,
-                    "top": top,
-                    "width": width,
-                    "height": height,
-                }, timeout=0.15)
+                shot = locked_grab(
+                    capture,
+                    {
+                        "left": left,
+                        "top": top,
+                        "width": width,
+                        "height": height,
+                    },
+                    timeout=0.15,
+                )
                 # 必须复制后再离开mss上下文，避免数组继续引用原生截图缓冲。
                 bgra = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(
                     shot.height,
@@ -418,10 +430,9 @@ class AutoMoveController:
 
                 # 两张实测皮肤的叉号中心均接近 (0.883, 0.367)，在满足
                 # 形状约束后选择最接近该锚点的候选。
-                distance = (
-                    ((normalized_x - 0.883) / 0.07) ** 2 +
-                    ((normalized_y - 0.367) / 0.08) ** 2
-                )
+                distance = ((normalized_x - 0.883) / 0.07) ** 2 + (
+                    (normalized_y - 0.367) / 0.08
+                ) ** 2
                 candidates.append((distance, round(center_x), round(center_y)))
 
             if not candidates:
@@ -435,10 +446,10 @@ class AutoMoveController:
     def scan_rematch_button(self):
         """异步扫描JJ结算页；先关闭奖励弹层，再点击“再来一局”。"""
         if (
-            not self.context.auto_move_enabled or
-            self.context.platform != "JJ" or
-            not self.can_execute() or
-            self.window_provider is None
+            not self.context.auto_move_enabled
+            or self.context.platform != "JJ"
+            or not self.can_execute()
+            or self.window_provider is None
         ):
             return False
 
@@ -465,19 +476,24 @@ class AutoMoveController:
 
             image_point = self.find_rematch_button_in_image(image)
             checker = self.context.get_checker()
+            if image_point is not None:
+                confirm_settlement = getattr(checker, "confirm_settlement_visual", None)
+                if confirm_settlement is not None:
+                    confirm_settlement()
             settlement_confirmed = bool(
-                image_point is not None or
-                getattr(checker, "in_settlement_screen", False)
+                image_point is not None
+                or getattr(checker, "in_settlement_screen", False)
             )
             popup_close_point = (
                 self.find_reward_popup_close_in_image(image)
-                if settlement_confirmed else None
+                if settlement_confirmed
+                else None
             )
             if popup_close_point is not None:
                 if (
-                    not self.context.auto_move_enabled or
-                    self.context.platform != "JJ" or
-                    not self.can_execute()
+                    not self.context.auto_move_enabled
+                    or self.context.platform != "JJ"
+                    or not self.can_execute()
                 ):
                     return
 
@@ -518,9 +534,9 @@ class AutoMoveController:
                 return
 
             if (
-                not self.context.auto_move_enabled or
-                self.context.platform != "JJ" or
-                not self.can_execute()
+                not self.context.auto_move_enabled
+                or self.context.platform != "JJ"
+                or not self.can_execute()
             ):
                 return
 
@@ -549,8 +565,14 @@ class AutoMoveController:
         image_height, image_width = image.shape[:2]
         window = window_info.get("region", {})
         return (
-            round(float(window["left"]) + image_point[0] / image_width * float(window["width"])),
-            round(float(window["top"]) + image_point[1] / image_height * float(window["height"])),
+            round(
+                float(window["left"])
+                + image_point[0] / image_width * float(window["width"])
+            ),
+            round(
+                float(window["top"])
+                + image_point[1] / image_height * float(window["height"])
+            ),
         )
 
     def _click_scanned_control(self, window_info, click_point, attempt_count):
@@ -631,8 +653,7 @@ class AutoMoveController:
             raise AutoMoveCancelled("缺少引擎分析时的棋盘快照")
         start_piece = board[start[0]][start[1]]
         is_own_piece = start_piece != "-" and (
-            (is_red and start_piece.isupper()) or
-            (not is_red and start_piece.islower())
+            (is_red and start_piece.isupper()) or (not is_red and start_piece.islower())
         )
         if not is_own_piece:
             raise AutoMoveCancelled("推荐着法起点已不再是我方棋子")
@@ -712,12 +733,16 @@ class AutoMoveController:
                 # 判断重试期间的用户输入，否则首轮点击会被误报成用户操作。
                 # 此处改为检测光标是否偏离了程序最后放置的位置。
                 if (
-                    attempt_index and
-                    last_automatic_position is not None and
-                    self._cursor_was_moved(controller.position, last_automatic_position)
+                    attempt_index
+                    and last_automatic_position is not None
+                    and self._cursor_was_moved(
+                        controller.position, last_automatic_position
+                    )
                 ):
                     raise AutoMoveUserBusy("检测到用户移动鼠标")
-                if attempt_index and not self.target_window_active_provider(window_info):
+                if attempt_index and not self.target_window_active_provider(
+                    window_info
+                ):
                     raise AutoMoveUserBusy("重试前目标窗口已不在最前面")
                 logger.debug(f"空闲自动走子尝试: {attempt_name}, points={points}")
                 for index, point in enumerate(points):
@@ -751,8 +776,10 @@ class AutoMoveController:
         """判断用户是否在兼容点击的视觉确认期间移动了系统光标。"""
         try:
             return (
-                abs(float(current_position[0]) - float(expected_position[0])) > tolerance or
-                abs(float(current_position[1]) - float(expected_position[1])) > tolerance
+                abs(float(current_position[0]) - float(expected_position[0]))
+                > tolerance
+                or abs(float(current_position[1]) - float(expected_position[1]))
+                > tolerance
             )
         except (IndexError, TypeError, ValueError):
             # 无法读取光标位置时采取保守策略，停止继续控制系统鼠标。
@@ -795,9 +822,7 @@ class AutoMoveController:
         while True:
             self._ensure_current(analysis_token, generation)
             if self._is_move_observed(checker, start, end, start_piece):
-                logger.info(
-                    f"后台自动走子确认成功: {start_point} -> {end_point}"
-                )
+                logger.info(f"后台自动走子确认成功: {start_point} -> {end_point}")
                 return start_point, end_point
 
             now = time.monotonic()
@@ -917,10 +942,10 @@ class AutoMoveController:
         )
         tolerance = max(20.0, window_short_side * 0.04)
         if not (
-            board_left >= window_left - tolerance and
-            board_top >= window_top - tolerance and
-            board_right <= window_right + tolerance and
-            board_bottom <= window_bottom + tolerance
+            board_left >= window_left - tolerance
+            and board_top >= window_top - tolerance
+            and board_right <= window_right + tolerance
+            and board_bottom <= window_bottom + tolerance
         ):
             raise AutoMoveCancelled("棋盘位置与游戏窗口不一致")
         return window_info

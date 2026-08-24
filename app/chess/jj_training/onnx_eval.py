@@ -1,4 +1,4 @@
-"""用应用实际采用的 ONNX Runtime 独立评估候选 JJ v2 模型。"""
+"""用应用实际采用的 ONNX Runtime 独立评估候选 JJ 模型。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CLI: 按完整对局切分并训练 JJ v2 候选 CNN。"""
+"""CLI: 按完整对局切分并训练 JJ 候选 CNN。"""
 
 import argparse
 import json
@@ -7,7 +7,7 @@ from .cnn import train_cnn
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="训练新版 JJ 棋子识别候选模型")
+    parser = argparse.ArgumentParser(description="训练JJ 棋子识别候选模型")
     parser.add_argument("dataset_dir")
     parser.add_argument("output_dir")
     parser.add_argument(

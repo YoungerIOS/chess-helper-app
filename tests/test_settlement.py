@@ -40,10 +40,15 @@ class SettlementDetectionTests(unittest.TestCase):
         )
         self.assertTrue(checker.in_settlement_screen)
 
-    def test_empty_massive_board_is_classified_as_board_loss(self):
+    def test_empty_massive_board_waits_for_confirmation_grace_before_board_loss(self):
         checker = PositionChecker()
         board = [["-"] * 9 for _ in range(10)]
 
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        checker._settlement_pending_since -= checker.BOARD_LOST_GRACE_SECONDS
         self.assertTrue(checker.check_settlement(board, is_massive_change=True))
         self.assertEqual("board_lost", checker.settlement_reason)
 
@@ -53,6 +58,11 @@ class SettlementDetectionTests(unittest.TestCase):
         board[9][4] = "K"
         board[6][0] = "P"
 
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        self.assertTrue(checker.check_settlement(board, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        checker._settlement_pending_since -= checker.BOARD_LOST_GRACE_SECONDS
         self.assertTrue(checker.check_settlement(board, is_massive_change=True))
         self.assertEqual("board_lost", checker.settlement_reason)
 
@@ -66,6 +76,42 @@ class SettlementDetectionTests(unittest.TestCase):
 
         empty = [["-"] * 9 for _ in range(10)]
         self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        self.assertEqual("settlement_pending", checker.settlement_reason)
+        checker._settlement_pending_since -= checker.BOARD_LOST_GRACE_SECONDS
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        self.assertEqual("board_lost", checker.settlement_reason)
+
+    def test_visible_rematch_confirms_empty_board_as_normal_settlement(self):
+        checker = PositionChecker()
+        empty = [["-"] * 9 for _ in range(10)]
+
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        self.assertTrue(checker.confirm_settlement_visual())
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+
+        self.assertEqual("settlement", checker.settlement_reason)
+        self.assertTrue(checker._settlement_visually_confirmed)
+
+    def test_static_missing_board_expires_after_confirmation_grace(self):
+        checker = PositionChecker()
+        empty = [["-"] * 9 for _ in range(10)]
+
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        checker._settlement_pending_since -= checker.BOARD_LOST_GRACE_SECONDS
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=False))
+
+        self.assertEqual("board_lost", checker.settlement_reason)
+
+    def test_recognition_failure_expires_after_confirmation_grace(self):
+        checker = PositionChecker()
+        empty = [["-"] * 9 for _ in range(10)]
+
+        self.assertTrue(checker.check_settlement(empty, is_massive_change=True))
+        checker._settlement_pending_since -= checker.BOARD_LOST_GRACE_SECONDS
+        self.assertTrue(checker.check_settlement(None, is_massive_change=False))
+
         self.assertEqual("board_lost", checker.settlement_reason)
 
     def test_reset_clears_settlement_reason(self):
@@ -77,6 +123,9 @@ class SettlementDetectionTests(unittest.TestCase):
 
         self.assertIsNone(checker.settlement_reason)
         self.assertFalse(checker.in_settlement_screen)
+        self.assertFalse(checker._settlement_visually_confirmed)
+        self.assertEqual(0, checker._board_lost_streak)
+        self.assertIsNone(checker._settlement_pending_since)
 
 
 if __name__ == "__main__":

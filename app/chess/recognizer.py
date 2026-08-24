@@ -5,7 +5,6 @@ import threading
 from app.tools.utils import app_cache_path, resource_path
 from app.tools.log_config import get_logger
 from app.chess.context import context as global_context
-from app.chess.marker_detector import MarkerDetector
 from app.chess.move_tracker import LegalMoveMatcher
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -31,7 +30,6 @@ class ChessRecognizer:
     def __init__(self, context=None):
         # 支持依赖注入，默认使用全局context
         self.context = context or global_context
-        self.marker_detector = MarkerDetector()
         # 缓存上一帧的哈希和棋盘状态，用于增量识别
         self.last_grid_hashes = None
         self.last_board_array = None
@@ -45,6 +43,7 @@ class ChessRecognizer:
         self.trusted_board_array = None
         self.trusted_is_red_at_bottom = True
         self.trusted_side_to_move = None
+        self._piece_drift_observations = {}
 
     def reset(self):
         """清除视觉与可信棋盘缓存，保留已加载模型。"""
@@ -56,6 +55,7 @@ class ChessRecognizer:
             self.trusted_board_array = None
             self.trusted_is_red_at_bottom = True
             self.trusted_side_to_move = None
+            self._piece_drift_observations = {}
 
     def commit_tracking_state(
         self, board_array, grid_hashes, is_red_at_bottom, side_to_move=None
@@ -141,6 +141,85 @@ class ChessRecognizer:
         self._jj_black_piece_templates = templates
         return templates
 
+    def _stabilize_unexplained_piece_appearances(self, board_array):
+        """回退无法由一步合法着法解释的凭空出现或原地变种棋子。"""
+        trusted = self.trusted_board_array
+        if self.context.platform != "JJ" or trusted is None:
+            return board_array
+
+        observed = [row[:] for row in board_array]
+        observed_drift_keys = set()
+        sources = []
+        for row in range(10):
+            for col in range(9):
+                old_piece = trusted[row][col]
+                if old_piece != "-" and observed[row][col] == "-":
+                    sources.append((row, col))
+
+        for row in range(10):
+            for col in range(9):
+                old_piece = trusted[row][col]
+                new_piece = observed[row][col]
+                if (
+                    new_piece == old_piece
+                    or not isinstance(new_piece, str)
+                    or len(new_piece) != 1
+                    or not new_piece.isalpha()
+                ):
+                    continue
+
+                explained = False
+                for source in sources:
+                    source_row, source_col = source
+                    if trusted[source_row][source_col] != new_piece:
+                        continue
+                    if self.trusted_side_to_move == "red" and not new_piece.isupper():
+                        continue
+                    if self.trusted_side_to_move == "black" and new_piece.isupper():
+                        continue
+                    predicted = [trusted_row[:] for trusted_row in trusted]
+                    predicted[source_row][source_col] = "-"
+                    predicted[row][col] = new_piece
+                    if self.move_matcher._rules.is_step_legal(
+                        trusted,
+                        predicted,
+                        self.trusted_is_red_at_bottom,
+                        {
+                            "from_pos": source,
+                            "to_pos": (row, col),
+                            "piece": new_piece,
+                        },
+                    ):
+                        explained = True
+                        break
+
+                if not explained:
+                    drift_key = ((row, col), old_piece, new_piece)
+                    observed_drift_keys.add(drift_key)
+                    drift_count = self._piece_drift_observations.get(drift_key, 0) + 1
+                    self._piece_drift_observations[drift_key] = drift_count
+                    if drift_count < 3:
+                        logger.info(
+                            "回退无法解释的棋子类别变化: "
+                            f"position=({row}, {col}), trusted={old_piece}, "
+                            f"predicted={new_piece}, repeat={drift_count}/3"
+                        )
+                        observed[row][col] = old_piece
+                    else:
+                        logger.warning(
+                            "连续视觉证据允许类别重同步: "
+                            f"position=({row}, {col}), trusted={old_piece}, "
+                            f"predicted={new_piece}, repeat={drift_count}"
+                        )
+
+        self._piece_drift_observations = {
+            key: count
+            for key, count in self._piece_drift_observations.items()
+            if key in observed_drift_keys
+        }
+
+        return observed
+
     @staticmethod
     def _contains_centered_piece_circle(piece_img):
         if piece_img is None or min(piece_img.shape[:2]) < 40:
@@ -184,8 +263,15 @@ class ChessRecognizer:
         ).mean()
         return dark_neutral >= 0.08 and dark_neutral > red_ink * 1.5
 
-    def _recover_jj_black_cannon(self, piece_img, previous_piece="-"):
-        """模型误报空格时，以圆形、字色和模板三重证据恢复黑炮。"""
+    def _recover_jj_black_cannon(
+        self,
+        piece_img,
+        previous_piece="-",
+        *,
+        position=None,
+        model_piece=None,
+    ):
+        """以圆形、字色、棋规位置和模板证据恢复被误判的 JJ 黑炮。"""
         if self.context.platform != "JJ":
             return False
         if not self._contains_centered_piece_circle(piece_img):
@@ -194,6 +280,14 @@ class ChessRecognizer:
             return False
         if previous_piece == "c":
             return True
+        # 黑将只能位于上下九宫的中间三列。正式 JJ 模型已知会把部分
+        # 黑炮判成 k；若该格根本不可能是将位，圆形和黑色字形足以排除
+        # 空格/标记，再按这个已知混淆恢复为黑炮。
+        if model_piece == "k" and position is not None:
+            row, col = position
+            inside_palace = (row <= 2 or row >= 7) and 3 <= col <= 5
+            if not inside_palace:
+                return True
 
         templates = self._load_jj_black_piece_templates()
         if "c" not in templates:
@@ -230,51 +324,6 @@ class ChessRecognizer:
         gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY) 
         return resized_img, gray
 
-
-    # 识别棋子
-    def recognize_piece_from_circle(self, img, x_array, y_array):
-        """
-        识别棋子并确定其位置和类型
-        Args:
-            img: 原始图像
-            x_array: 棋盘横线坐标数组
-            y_array: 棋盘纵线坐标数组
-        Returns:
-            pieceArray: 9x10的二维数组，表示棋盘状态，每个位置存储棋子类型代号或"-"
-            is_red: 是否为红方
-        """
-        # 预处理
-        resized_img, gray = self.preprocess_image(img)
-        width = resized_img.shape[1]
-        maxRadius = int(width/9/2)  # 棋盘宽度除以9（横向最多9个棋子，再除2就是半径）
-        minRadius = int(0.8 * width/9/2)
-        minDist = int(0.8 * width/9)  # 棋子与棋子间距，最小就是2个半径
-        # 检测圆形
-        circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, minDist, 
-                                  param1=50, param2=30, 
-                                  minRadius=minRadius, maxRadius=maxRadius)
-        if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            # 识别黑将并获取计算好坐标的棋盘数组
-            pieceArray, is_red = self.recognize_black_king(circles, resized_img, x_array, y_array)
-            logger.info(f"当前方为{'红方' if is_red else '黑方'}")
-            # 识别所有棋子
-            for i in range(len(pieceArray)):
-                for j in range(len(pieceArray[0])):
-                    if pieceArray[i][j] == '-':
-                        continue
-                    x, y, r = pieceArray[i][j]
-                    piece_img = self.get_piece_image(resized_img, x, y, r)
-                    piece_type, confidence = self.recognize_piece_type(piece_img)
-                    # print(f"位置({j}, {i}) 识别为 {piece_type}")
-                    if piece_type:
-                        pieceArray[i][j] = piece_type
-                    else:
-                        pieceArray[i][j] = '-'
-        else:
-            pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-        return pieceArray
-
     def recognize_piece_from_grid(self, img, x_array, y_array):
         # 两个处理工作线程共享同一识别器。缓存读取、模型推理和
         # 缓存写回必须是一个原子过程，否则帧会交叉覆盖上一局面。
@@ -296,10 +345,21 @@ class ChessRecognizer:
         """
         from app.tools.utils import compute_image_hash
 
-        # 使用内部缓存
-        last_grid_hashes = self.last_grid_hashes
-        last_board_array = self.last_board_array
-        last_marker_coords = self.last_marker_coords or []
+        # JJ增量识别必须始终从Checker已经接受的可信局面出发。旧实现
+        # 会把被Checker拒绝的“第三个黑士”等结果写进last缓存，下一帧
+        # 哈希命中后永久复用错误类别，形成无法自愈的重拍循环。
+        if (
+            self.context.platform == "JJ"
+            and self.trusted_grid_hashes is not None
+            and self.trusted_board_array is not None
+        ):
+            last_grid_hashes = self.trusted_grid_hashes
+            last_board_array = self.trusted_board_array
+            last_marker_coords = []
+        else:
+            last_grid_hashes = self.last_grid_hashes
+            last_board_array = self.last_board_array
+            last_marker_coords = self.last_marker_coords or []
 
         # 预处理
         resized_img, gray = self.preprocess_image(img)
@@ -308,7 +368,7 @@ class ChessRecognizer:
         pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
         current_grid_hashes = [([None] * len(x_array)) for _ in range(len(y_array))]
         
-        # CNN检测到的标记位置 (替代 marker_detector)
+        # CNN 检测到的标记位置
         marker_coords = []
         
         # 收集识别过程中的错误/警告
@@ -451,16 +511,17 @@ class ChessRecognizer:
                     if last_board_array is not None
                     else '-'
                 )
-                # JJ 新棋盘上的黑炮有两种常见漏检：一枚会被模型判成
-                # 空格/其他棋子，另一枚虽然判为 c，但置信度会略低于
-                # 通用的 0.60 写入门槛。两种情况都用同一组视觉证据复核。
+                # JJ 黑炮偶尔会被正式模型高置信度误判为黑将；仅对空格、
+                # 低置信度和这一种已知混淆执行圆形/字色/模板三重复核。
+                # 其他高置信度棋子直接采用，避免上一帧状态覆盖本帧结果。
                 if (
-                    (
-                        previous_piece == 'c'
-                        or piece_type == '-'
-                        or confidence <= 0.6
+                    (piece_type in ('-', 'k') or confidence <= 0.6)
+                    and self._recover_jj_black_cannon(
+                        piece_img,
+                        previous_piece,
+                        position=(i, j),
+                        model_piece=piece_type,
                     )
-                    and self._recover_jj_black_cannon(piece_img, previous_piece)
                 ):
                     piece_type = 'c'
                     confidence = max(float(confidence), 0.75)
@@ -468,7 +529,7 @@ class ChessRecognizer:
                         f"JJ黑炮视觉兜底: position=({i}, {j}), "
                         f"model_class={res['class_name']!r}, previous={previous_piece!r}"
                     )
-                
+
                 if piece_type and confidence > 0.6:
                     if piece_type == 'covered':
                         details.append(RecognitionDetail(
@@ -510,6 +571,8 @@ class ChessRecognizer:
             # print("Debug - 全局缓存命中，跳过CNN识别")
             pass
 
+        pieceArray = self._stabilize_unexplained_piece_appearances(pieceArray)
+
         # 检查是否无标记 (新增 MARKER_MISSING 检测)
         if not marker_coords:
             details.append(RecognitionDetail(
@@ -540,102 +603,6 @@ class ChessRecognizer:
         self.last_marker_coords = marker_coords  # 缓存标记位置
         
         return pieceArray, marker_coords, current_grid_hashes, details
-
-    # 计算棋子坐标
-    def get_piece_position(self, point, x_array, y_array):
-        """
-        根据像素坐标计算棋盘格点坐标
-        Args:
-            point: 棋子中心坐标
-            x_array: 棋盘横线坐标数组
-            y_array: 棋盘纵线坐标数组
-        Returns:
-            (board_x, board_y): 棋盘格点坐标
-        """
-        distances = [abs(point[0] - x) for x in x_array]
-        board_x = distances.index(min(distances))
-        distances = [abs(point[1] - y) for y in y_array]
-        board_y = distances.index(min(distances))
-        return board_x, board_y
-
-    # 圆形轮廓转棋子图片
-    def get_piece_image(self, img, x, y, r):
-        """
-        根据圆心和半径获取棋子图像
-        Args:
-            img: 原始图像
-            x: 圆心x坐标
-            y: 圆心y坐标
-            r: 半径
-        Returns:
-            piece_img: 棋子图像
-        """
-        x1, y1, x2, y2 = x - r, y - r, x + r, y + r
-        if x1 < 0: x1 = 0
-        if y1 < 0: y1 = 0
-        if x2 >= img.shape[1]: x2 = img.shape[1] - 1
-        if y2 >= img.shape[0]: y2 = img.shape[0] - 1
-        return img[y1:y2+1, x1:x2+1]
-
-    # 计算棋子9x10坐标,单独识别将
-    def recognize_black_king(self, circles, img, x_array, y_array):
-        # 初始化棋盘数组和is_red
-        pieceArray = [["-"] * len(x_array) for _ in range(len(y_array))]
-        is_red = False  # 默认值设为False
-        # 计算所有棋子的棋盘坐标
-        for x, y, r in circles:
-            board_x, board_y = self.get_piece_position((x, y), x_array, y_array)
-            # 存储棋子的原始信息到对应位置
-            pieceArray[board_y][board_x] = (x, y, r)
-        # 在上下两个九宫格内寻找黑将
-        upper_palace_king = None  # 上方九宫格黑将位置
-        lower_palace_king = None  # 下方九宫格黑将位置
-        # 检查上方九宫格
-        for i in range(3):  # 上方九宫格是前3行
-            for j in range(3, 6):  # 上方九宫格是中间3列
-                if pieceArray[i][j] == '-':
-                    continue
-                x, y, r = pieceArray[i][j]
-                piece_img = self.get_piece_image(img, x, y, r)
-                # 使用recognize_piece_type识别棋子类型
-                piece_type = self.recognize_piece_type(piece_img)
-                if piece_type is None:
-                    logger.warning(f"无法识别棋子: {piece_img}")
-                    continue
-                if piece_type == 'k':  # 如果是黑将
-                    upper_palace_king = (j, i)
-                    break
-            if upper_palace_king:
-                break
-        # 检查下方九宫格
-        for i in range(7, 10):  # 下方九宫格是后3行
-            for j in range(3, 6):  # 下方九宫格是中间3列
-                if pieceArray[i][j] == '-':
-                    continue
-                x, y, r = pieceArray[i][j]
-                piece_img = self.get_piece_image(img, x, y, r)
-                # 使用recognize_piece_type识别棋子类型
-                piece_type = self.recognize_piece_type(piece_img)
-                if piece_type is None:
-                    logger.warning(f"无法识别棋子: {piece_img}")
-                    continue
-                if piece_type == 'k':  # 如果是黑将
-                    lower_palace_king = (j, i)
-                    break
-            if lower_palace_king:
-                break
-        # 根据黑将位置判断红黑方
-        # 如果上方九宫格有黑将，说明红方在下方
-        # 如果下方九宫格有黑将，说明红方在上方
-        if upper_palace_king:
-            is_red = True  # 红方在下方
-            # print(f"检测到黑将在上方九宫格，位置: {upper_palace_king}")
-        elif lower_palace_king:
-            is_red = False  # 红方在上方
-            # print(f"检测到黑将在下方九宫格，位置: {lower_palace_king}")
-        else:
-            is_red = False  # 设置默认值
-        return pieceArray, is_red
 
     def recognize_piece_type(self, piece_img):
         """

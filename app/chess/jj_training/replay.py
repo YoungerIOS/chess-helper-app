@@ -1,11 +1,11 @@
-"""读取 JJ v2 采集会话，并生成兼容现有识别器的 MSS 风格帧。"""
+"""读取 JJ 采集会话，并生成兼容现有识别器的 MSS 风格帧。"""
 
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List
 
 from PIL import Image
 
@@ -22,7 +22,7 @@ class ReplayFrame:
     path: str
 
 
-class JJV2ReplayDataset:
+class JJReplayDataset:
     """对一个采集会话进行确定性、按时间排序的离线回放。"""
 
     def __init__(self, session_dir: str):
@@ -73,4 +73,3 @@ class JJV2ReplayDataset:
                 bgra=bgra,
                 path=image_path,
             )
-

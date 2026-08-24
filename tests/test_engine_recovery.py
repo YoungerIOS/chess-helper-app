@@ -32,6 +32,14 @@ class FakeEngine:
         self.stop_count += 1
 
 
+class FakeRecognizer:
+    def __init__(self):
+        self.commits = []
+
+    def commit_tracking_state(self, *args):
+        self.commits.append(args)
+
+
 class FakeContext:
     def __init__(self, checker):
         self.checker = checker
@@ -65,6 +73,7 @@ class EngineRecoveryTests(unittest.TestCase):
         self.process.context = self.context
         self.process.history = self.history
         self.process.engine = self.engine
+        self.process.recognizer = FakeRecognizer()
         self.state = BoardAnalysisState(
             board_array=self.board,
             board_status=BoardStatus(is_opponent_step=True),
@@ -173,7 +182,7 @@ class EngineRecoveryTests(unittest.TestCase):
         self.assertEqual(("movetime", "5000"), calls[0][1]["search_override"])
         self.assertEqual(1, calls[0][1]["engine_retry"])
 
-    def test_confirmed_own_move_invalidates_and_clears_old_recommendation(self):
+    def test_confirmed_own_move_invalidates_previous_analysis(self):
         state = BoardAnalysisState(
             board_array=self.board,
             board_status=BoardStatus(
@@ -223,6 +232,32 @@ class EngineRecoveryTests(unittest.TestCase):
         self.assertTrue(any(
             message.type == MessageType.RETRY_CAPTURE for message in published
         ))
+
+    def test_force_sync_updates_recognizer_trusted_baseline(self):
+        self.checker.consecutive_drops = 2
+        hashes = [["0"] * 9 for _ in range(10)]
+        state = BoardAnalysisState(
+            board_array=self.board,
+            grid_hashes=hashes,
+            board_status=BoardStatus(
+                is_illegal_change=True,
+                message="persistent class drift",
+            ),
+        )
+        calls = []
+        self.process._get_engine_move = (
+            lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+
+        with patch.object(message_bus, "publish"):
+            self.process._handle_illegal_board(state)
+
+        self.assertEqual(1, len(self.process.recognizer.commits))
+        committed = self.process.recognizer.commits[0]
+        self.assertEqual(self.board, committed[0])
+        self.assertEqual(hashes, committed[1])
+        self.assertEqual("red", committed[3])
+        self.assertEqual(1, len(calls))
 
 
 if __name__ == "__main__":

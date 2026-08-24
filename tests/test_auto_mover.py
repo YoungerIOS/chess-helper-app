@@ -29,8 +29,14 @@ class FakeChecker:
     def __init__(self, is_red=False):
         self.is_red = is_red
         self.in_settlement_screen = False
+        self.settlement_visual_confirmations = 0
         self.last_board_array_for_engine = [["-"] * 9 for _ in range(10)]
         self.last_board = [["-"] * 9 for _ in range(10)]
+
+    def confirm_settlement_visual(self):
+        self.settlement_visual_confirmations += 1
+        self.in_settlement_screen = True
+        return True
 
 
 class FakeContext:
@@ -489,6 +495,7 @@ class AutoMoverTests(unittest.TestCase):
         controller._run_button_scan()
 
         self.assertEqual([(630, 454)], clicks)
+        self.assertEqual(1, context.checker.settlement_visual_confirmations)
         self.assertTrue(controller._reward_popup_seen)
         self.assertFalse(controller._rematch_button_seen)
 

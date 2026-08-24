@@ -7,7 +7,7 @@ from .baseline import evaluate_baseline
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="评估新版 JJ 样本可学习性")
+    parser = argparse.ArgumentParser(description="评估JJ 样本可学习性")
     parser.add_argument("dataset_dir")
     parser.add_argument("--output-dir")
     parser.add_argument("--holdout-game", type=int)
