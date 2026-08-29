@@ -49,7 +49,7 @@
 
 ### 自行编译
 -   若有兴趣和技术能力，可以参考Pikafish开源引擎文档，自行编译Windows平台的引擎文件：https://github.com/official-pikafish/Pikafish
--   将编译好的引擎文件中的src目录放入本项目`chess-helper-app/app/Pikafish`目录下
+-   将编译好的引擎可执行文件`pikafish`（Windows为`pikafish.exe`）和权重文件`pikafish.nnue`放入本项目`app/Pikafish`目录下，程序启动时会自动创建该文件夹并优先从这里查找引擎；也可按`app/Pikafish/src/`的目录结构放置，程序会自动复制到引擎文件夹
 -   下载本项目，安装依赖，执行`pip install -r requirements.txt`
 -   运行`python app/main.py`即可使用
 -   如有需要，可以使用`pyinstaller ChessHelper.spec --noconfirm`打包客户端

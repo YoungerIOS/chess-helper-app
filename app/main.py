@@ -19,11 +19,9 @@ def _enable_windows_dpi_awareness():
             pass
 
 
-# This must happen before importing Qt or creating an MSS capture instance.
+# 这必须在导入Qt或创建MSS捕获实例之前进行。
 _enable_windows_dpi_awareness()
 
-from PySide6.QtCore import QLoggingCategory
-from PySide6.QtWidgets import QApplication, QMessageBox
 
 # Ensure bundled app can import packages
 if getattr(sys, "frozen", False):
@@ -42,47 +40,55 @@ else:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+
+from PySide6.QtWidgets import QApplication, QMessageBox
+
 from app.chess.context import logger
 from app.ui.main_window import MainWindow
 
 # 禁用ICC相关的警告
-QLoggingCategory.setFilterRules("qt.gui.icc.warning=false")
+# QLoggingCategory.setFilterRules("qt.gui.icc.warning=false")
 
 
 def _ensure_engine_files():
-    """静默确保引擎文件存在于用户数据目录中"""
+    """静默确保引擎文件存在于项目引擎文件夹中"""
     try:
         import shutil
 
-        from app.tools.utils import app_data_path, resource_path
+        from app.tools.utils import engine_path, get_engine_dir, resource_path
 
-        # 检查用户数据目录中的引擎文件
-        user_engine_path = app_data_path("Pikafish/pikafish")
-        user_nnue_path = app_data_path("Pikafish/pikafish.nnue")
+        engine_dir = get_engine_dir()
+        target_engine_path = engine_path("pikafish")
+        target_nnue_path = engine_path("pikafish.nnue")
 
-        # 如果引擎文件不存在，尝试从打包资源复制
-        if not os.path.exists(user_engine_path):
-            src_engine = resource_path("Pikafish", "src", "pikafish")
-            if os.path.exists(src_engine):
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(user_engine_path), exist_ok=True)
-                # 复制引擎文件
-                shutil.copy2(src_engine, user_engine_path)
-                logger.info("引擎文件已静默复制到用户数据目录")
+        # 如果引擎文件不存在，尝试从打包资源复制；源和目标是同一文件时跳过
+        if not os.path.exists(target_engine_path):
+            for src_engine in (
+                resource_path("Pikafish", "src", "pikafish"),
+                resource_path("Pikafish", "pikafish"),
+            ):
+                if os.path.exists(src_engine) and os.path.abspath(
+                    src_engine
+                ) != os.path.abspath(target_engine_path):
+                    shutil.copy2(src_engine, target_engine_path)
+                    logger.info(f"引擎文件已静默复制到 {engine_dir}")
+                    break
 
-            # 每次启动都确保有执行权限
-            if os.path.exists(user_engine_path):
-                os.chmod(user_engine_path, 0o755)
+            # 确保有执行权限
+            if os.path.exists(target_engine_path):
+                os.chmod(target_engine_path, 0o755)
 
         # 如果NNUE文件不存在，尝试从打包资源复制
-        if not os.path.exists(user_nnue_path):
-            src_nnue = resource_path("Pikafish", "src", "pikafish.nnue")
-            if os.path.exists(src_nnue):
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(user_nnue_path), exist_ok=True)
-                # 复制NNUE文件
-                shutil.copy2(src_nnue, user_nnue_path)
-                logger.info("NNUE文件已静默复制到用户数据目录")
+        if not os.path.exists(target_nnue_path):
+            for src_nnue in (
+                resource_path("Pikafish", "src", "pikafish.nnue"),
+                resource_path("Pikafish", "pikafish.nnue"),
+            ):
+                if os.path.exists(src_nnue) and os.path.abspath(
+                    src_nnue
+                ) != os.path.abspath(target_nnue_path):
+                    shutil.copy2(src_nnue, target_nnue_path)
+                    logger.info(f"NNUE文件已静默复制到 {engine_dir}")
 
     except Exception as e:  # noqa: BLE001
         # 静默处理错误，不影响应用启动

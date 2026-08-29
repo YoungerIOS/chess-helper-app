@@ -155,6 +155,23 @@ def app_data_path(filename):
     return full_path
 
 
+def get_engine_dir():
+    """获取引擎文件夹路径，目录不存在时自动创建。
+
+    开发环境使用 app 目录下的 Pikafish/ 文件夹；打包环境没有可写的
+    资源目录，沿用用户数据目录中的 Pikafish/ 文件夹。
+    """
+    if getattr(sys, "frozen", False):
+        engine_dir = os.path.join(get_app_data_dir(), "Pikafish")
+    else:
+        engine_dir = resource_path("Pikafish")
+    os.makedirs(engine_dir, exist_ok=True)
+    return engine_dir
+
+def engine_path(*path_parts):
+    """获取引擎文件夹内文件的完整路径"""
+    return os.path.join(get_engine_dir(), *path_parts)
+
 def user_config_path():
     """返回可写的用户配置路径，避免修改随应用分发的资源文件。"""
     return app_data_path("game_config.json")

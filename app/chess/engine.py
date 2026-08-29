@@ -60,7 +60,7 @@ class ChessEngine:
         
     def _get_default_engine_path(self) -> str:
         """获取默认引擎路径"""
-        from app.tools.utils import app_data_path
+        from app.tools.utils import app_data_path, engine_path
 
         # Windows release archives contain several CPU-specific executables.
         # Prefer the fastest broadly compatible builds and never auto-select
@@ -72,19 +72,27 @@ class ChessEngine:
                 "pikafish-avx2.exe",
                 "pikafish-sse41-popcnt.exe",
             )
-            candidates = [app_data_path(f"Pikafish/{name}") for name in names]
+            candidates = [engine_path(name) for name in names]
+            # 兼容旧版本复制到用户数据目录的引擎文件
+            candidates.extend(app_data_path(f"Pikafish/{name}") for name in names)
             candidates.extend(resource_path("Pikafish", "src", name) for name in names)
             for candidate in candidates:
                 if os.path.isfile(candidate):
                     return candidate
             return candidates[0]
 
-        # macOS/Linux legacy layout.
-        user_engine_path = app_data_path("Pikafish/pikafish")
-        if os.path.isfile(user_engine_path) and os.access(user_engine_path, os.X_OK):
-            return user_engine_path
-        fallback_path = resource_path("Pikafish", "src", "pikafish")
-        return fallback_path if os.path.isfile(fallback_path) else user_engine_path
+        # macOS/Linux。pikafish-apple-silicon 是官方发布的 macOS 二进制名。
+        candidates = [
+            engine_path("pikafish"),
+            engine_path("pikafish-apple-silicon"),
+            app_data_path("Pikafish/pikafish"),
+            resource_path("Pikafish", "src", "pikafish"),
+            resource_path("Pikafish", "pikafish-apple-silicon"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return candidates[0]
 
     def _describe_process_failure(self) -> str:
         if self.process is None:

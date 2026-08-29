@@ -20,6 +20,7 @@ class WindowsEngineDiscoveryTests(unittest.TestCase):
 
             with (
                 patch("app.chess.engine.sys.platform", "win32"),
+                patch("app.tools.utils.engine_path", side_effect=app_path),
                 patch("app.tools.utils.app_data_path", side_effect=app_path),
                 patch("app.chess.engine.resource_path", return_value=os.path.join(directory, "missing")),
             ):
