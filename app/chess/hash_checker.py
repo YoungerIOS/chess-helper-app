@@ -3,6 +3,10 @@ import imagehash
 import numpy as np
 import cv2
 from collections import deque
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 # 说明：
 # 该模块提供一个基于帧哈希波动的"倒计时边框"近似检测方案。
@@ -78,13 +82,13 @@ class StableFrameDetector:
                 diff = (self.last_log_hash - curr_hash)
                 # print(f"{log_prefix} board hash diff: {diff}")
             else:
-                print(f"{log_prefix} first board frame (no previous hash)")
+                logger.debug(f"{log_prefix} 首张棋盘帧（无上一帧哈希）")
             self.last_log_hash = curr_hash
 
             stable_frame = self.update(pil_img, force_output=force_output)
             return stable_frame, curr_hash
         except Exception as e:
-            print(f"{log_prefix} hash diff calc failed: {e}")
+            logger.exception(f"{log_prefix} 哈希差异计算失败")
             return None, None
 
 
@@ -97,3 +101,12 @@ _stable_detector = StableFrameDetector(hash_size=20, stable_count=2, diff_thresh
 def filter_stable_frame(board_screenshot, log_prefix="[board]", force_output=False):
     """便捷函数，使用全局稳定帧检测器实例，处理棋盘截图"""
     return _stable_detector.process_screenshot(board_screenshot, log_prefix, force_output)
+
+
+def has_pending_visual_change(curr_hash) -> bool:
+    """当前画面是否明显偏离最后一次已确认稳定画面。"""
+    if curr_hash is None or _stable_detector.last_confirmed_hash is None:
+        return True
+    return (
+        _stable_detector.last_confirmed_hash - curr_hash
+    ) > _stable_detector.diff_threshold

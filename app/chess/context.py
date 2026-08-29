@@ -6,6 +6,7 @@ from typing import Dict, Optional, List
 from datetime import datetime
 from threading import Lock
 from app.tools import utils
+from app.tools.config_store import load_config as load_stored_config, write_json_atomic
 from app.chess.history import MoveHistory 
 
 def setup_logging():
@@ -25,8 +26,8 @@ def setup_logging():
         "log_to_console": True,
         "max_log_size_mb": 10,
         "backup_count": 5,
-        "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        "date_format": "%Y-%m-%d %H:%M:%S"
+        "log_format": "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s - %(message)s",
+        "date_format": "%H:%M:%S"
     }
     
     try:
@@ -44,6 +45,7 @@ def setup_logging():
     # 创建chess模块的日志记录器
     chess_logger = logging.getLogger('chess')
     chess_logger.setLevel(getattr(logging, log_config["log_level"].upper(), logging.INFO))
+    chess_logger.propagate = False
     
     # 清除现有处理器
     chess_logger.handlers.clear()
@@ -75,6 +77,15 @@ def setup_logging():
 # 初始化日志系统
 logger = setup_logging()
 
+DEFAULT_ENGINE_PARAMS = {
+    "movetime": "2000",
+    "depth": "25",
+    "goParam": "movetime",
+    "threads": "8",
+    "hash": "256",
+    "settings_version": "2",
+}
+
 @dataclass
 class Platform:
     """平台配置类，包含平台相关的所有信息"""
@@ -83,11 +94,6 @@ class Platform:
     regions: Dict  # 区域配置
     _piece_recognizer: Optional[object] = None  # 棋子识别器
 
-    
-    def __post_init__(self):
-        """初始化时设置动画等待时长"""
-        pass
-    
     @property
     def piece_recognizer(self) -> object:
         """获取棋子识别器"""
@@ -118,8 +124,15 @@ class ChessContext:
     _manual_coords: Optional[tuple] = None  # 手动定位坐标 (x, y, width, height)
     base_fen: Optional[str] = None # 用于历史中断时的锚点FEN (持久化存储)
     analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
+    _analysis_token_lock: Lock = field(default_factory=Lock)
     discard_before_timestamp: float = 0.0  # RETRY时设置，过滤在此时间之前截图的帧
     _theme: str = "light"  # 当前主题
+    _auto_move_enabled: bool = False  # 自动走子默认关闭
+    _capture_depth_enabled: bool = False  # 我方被吃子时动态增加搜索深度
+    _jj_training_recording_enabled: bool = False
+    _jj_training_record_unstable: bool = True
+    _jj_training_dataset_dir: str = ""
+    _jj_training_recorder: Optional[object] = None
     
     
     def __post_init__(self):
@@ -143,26 +156,47 @@ class ChessContext:
         """从配置文件加载所有设置"""
         try:
             logger.info("开始加载配置文件...")
-            with open(utils.resource_path("json", "game_config.json"), "r") as f:
-                config = json.load(f)
+            default_path = utils.resource_path("json", "game_config.json")
+            user_path = utils.user_config_path()
+            config = load_stored_config(default_path, user_path)
                 
-            # 初始化平台
-            self._platforms = {}
+            # 更新平台配置时复用已经加载的识别模型。每次开始辅助都会重新
+            # 读取配置，但ONNX Runtime会为每个新Session创建原生线程池和
+            # 内存池；反复丢弃并重建Session会让进程峰值内存持续抬升。
+            existing_platforms = self._platforms
+            updated_platforms = {}
             for platform_name, game_config in config.items():
                 if platform_name in ['TT', 'JJ']:
-                    self._platforms[platform_name] = Platform(
-                        name=platform_name,
-                        board_coords=game_config['board_coords'],
-                        regions=game_config['regions']
-                    )
+                    platform = existing_platforms.get(platform_name)
+                    if platform is None:
+                        platform = Platform(
+                            name=platform_name,
+                            board_coords=game_config['board_coords'],
+                            regions=game_config['regions']
+                        )
+                    else:
+                        platform.board_coords = game_config['board_coords']
+                        platform.regions = game_config['regions']
+                    updated_platforms[platform_name] = platform
+            self._platforms = updated_platforms
             
             # 加载引擎参数
             with self._engine_params_lock:
-                self._engine_params = config.get('engine_params', {
-                    "movetime": "3000",
-                    "depth": "20",
-                    "goParam": "depth"
-                }).copy()
+                # 合并默认值，让旧配置自动获得新增的 threads/hash 参数。
+                saved_engine_params = config.get('engine_params', {})
+                if saved_engine_params.get("settings_version") != "2":
+                    # v2新增线程调节控件，并采用本机实测后的平衡配置。
+                    saved_engine_params = {
+                        **saved_engine_params,
+                        "movetime": "2000",
+                        "goParam": "movetime",
+                        "threads": "8",
+                        "settings_version": "2",
+                    }
+                self._engine_params = {
+                    **DEFAULT_ENGINE_PARAMS,
+                    **saved_engine_params
+                }
             
             # 设置当前平台
             self.platform = config.get('platform', 'TT')
@@ -171,6 +205,39 @@ class ChessContext:
             # 设置分析模式
             self._analysis_mode = config.get('analysis_mode', 'timer')
             logger.info(f"分析模式设置为: {self._analysis_mode}")
+
+            self._auto_move_enabled = bool(config.get('auto_move_enabled', False))
+            logger.info(f"自动走子设置为: {self._auto_move_enabled}")
+            self._capture_depth_enabled = bool(config.get('capture_depth_enabled', False))
+            logger.info(f"被吃子加深设置为: {self._capture_depth_enabled}")
+            # 生产运行时只使用 app/models/jj_piece_model.onnx。这里仅保留
+            # 可选的训练数据采集配置；旧 jj_v2 键只用于一次性配置迁移。
+            training_config = (
+                config.get('jj_v2')
+                or config.get('jj_training')
+                or {}
+            )
+            recording_enabled = bool(training_config.get('recording_enabled', False))
+            recording_changed = (
+                recording_enabled != getattr(self, '_jj_training_recording_enabled', False)
+                or bool(training_config.get('record_unstable', True))
+                != getattr(self, '_jj_training_record_unstable', True)
+                or str(training_config.get('dataset_dir', '') or '')
+                != getattr(self, '_jj_training_dataset_dir', '')
+            )
+            if recording_changed:
+                self.close_jj_training_recorder()
+            self._jj_training_recording_enabled = recording_enabled
+            self._jj_training_record_unstable = bool(
+                training_config.get('record_unstable', True)
+            )
+            self._jj_training_dataset_dir = str(
+                training_config.get('dataset_dir', '') or ''
+            )
+            logger.info(
+                f"JJ训练数据采集: enabled={self._jj_training_recording_enabled}, "
+                f"record_unstable={self._jj_training_record_unstable}"
+            )
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
@@ -187,7 +254,7 @@ class ChessContext:
 
             logger.info("模型初始化完成")
             
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             logger.error(f"Error loading config: {e}")
             # 使用默认值初始化
             self._platforms = {
@@ -203,13 +270,15 @@ class ChessContext:
                 )
             }
             with self._engine_params_lock:
-                self._engine_params = {
-                    "movetime": "3000",
-                    "depth": "20",
-                    "goParam": "depth"
-                }.copy()
+                self._engine_params = DEFAULT_ENGINE_PARAMS.copy()
             self.platform = "TT"
             self._analysis_mode = "timer"
+            self._auto_move_enabled = False
+            self._capture_depth_enabled = False
+            self._jj_training_recording_enabled = False
+            self._jj_training_record_unstable = True
+            self._jj_training_dataset_dir = ""
+            self.close_jj_training_recorder()
             
             # 预加载默认平台的模型
             _ = self.piece_recognizer
@@ -231,6 +300,13 @@ class ChessContext:
             # 添加其他配置
             config['platform'] = self.platform
             config['analysis_mode'] = self._analysis_mode
+            config['auto_move_enabled'] = self._auto_move_enabled
+            config['capture_depth_enabled'] = self._capture_depth_enabled
+            config['jj_training'] = {
+                'recording_enabled': self._jj_training_recording_enabled,
+                'record_unstable': self._jj_training_record_unstable,
+                'dataset_dir': self._jj_training_dataset_dir,
+            }
     
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
@@ -245,30 +321,44 @@ class ChessContext:
             config = utils.convert_to_builtin_type(config)
             
             # 使用原子写入避免文件损坏
-            path = utils.resource_path("json", "game_config.json")
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(config, f, indent=4)
-            os.replace(tmp_path, path)  # 原子覆盖
+            path = utils.user_config_path()
+            write_json_atomic(path, config)
             logger.info("配置文件保存成功")
         except Exception as e:
             logger.error(f"Error saving config: {e}")
     
-    def set_platform(self, platform_name: str) -> None:
+    def set_platform(self, platform_name: str) -> bool:
         """设置当前平台"""
         if platform_name not in self._platforms:
             error_msg = f"未知的平台: {platform_name}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
-        # 获取目标平台
-        platform = self._platforms[platform_name]
+        if platform_name == self.platform:
+            return False
+
+        previous_platform = self.platform
+        auto_move_was_enabled = bool(self._auto_move_enabled)
         
-        # 更新当前平台信息
+        # 平台变化意味着窗口、坐标和视觉历史全部失效。先撤销自动点击
+        # 授权和分析令牌，再切换平台；即使两个平台的门控都已配置，也
+        # 必须由用户在新平台重新显式开启。
+        self._auto_move_enabled = False
+        self.invalidate_analysis()
         self.platform = platform_name
+        self.reset_checker()
+        self.reset_recognizer()
+        if self.history is not None:
+            self.history.clear()
+        self.base_fen = None
         
         # 保存配置
         self.save_config()
+        logger.warning(
+            f"平台切换已撤销旧分析和自动走子授权: "
+            f"{previous_platform} -> {platform_name}"
+        )
+        return auto_move_was_enabled
     
     def get_platform(self, platform_name: str) -> Platform:
         """获取指定平台"""
@@ -311,6 +401,92 @@ class ChessContext:
     def analysis_mode(self, mode: str):
         self._analysis_mode = mode
         self.save_config()  # 保存配置
+
+    @property
+    def auto_move_enabled(self) -> bool:
+        return self._auto_move_enabled
+
+    @auto_move_enabled.setter
+    def auto_move_enabled(self, enabled: bool) -> None:
+        self._auto_move_enabled = bool(enabled)
+        self.save_config()
+
+    @property
+    def capture_depth_enabled(self) -> bool:
+        return self._capture_depth_enabled
+
+    @capture_depth_enabled.setter
+    def capture_depth_enabled(self, enabled: bool) -> None:
+        self._capture_depth_enabled = bool(enabled)
+        self.save_config()
+
+    @property
+    def jj_training_recording_enabled(self) -> bool:
+        return self._jj_training_recording_enabled
+
+    @jj_training_recording_enabled.setter
+    def jj_training_recording_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if not enabled:
+            self.close_jj_training_recorder(timeout=1.0)
+        self._jj_training_recording_enabled = enabled
+        self.save_config()
+
+    def get_jj_training_recorder(self):
+        """按需创建 JJ 训练数据记录器；禁用时不引入磁盘写入。"""
+        if (
+            self.platform != 'JJ'
+            or not getattr(self, '_jj_training_recording_enabled', False)
+        ):
+            return None
+        recorder = getattr(self, '_jj_training_recorder', None)
+        if recorder is None:
+            from app.chess.jj_training.recorder import JJDatasetRecorder
+
+            dataset_dir = self._jj_training_dataset_dir or utils.app_data_path(
+                'jj_training_datasets'
+            )
+            recorder = JJDatasetRecorder(
+                dataset_dir,
+                include_unstable=self._jj_training_record_unstable,
+                grid_coords=self.get_platform('JJ').board_coords,
+            )
+            self._jj_training_recorder = recorder
+            logger.info(f"JJ训练数据会话已创建: {recorder.session_dir}")
+        return recorder
+
+    def close_jj_training_recorder(self, timeout: float = 5.0) -> None:
+        recorder = getattr(self, '_jj_training_recorder', None)
+        self._jj_training_recorder = None
+        if recorder is not None:
+            recorder.close(timeout=timeout)
+            logger.info(
+                f"JJ训练数据会话已关闭: {recorder.session_dir}, "
+                f"dropped={recorder.dropped_samples}, "
+                f"failed={getattr(recorder, 'failed_samples', 0)}"
+            )
+
+    def next_analysis_token(self) -> int:
+        with self._analysis_token_lock:
+            self.analysis_token += 1
+            return self.analysis_token
+
+    def invalidate_analysis(self) -> int:
+        return self.next_analysis_token()
+
+    def is_analysis_token_current(self, token: int) -> bool:
+        with self._analysis_token_lock:
+            return token == self.analysis_token
+
+    def stop_auto_move_for_safety(self, reason: str) -> bool:
+        """在视觉连续性失效时撤销自动点击授权。"""
+        if not getattr(self, '_auto_move_enabled', False):
+            return False
+        self._auto_move_enabled = False
+        self.invalidate_analysis()
+        self.save_config()
+        logger.warning(f"自动走子安全熔断: {reason}")
+        return True
     
 
     
@@ -398,11 +574,11 @@ class ChessContext:
         with self._engine_lock:
             self.engine = engine
 
-    def quit_engine(self) -> None:
+    def quit_engine(self, fast: bool = False) -> None:
         """线程安全地完全退出引擎"""
         with self._engine_lock:
             if self.engine:
-                self.engine.quit()
+                self.engine.quit(fast=fast)
                 self.engine = None
     
     @property
@@ -428,4 +604,4 @@ def get_context():
     return _context_instance
 
 # 为了向后兼容，保留context变量
-context = get_context() 
+context = get_context()

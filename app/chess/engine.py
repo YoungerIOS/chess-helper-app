@@ -3,8 +3,9 @@ import os
 import sys
 import subprocess
 import threading
+import glob
 from typing import Optional, Tuple, List, Callable
-from app.chess.message import Message, MessageType, MessageContent
+from app.chess.message import Message, MessageType
 from app.chess.context import context
 from app.tools.utils import resource_path
 from app.tools.log_config import get_logger
@@ -14,51 +15,115 @@ logger = get_logger(__name__)
 class ChessEngine:
     """中国象棋引擎类，封装了与Pikafish引擎的交互"""
     
-    def __init__(self, engine_path: str = None, threads: int = 4, hash_size: int = 256):
+    def __init__(
+        self,
+        engine_path: Optional[str] = None,
+        threads: Optional[int] = None,
+        hash_size: Optional[int] = None,
+    ):
         """
         初始化象棋引擎
         
         Args:
             engine_path: 引擎可执行文件路径，如果为None则使用默认路径
-            threads: 引擎使用的线程数
-            hash_size: 引擎哈希表大小(MB)
+            threads: 引擎使用的线程数；为None时从配置读取
+            hash_size: 引擎哈希表大小(MB)；为None时从配置读取
         """
+        engine_params = context.get_engine_params()
         self.engine_path = engine_path or self._get_default_engine_path()
-        self.threads = threads
-        self.hash_size = hash_size
+        self.threads = self._parse_option(
+            threads if threads is not None else engine_params.get('threads'),
+            default=8,
+            minimum=1,
+            maximum=128,
+        )
+        self.hash_size = self._parse_option(
+            hash_size if hash_size is not None else engine_params.get('hash'),
+            default=256,
+            minimum=16,
+            maximum=32768,
+        )
         self.process: Optional[subprocess.Popen] = None
+        self.last_error = ""
         self.lock = threading.Lock()
         self.analysis_lock = threading.Lock()
         self.is_initialized = False
+
+    @staticmethod
+    def _parse_option(value, default: int, minimum: int, maximum: int) -> int:
+        """解析并限制引擎整数参数，避免损坏的配置导致引擎启动失败。"""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
         
     def _get_default_engine_path(self) -> str:
         """获取默认引擎路径"""
-        from app.tools.utils import app_data_path
-        
-        # 优先使用用户数据目录中的引擎文件
-        user_engine_path = app_data_path("Pikafish/pikafish")
-        if os.path.exists(user_engine_path) and os.access(user_engine_path, os.X_OK):
-            return user_engine_path
-        
-        # 备用：使用打包后的资源
-        fallback_path = resource_path("Pikafish", "src", "pikafish")
-        if os.path.exists(fallback_path):
-            return fallback_path
-        
-        # 如果都不存在，返回用户数据目录路径（用于首次复制）
-        return user_engine_path
+        from app.tools.utils import app_data_path, engine_path
+
+        # Windows release archives contain several CPU-specific executables.
+        # Prefer the fastest broadly compatible builds and never auto-select
+        # AVX-512/VNNI builds, which crash with 0xC000001D on older CPUs.
+        if sys.platform == "win32":
+            names = (
+                "pikafish.exe",
+                "pikafish-bmi2.exe",
+                "pikafish-avx2.exe",
+                "pikafish-sse41-popcnt.exe",
+            )
+            candidates = [engine_path(name) for name in names]
+            # 兼容旧版本复制到用户数据目录的引擎文件
+            candidates.extend(app_data_path(f"Pikafish/{name}") for name in names)
+            candidates.extend(resource_path("Pikafish", "src", name) for name in names)
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    return candidate
+            return candidates[0]
+
+        # macOS/Linux。pikafish-apple-silicon 是官方发布的 macOS 二进制名。
+        candidates = [
+            engine_path("pikafish"),
+            engine_path("pikafish-apple-silicon"),
+            app_data_path("Pikafish/pikafish"),
+            resource_path("Pikafish", "src", "pikafish"),
+            resource_path("Pikafish", "pikafish-apple-silicon"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return candidates[0]
+
+    def _describe_process_failure(self) -> str:
+        if self.process is None:
+            return "引擎进程未创建"
+        return_code = self.process.poll()
+        if return_code is None:
+            return "引擎未返回 UCI 就绪响应"
+        if sys.platform == "win32":
+            unsigned_code = return_code & 0xFFFFFFFF
+            if unsigned_code == 0xC000001D:
+                return "引擎包含当前 CPU 不支持的指令（0xC000001D），请改用 BMI2、AVX2 或 SSE4.1 版本"
+            return f"引擎进程已退出（0x{unsigned_code:08X}）"
+        return f"引擎进程已退出（code={return_code}）"
     
     def start(self) -> bool:
         """启动引擎"""
         with self.lock:
             try:
+                self.last_error = ""
                 if self.process is not None and self.process.poll() is None:
-                    print("引擎已经在运行")
+                    logger.info("引擎已经在运行")
                     return True
                 
                 # 检查引擎文件是否存在
                 if not os.path.exists(self.engine_path):
-                    logger.error(f"引擎文件不存在: {self.engine_path}")
+                    engine_dir = os.path.dirname(self.engine_path)
+                    found = ", ".join(os.path.basename(path) for path in glob.glob(os.path.join(engine_dir, "pikafish*.exe")))
+                    self.last_error = f"未找到兼容的引擎: {self.engine_path}"
+                    if found:
+                        self.last_error += f"；目录中现有: {found}"
+                    logger.error(self.last_error)
                     return False
                 
                 # 确保可执行权限
@@ -68,12 +133,19 @@ class ChessEngine:
                 except Exception:
                     pass
 
+                popen_kwargs = {}
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
                 self.process = subprocess.Popen(
                     self.engine_path,
+                    cwd=os.path.dirname(os.path.abspath(self.engine_path)),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    **popen_kwargs,
                 )
                 
                 self._initialize_engine()
@@ -82,45 +154,96 @@ class ChessEngine:
                 return True
                 
             except Exception as e:
-                logger.error(f"启动引擎时出错：{e}")
-                self.process = None
+                detail = self._describe_process_failure()
+                self.last_error = f"{e}；{detail}" if str(e) else detail
+                logger.error(f"启动引擎时出错：{self.last_error}")
+                if self.process is not None and self.process.poll() is None:
+                    self.process.kill()
+                    self.process.wait(timeout=1)
                 self.is_initialized = False
                 return False
     
     def _initialize_engine(self):
         """初始化引擎设置"""
         self._send_command('uci')
-        self._wait_for_response('uciok', timeout=1)
+        uci_lines = self._wait_for_response('uciok', timeout=3)
+        if not any('uciok' in line for line in uci_lines):
+            raise RuntimeError("引擎没有完成 UCI 握手")
+
+        nnue_path = os.path.join(os.path.dirname(os.path.abspath(self.engine_path)), "pikafish.nnue")
+        if not os.path.isfile(nnue_path):
+            raise FileNotFoundError(f"NNUE 文件不存在: {nnue_path}")
+        # The engine process also runs in this directory; using the short name
+        # avoids UCI parsing issues with spaces/non-ASCII path components.
+        self._send_command('setoption name EvalFile value pikafish.nnue')
         
         self._send_command(f'setoption name Threads value {self.threads}')
         self._send_command(f'setoption name Hash value {self.hash_size}')
+        logger.info(
+            f"Pikafish配置: Threads={self.threads}, Hash={self.hash_size}MB"
+        )
         time.sleep(0.2)
         
         self._send_command('isready')
-        self._wait_for_response('readyok', timeout=1)
+        ready_lines = self._wait_for_response('readyok', timeout=10)
+        if not any('readyok' in line for line in ready_lines):
+            raise RuntimeError("引擎未能加载 NNUE 或未返回 readyok")
+
+    def set_threads(self, threads: int) -> bool:
+        """安全地更新线程数；引擎未运行时只更新实例配置。"""
+        new_threads = self._parse_option(
+            threads,
+            default=self.threads,
+            minimum=1,
+            maximum=128,
+        )
+
+        # Pikafish不应在搜索过程中修改Threads。等待当前分析结束，同时
+        # 使用生命周期锁避免与start/quit并发操作进程。
+        with self.analysis_lock:
+            with self.lock:
+                self.threads = new_threads
+                if (
+                    not self.is_initialized
+                    or self.process is None
+                    or self.process.poll() is not None
+                ):
+                    return False
+
+                self._send_command(f'setoption name Threads value {self.threads}')
+                self._send_command('isready')
+                responses = self._wait_for_response('readyok', timeout=3)
+                applied = any('readyok' in line for line in responses)
+                if applied:
+                    logger.info(f"Pikafish线程数已更新: Threads={self.threads}")
+                return applied
     
-    def quit(self):
-        """停止引擎"""
+    def quit(self, fast=False):
+        """停止引擎；应用退出时使用较短的fast收尾时限。"""
         with self.lock:
             if self.process and self.process.poll() is None:
                 try:
-                    # 先尝试发送quit命令让引擎优雅退出
+                    self._send_command('stop')
                     self._send_command('quit')
-                    # 等待引擎进程自然结束
-                    self.process.wait(timeout=1)
+                    self.process.wait(timeout=0.25 if fast else 0.75)
                 except subprocess.TimeoutExpired:
-                    # 如果1秒内没结束，强制终止
                     self.process.terminate()
-                    self.process.wait(timeout=2)
-                except Exception:
-                    # 如果发送命令失败，直接终止进程
-                    self.process.terminate()
-                    self.process.wait(timeout=2)
-                finally:
-                    # 如果进程仍然存在，强制杀死
-                    if self.process and self.process.poll() is None:
+                    try:
+                        self.process.wait(timeout=0.25 if fast else 0.75)
+                    except subprocess.TimeoutExpired:
                         self.process.kill()
-                        self.process.wait(timeout=1)
+                        self.process.wait(timeout=0.25)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                finally:
+                    if self.process and self.process.poll() is None:
+                        try:
+                            self.process.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
                     self.process = None
                     self.is_initialized = False
                     logger.info("引擎已停止")
@@ -185,14 +308,93 @@ class ChessEngine:
                 cmd += f" moves {moves}"
         self._send_command(cmd)
 
-    def _go(self, param: str, value: str) -> Tuple[List[str], str, List[dict]]:
+    def _go(
+        self, search_limits: dict, timeout: float = 35,
+        info_callback: Optional[Callable] = None,
+    ) -> Tuple[List[str], str, List[dict]]:
         """
         发送go命令和读取结果
         """
-        self._send_command(f"go {param} {value}")
-        return self._read_output_with_timeout(35)
+        depth = search_limits['depth']
+        movetime = search_limits['movetime']
+        self._send_command(f"go depth {depth} movetime {movetime}")
+        return self._read_output_with_timeout(timeout, info_callback)
 
-    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1) -> Tuple[str, str, List[str]]:
+    @staticmethod
+    def parse_engine_info(output: str) -> dict:
+        """解析UCI info行，供界面实时展示局势和搜索算力。"""
+        if not output or not output.startswith('info '):
+            return {}
+        parts = output.split()
+        result = {}
+
+        def read_int(name):
+            try:
+                return int(parts[parts.index(name) + 1])
+            except (ValueError, IndexError, TypeError):
+                return None
+
+        for key in ('depth', 'seldepth', 'nodes', 'nps', 'time'):
+            value = read_int(key)
+            if value is not None:
+                result[key] = value
+
+        if 'score' in parts:
+            try:
+                score_index = parts.index('score')
+                score_type = parts[score_index + 1]
+                score_value = int(parts[score_index + 2])
+                if score_type in ('cp', 'mate'):
+                    result['score_type'] = score_type
+                    result['score'] = score_value
+            except (ValueError, IndexError, TypeError):
+                pass
+        return result
+
+    @staticmethod
+    def resolve_search_limits(engine_params, depth_bonus=0, search_override=None):
+        """同时解析深度和时间上限，任意条件先达到即结束搜索。"""
+        try:
+            base_depth = int(engine_params.get('depth', 20))
+            bonus = max(0, int(depth_bonus))
+        except (TypeError, ValueError):
+            base_depth, bonus = 20, 0
+        try:
+            movetime = int(engine_params.get('movetime', 10000))
+        except (TypeError, ValueError):
+            movetime = 10000
+
+        limits = {
+            'depth': str(min(200, max(1, base_depth + bonus))),
+            'movetime': str(min(600000, max(1, movetime))),
+        }
+        if search_override:
+            param, value = str(search_override[0]), str(search_override[1])
+            if param in limits:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    parsed = int(limits[param])
+                maximum = 200 if param == 'depth' else 600000
+                limits[param] = str(min(maximum, max(1, parsed)))
+        return limits
+
+    def get_search_timeout(self, depth_bonus=0, search_override=None):
+        """进程读取超时略大于引擎时间上限，仅用于异常兜底。"""
+        limits = self.resolve_search_limits(
+            context.get_engine_params(),
+            depth_bonus,
+            search_override,
+        )
+        try:
+            movetime_seconds = int(limits['movetime']) / 1000.0
+        except (TypeError, ValueError):
+            movetime_seconds = 10.0
+        minimum = 8.0 if search_override else 12.0
+        margin = 5.0 if search_override else 10.0
+        return min(620.0, max(minimum, movetime_seconds + margin))
+
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1, depth_bonus: int = 0, search_override=None) -> Tuple[str, str, List[str]]:
         """获取最佳走法
         Returns:
             (best_move, fen_string, pvs_list)
@@ -221,20 +423,27 @@ class ChessEngine:
             if fen:
                 fen_string = fen + ' ' + ('w' if side else 'b')
             engine_params = context.get_engine_params()
-            param = engine_params.get('goParam', 'depth')
-            value = engine_params.get(param, '20')
-            if not param or not value:
-                param = 'depth'
-                value = '20'
+            search_limits = self.resolve_search_limits(
+                engine_params,
+                depth_bonus,
+                search_override,
+            )
+            search_timeout = self.get_search_timeout(depth_bonus, search_override)
 
             if display_callback:
-                display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))
+                thinking_text = (
+                    f"引擎正在计算（深度≤{search_limits['depth']} / "
+                    f"时间≤{search_limits['movetime']}ms）..."
+                )
+                display_callback(Message(MessageType.STATUS, thinking_text))
 
             if is_newgame:
                 self.new_game()
 
             self._position(fen_string, use_startpos=use_startpos, moves=moves)
-            lines, best_move, pvs = self._go(param, value)
+            lines, best_move, pvs = self._go(
+                search_limits, search_timeout, display_callback
+            )
 
             # 恢复 MultiPV 为 1 (以免影响后续正常思考)
             if multipv > 1:
@@ -250,13 +459,13 @@ class ChessEngine:
                      best_move = None
                 else:
                     # 调试：打印原始 bestmove 响应
-                    print(f"Debug - Engine raw response: {best_move}")
+                    logger.debug(f"引擎原始响应: {best_move}")
                     start_index = best_move.find('bestmove') + len('bestmove') + 1
-                    best_move = best_move[start_index:start_index + 4]
+                    best_move = best_move[start_index:].split()[0][:4]
                     
                     # 检查是否为无效着法（如 "(none)" 或 "0000"）
                     if best_move.startswith('(') or best_move == '0000' or not best_move[0].isalpha():
-                        print(f"Debug - Engine returned invalid move: {best_move}")
+                        logger.warning(f"引擎返回无效着法: {best_move}")
                         best_move = ""  # 返回空，让调用者处理
             
             # 提取 PV 中的第一个着法
@@ -276,7 +485,10 @@ class ChessEngine:
     
 
 
-    def _read_output_with_timeout(self, timeout: float = 1.0) -> Tuple[List[str], str, List[dict]]:
+    def _read_output_with_timeout(
+        self, timeout: float = 1.0,
+        info_callback: Optional[Callable] = None,
+    ) -> Tuple[List[str], str, List[dict]]:
         """读取引擎输出，带超时控制
         Returns:
             lines: 所有输出行
@@ -288,11 +500,26 @@ class ChessEngine:
         pvs = {} # Key: multipv_id, Value: info_dict
         
         start_time = time.time()
+        last_info_emit = 0.0
         
         while time.time() - start_time < timeout:
             output = self.process.stdout.readline().strip()
             if output:
                 lines.append(output)
+                if output.startswith('info '):
+                    telemetry = self.parse_engine_info(output)
+                    now = time.monotonic()
+                    if (
+                        info_callback
+                        and telemetry.get('depth') is not None
+                        and now - last_info_emit >= 0.15
+                    ):
+                        info_callback(Message(
+                            MessageType.ENGINE_INFO,
+                            telemetry,
+                            **telemetry,
+                        ))
+                        last_info_emit = now
                 if output.startswith('info') and ' multipv ' in output and ' pv ' in output:
                     # 解析 info 行
                     try:
@@ -338,6 +565,3 @@ class ChessEngine:
     def __del__(self):
         """析构函数，确保资源被正确释放"""
         self.quit()
-
-
-

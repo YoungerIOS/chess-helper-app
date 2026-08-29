@@ -25,26 +25,7 @@
                 850
             ]
         },
-        "regions": {
-            "board": {
-                "left": 710.1,
-                "top": 191.9,
-                "width": 444.4,
-                "height": 494.8
-            },
-            "avatar_upper": {
-                "left": 591.6,
-                "top": 203.8,
-                "width": 79.0,
-                "height": 79.0
-            },
-            "avatar_lower": {
-                "left": 1192.0,
-                "top": 539.5,
-                "width": 79.0,
-                "height": 79.0
-            }
-        }
+        "regions": {}
     },
     "JJ": {
         "board_coords": {
@@ -72,34 +53,25 @@
                 818
             ]
         },
-        "regions": {
-            "board": {
-                "left": -925.2,
-                "top": 261.7,
-                "width": 408.9,
-                "height": 438.9
-            },
-            "avatar_upper": {
-                "left": -925.2,
-                "top": 119.5,
-                "width": 90.0,
-                "height": 90.0
-            },
-            "avatar_lower": {
-                "left": -598.0,
-                "top": 755.4,
-                "width": 90.0,
-                "height": 90.0
-            }
-        }
+        "regions": {}
     },
-    "platform": "TT",
+    "platform": "JJ",
     "analysis_mode": "continuous",
-    "board_index": 2,
-    "theme": "dark",
+    "auto_move_enabled": false,
+    "capture_depth_enabled": false,
+    "jj_training": {
+        "recording_enabled": false,
+        "record_unstable": true,
+        "dataset_dir": ""
+    },
+    "board_index": 0,
+    "theme": "light",
     "engine_params": {
-        "movetime": "3000",
-        "depth": "23",
-        "goParam": "depth"
+        "movetime": "10000",
+        "depth": "22",
+        "goParam": "depth",
+        "threads": "8",
+        "hash": "512",
+        "settings_version": "2"
     }
 }

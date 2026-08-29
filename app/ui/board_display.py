@@ -1,9 +1,8 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QStackedLayout
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPolygonF, QTransform, QPainterPath
-from PySide6.QtCore import Qt, QRect, QPointF, QTimer, QSize
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QTransform, QPainterPath
+from PySide6.QtCore import Qt, QPointF, QTimer
 from app.tools.utils import resource_path
 from app.chess.context import context
-import os
 import math
 
 class BoardCanvas(QLabel):
@@ -177,12 +176,11 @@ class BoardCanvas(QLabel):
         
         # 绘制棋子
         for piece_type, pos_x, pos_y in self.pieces:
+            piece_cx = inner_left + pos_x * cell_width
+            piece_cy = inner_top + pos_y * cell_height
             if piece_type in self.piece_images:
                 piece_img = self.piece_images[piece_type]
                 # 计算棋子中心（落点在交叉点）
-                piece_cx = inner_left + pos_x * cell_width
-                piece_cy = inner_top + pos_y * cell_height
-                
                 # 缩放棋子图片，使其略小于格子
                 scaled_piece = piece_img.scaled(
                     int(round(cell_width * 0.98)),  # 棋子宽度为格子的90% (原98%)

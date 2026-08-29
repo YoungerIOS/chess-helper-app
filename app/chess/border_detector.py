@@ -1,7 +1,10 @@
 import cv2
 import numpy as np
-from typing import Tuple, List, Optional
-import time
+from typing import Tuple, Optional
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 class BorderDetector:
     """边框检测器类，支持TT平台的矩形边框和JJ平台的圆弧边框检测"""
@@ -152,7 +155,7 @@ class BorderDetector:
             # 计算边框环区域面积
             border_area = np.sum(mask == 255)
             if border_area == 0:
-                print("TT平台矩形边框环 - 边框环面积为0，返回False")
+                logger.debug("TT矩形边框环面积为0")
                 return False
             
             # 转换为HSV颜色空间
@@ -225,8 +228,8 @@ class BorderDetector:
             # print(f"TT平台矩形边框环 - 绿色长度占比: {green_ratio:.3f} ≤ 0.35, 黄色长度占比: {yellow_ratio:.3f} ≤ 0.12, 未检测到边框")
             return False
             
-        except Exception as e:
-            print(f"矩形边框颜色填充比例检测出错: {e}")
+        except Exception:
+            logger.exception("矩形边框颜色填充比例检测失败")
             return False
     
     def _is_color_enough_in_arc_border(self, screenshot, border_data, avatar) -> bool:
@@ -251,7 +254,7 @@ class BorderDetector:
             
             border_area = np.sum(mask == 255)
             if border_area == 0:
-                print("JJ平台圆弧边框环 - 边框环面积为0，返回False")
+                logger.debug("JJ圆弧边框环面积为0")
                 return False
             
             # 转换为HSV颜色空间
@@ -306,8 +309,8 @@ class BorderDetector:
             if red_ratio > 0.05:
                 return True
             return False
-        except Exception as e:
-            print(f"圆弧边框颜色填充比例检测出错: {e}")
+        except Exception:
+            logger.exception("圆弧边框颜色填充比例检测失败")
             return False
     
     def reset_border_cache(self, platform: str = None):
@@ -371,12 +374,12 @@ class BorderDetector:
                     biggest_rect = (x, y, w, h)  # 保存外接矩形信息
             
             if cnt is None:
-                print("TT矩形: 轮廓存在但面积均低于阈值，或未选到有效轮廓，返回False")
+                logger.debug("TT矩形边框轮廓面积低于阈值")
                 return False, None
             
             # 检查最大高度是否满足阈值
             if max_height < height_threshold:
-                print(f"TT矩形: 最大高度{max_height} < 阈值{height_threshold}，返回False")
+                logger.debug(f"TT矩形边框高度不足: {max_height} < {height_threshold}")
                 return False, None
             
             # 最大外接矩形
@@ -437,14 +440,14 @@ class BorderDetector:
                 
                 # 返回边框环数据：外矩形和内矩形的坐标信息
                 border_data = (x, y, w, h, inner_x, inner_y, inner_w, inner_h)
-                print(f"TT矩形: 形状/大小判定通过，返回True。外矩形=({x},{y},{w},{h})，内矩形=({inner_x},{inner_y},{inner_w},{inner_h})")
+                logger.debug(f"TT矩形边框匹配: outer=({x},{y},{w},{h}), inner=({inner_x},{inner_y},{inner_w},{inner_h})")
                 return True, border_data
             else:
-                print(f"TT矩形: 形状或大小判定未通过，返回False,垂直距离: {vertical_distance};直角数量: {right_angle_count}")
+                logger.debug(f"TT矩形边框未匹配: vertical_distance={vertical_distance}, right_angles={right_angle_count}")
                 return False, None
             
-        except Exception as e:
-            print(f"TT矩形: 检测过程中出现异常: {e}，返回False")
+        except Exception:
+            logger.exception("TT矩形边框检测失败")
             return False, None
     
     def _detect_arc_border(self, screenshot, area_threshold, radius_threshold, line_width) -> Tuple[bool, Optional[np.ndarray]]:
@@ -532,7 +535,7 @@ class BorderDetector:
                     
                     # 判断是否为圆弧
                     if error < 0.2 and radius > radius_threshold: 
-                        print(f"检测到圆弧 - 圆心: ({center_x:.1f}, {center_y:.1f}), 半径: {radius:.1f}, 拟合误差: {error:.4f}")
+                        logger.debug(f"检测到圆弧: center=({center_x:.1f}, {center_y:.1f}), radius={radius:.1f}, error={error:.4f}")
                         
                         # 创建圆形边框环：外圆 - 内圆
                         # 使用基于实际轮廓距离的稳定方法

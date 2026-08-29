@@ -32,29 +32,23 @@ import numpy as np  # type: ignore
 import threading
 import time
 import platform
-import logging
 from app.tools.utils import app_cache_path
+from app.chess.windows import enumerate_windows as enumerate_windows_windows
 from app.chess.context import context as global_context
 from app.chess.recognizer import ChessRecognizer
 from app.chess.message import Message, MessageType
 from app.chess.message_bus import message_bus
 from app.chess.border_detector import reset_border_cache
+from app.chess.screen_capture import locked_grab
+from app.tools.log_config import get_logger
 
-# 跨平台窗口检测
-WIN32GUI_AVAILABLE = False
-_win32gui_module = None
+
+logger = get_logger(__name__)
 
 if platform.system() == "Darwin":  # macOS
     import Quartz  # type: ignore
-elif platform.system() == "Windows":  # Windows
-    try:
-        import importlib
-        _win32gui_module = importlib.import_module('win32gui')
-        WIN32GUI_AVAILABLE = True
-    except ImportError:
-        print("警告: win32gui模块不可用，请安装: pip install pywin32")
-else:  # Linux或其他系统
-    print("警告: 当前系统不支持窗口检测，将使用全屏检测")
+elif platform.system() != "Windows":  # Linux或其他系统
+    logger.warning("当前系统不支持窗口检测，将使用全屏检测")
 
 class LocationError(Exception):
     """棋盘定位器异常类"""
@@ -79,11 +73,11 @@ class BoardLocator:
         self.recognizer = ChessRecognizer()
         
         # 设置日志记录器
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
         
         # 游戏窗口标题关键词
         self.game_titles = {
-            "JJ": ["JJ象棋"],
+            "JJ": ["JJ象棋", "J象棋"],
             "TT": ["天天象棋"]
         }
         self.window_size = None
@@ -125,6 +119,8 @@ class BoardLocator:
                     bounds = win.get('kCGWindowBounds', {})
                     matches.append({
                         "title": title,
+                        "pid": win.get('kCGWindowOwnerPID'),
+                        "window_id": win.get('kCGWindowNumber'),
                         "bounds": (
                             bounds.get('X'),
                             bounds.get('Y'),
@@ -133,33 +129,17 @@ class BoardLocator:
                         )
                     })
             return matches
-        except Exception as e:
-            print(f"Quartz窗口检测失败: {e}")
+        except Exception:
+            self.logger.exception("Quartz窗口检测失败")
             return []
 
     def find_window_by_title_windows(self, keyword):
-        """使用win32gui查找窗口（Windows）"""
-        if not WIN32GUI_AVAILABLE:
-            return []
-            
-        matches = []
-
-        def callback(hwnd, extra):
-            if _win32gui_module.IsWindowVisible(hwnd):
-                title = _win32gui_module.GetWindowText(hwnd)
-                if keyword.lower() in title.lower():
-                    rect = _win32gui_module.GetWindowRect(hwnd)
-                    # rect格式: (left, top, right, bottom)
-                    x, y, right, bottom = rect
-                    width = right - x
-                    height = bottom - y
-                    matches.append({
-                        "title": title,
-                        "bounds": (x, y, width, height)
-                    })
-
-        _win32gui_module.EnumWindows(callback, None)
-        return matches
+        """使用系统 User32/DWM API 查找窗口，无需依赖 pywin32。"""
+        keyword = keyword.casefold()
+        return [
+            window for window in enumerate_windows_windows()
+            if keyword in window["title"].casefold()
+        ]
 
     def find_window_by_title(self, keyword):
         """跨平台窗口查找"""
@@ -170,7 +150,7 @@ class BoardLocator:
         elif system == "Windows":  # Windows
             return self.find_window_by_title_windows(keyword)
         else:
-            print(f"不支持的操作系统: {system}")
+            self.logger.warning(f"不支持的操作系统: {system}")
             return []
 
     def find_game_window(self, platform_name):
@@ -178,7 +158,7 @@ class BoardLocator:
         system = platform.system()
         
         if system not in ["Darwin", "Windows"]:
-            print(f"当前系统 {system} 不支持窗口检测，跳过窗口检测")
+            self.logger.warning(f"当前系统 {system} 不支持窗口检测")
             return None
         
         # 收集所有匹配的窗口
@@ -190,11 +170,23 @@ class BoardLocator:
         # 40:  Generic Title ("微信") + Matches Other Platform
         
         candidates = []
+        # EnumWindows is relatively expensive and previously ran once per
+        # alias. Take one snapshot so every platform is scored consistently.
+        windows_snapshot = enumerate_windows_windows() if system == "Windows" else None
         
         # 遍历所有支持的平台
         for p, titles in self.game_titles.items():
             for title in titles:
-                matches = self.find_window_by_title(title)
+                if windows_snapshot is None:
+                    matches = self.find_window_by_title(title)
+                else:
+                    alias = title.casefold()
+                    matches = [
+                        window for window in windows_snapshot
+                        if window["title"].casefold() == alias
+                        or window["title"].casefold().startswith(alias + " ")
+                        or window["title"].casefold().startswith(alias + "-")
+                    ]
                 
                 if matches:
                     score = 100  # 具体标题匹配
@@ -230,6 +222,8 @@ class BoardLocator:
             'platform': p,
             'platform_name': self.game_titles[p][0], # 使用配置的第一个标题作为显示名称
             'title': match['title'],
+            'pid': match.get('pid'),
+            'window_id': match.get('window_id'),
             'region': {
                 'left': int(x),
                 'top': int(y),
@@ -241,7 +235,13 @@ class BoardLocator:
 
         # 更新上下文中的平台为检测到的平台（只在平台真正变化时）
         if self.context and self.context.platform != p:
-            self.context.set_platform(p)
+            safety_stopped = self.context.set_platform(p)
+            if safety_stopped:
+                message_bus.publish(Message(
+                    MessageType.STATUS,
+                    "检测到游戏平台切换；自动走子已安全关闭，请重新开启",
+                    safety_stop_auto=True,
+                ))
             
         return window_info
 
@@ -272,12 +272,12 @@ class BoardLocator:
                 search_region['top'] = int(search_region['top'] + shrink_h)
                 search_region['height'] = int(search_region['height'] - 2 * shrink_h)
         else:
-            print("未检测到游戏窗口")
+            self.logger.warning("未检测到游戏窗口")
             raise WindowError("未检测到游戏窗口")
 
         # 1. 截取搜索区域
-        with mss.mss() as sct:
-            screenshot = sct.grab(search_region)
+        with mss.MSS() as sct:
+            screenshot = locked_grab(sct, search_region, timeout=1.5)
         
         # 2. 转为OpenCV格式
         img_np = np.frombuffer(screenshot.bgra, np.uint8).reshape(screenshot.height, screenshot.width, 4)
@@ -286,7 +286,7 @@ class BoardLocator:
         # 保存搜索区域截图
         search_path = app_cache_path(f"search_region_{window_info['title'].replace(' ', '_')}.jpg")
         cv2.imwrite(search_path, img_np)
-        print(f"已保存搜索区域截图: {search_path}")
+        self.logger.debug(f"已保存搜索区域截图: {search_path}")
         
         # 3. 根据平台选择不同的预处理策略
         gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
@@ -304,7 +304,7 @@ class BoardLocator:
         scaled_img = cv2.resize(img_np, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
         scaled_gray = cv2.resize(gray, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
         
-        print(f"图像放大: {base_w}x{base_h} -> {target_width}x{target_height}, 缩放比例: {scale_factor:.2f}")
+        self.logger.debug(f"图像放大: {base_w}x{base_h} -> {target_width}x{target_height}, 缩放比例={scale_factor:.2f}")
         
         # 动态计算棋子半径范围
         # 假设：标准棋盘通常占满搜索区域宽度（TT稍微收缩过，JJ占大部分）
@@ -321,7 +321,7 @@ class BoardLocator:
         # 确保最小半径至少为8（避免噪点）
         minRadius = max(8, minRadius)
         
-        print(f"动态半径计算: 估算半径r={estimated_radius:.1f}px, 搜索范围=[{minRadius}, {maxRadius}]")
+        self.logger.debug(f"动态半径: r={estimated_radius:.1f}px, 范围=[{minRadius}, {maxRadius}]")
         
         # 统一的预处理参数
         # 无论平台，先尝试高斯模糊减少噪点
@@ -348,7 +348,7 @@ class BoardLocator:
         
         if circles is None:
             # 如果第一次检测失败，尝试放宽范围重试 (0.5 ~ 1.6)
-            print("首次检测未发现圆形，尝试放宽范围重试...")
+            self.logger.info("首次未检测到圆形，放宽范围重试")
             minRadius_retry = int(estimated_radius * 0.5)
             maxRadius_retry = int(estimated_radius * 1.6)
             circles = cv2.HoughCircles(processed, cv2.HOUGH_GRADIENT, 1, minDist,
@@ -356,21 +356,21 @@ class BoardLocator:
                                       minRadius=minRadius_retry, maxRadius=maxRadius_retry)
 
         if circles is None:
-            print("在游戏窗口内未检测到任何圆形 (重试后)")
+            self.logger.warning("重试后仍未检测到圆形")
             self.logger.warning("霍夫圆检测未发现任何圆形")
             detected_circles_path = app_cache_path("detected_circles.jpg")
             cv2.imwrite(detected_circles_path, img_np)
-            print(f"已保存检测结果图片: {detected_circles_path}")
+            self.logger.debug(f"已保存检测结果: {detected_circles_path}")
             raise PieceError("未检测到象棋棋子")
             
         circles = np.round(circles[0, :]).astype("int")
-        print(f"游戏窗口内霍夫圆检测到 {len(circles)} 个圆形")
+        self.logger.info(f"霍夫圆检测到 {len(circles)} 个圆形")
         self.logger.info(f"霍夫圆检测结果: 检测到{len(circles)}个圆形")
         
         # 6. 计算Retina缩放因子 (物理像素 / 逻辑像素)
         # search_region['width'] 是逻辑点(Points)，img_np.shape[1] 是物理像素(Pixels)
         retina_scale = img_np.shape[1] / search_region['width']
-        print(f"Retina缩放检测: 逻辑宽度={search_region['width']}, 物理像素={img_np.shape[1]}, 缩放因子={retina_scale:.2f}")
+        self.logger.debug(f"Retina缩放: 逻辑宽度={search_region['width']}, 物理像素={img_np.shape[1]}, 因子={retina_scale:.2f}")
 
         # 7. 将检测到的圆坐标转换回原始图像尺寸 (Physical Pixels)
         # 注意：这里我们得到的 circles 是在 2x 放大后的图像上的
@@ -409,8 +409,8 @@ class BoardLocator:
         
         # 10. 保存可视化结果（在开发环境和打包环境都保存）
         # 在全屏图像上绘制检测结果
-        with mss.mss() as sct:
-            full_screenshot = sct.grab(sct.monitors[1])
+        with mss.MSS() as sct:
+            full_screenshot = locked_grab(sct, sct.monitors[1], timeout=1.5)
             full_img = np.frombuffer(full_screenshot.bgra, np.uint8).reshape(full_screenshot.height, full_screenshot.width, 4)
             full_img = full_img[:, :, :3].copy()
         
@@ -462,7 +462,7 @@ class BoardLocator:
         
         detected_circles_path = app_cache_path("detected_circles.jpg")
         cv2.imwrite(detected_circles_path, full_img)
-        print(f"已保存区域检测结果图片: {detected_circles_path}")
+        self.logger.debug(f"已保存区域检测结果: {detected_circles_path}")
         
         return filtered_pieces
     
@@ -503,10 +503,11 @@ class BoardLocator:
             elif piece_type == 'R':
                 red_rooks.append((x, y, r, piece_type))
             
-        print(f"检测到的棋子统计:")
-        print(f"  黑将: {len(kings_black)} 个, 红帅: {len(kings_red)} 个")
-        print(f"  黑卒: {len(black_pawns)} 个, 红兵: {len(red_pawns)} 个")
-        print(f"  黑车: {len(black_rooks)} 个, 红车: {len(red_rooks)} 个")
+        self.logger.info(
+            f"棋子统计: 黑将={len(kings_black)}, 红帅={len(kings_red)}, "
+            f"黑卒={len(black_pawns)}, 红兵={len(red_pawns)}, "
+            f"黑车={len(black_rooks)}, 红车={len(red_rooks)}"
+        )
         
         # 记录到日志
         self.logger.info(f"棋子检测统计: 黑将={len(kings_black)}, 红帅={len(kings_red)}, 黑卒={len(black_pawns)}, 红兵={len(red_pawns)}, 黑车={len(black_rooks)}, 红车={len(red_rooks)}")
@@ -539,7 +540,7 @@ class BoardLocator:
             filtered_combinations.append(black_combination)
             self.logger.info(f"黑方组合筛选成功: 将={black_combination['king'][3]}, 兵/卒={len(black_combination.get('pawns', []))}, 车={len(black_combination.get('rooks', []))}")
         else:
-            print("黑方组合筛选失败")
+            self.logger.warning("黑方组合筛选失败")
             self.logger.warning("黑方组合筛选失败")
         
         # 3.红方组合
@@ -552,7 +553,7 @@ class BoardLocator:
             filtered_combinations.append(red_combination)
             self.logger.info(f"红方组合筛选成功: 将={red_combination['king'][3]}, 兵/卒={len(red_combination.get('pawns', []))}, 车={len(red_combination.get('rooks', []))}")
         else:
-            print("红方组合筛选失败")
+            self.logger.warning("红方组合筛选失败")
             self.logger.warning("红方组合筛选失败")
         
         return filtered_combinations
@@ -574,7 +575,7 @@ class BoardLocator:
         # 判断：如果距离超过3倍棋子半径，说明是缩小棋盘
         if distance_to_left > 3 * leftmost_r:
             error_msg = f"检测到缩小棋盘（游戏结算界面），最左棋子距离边界: {distance_to_left:.1f}px，棋子半径: {leftmost_r:.1f}px"
-            print(error_msg)
+            self.logger.warning(error_msg)
             raise PieceError("检测到游戏结算界面，等待开始对局")
     
     def _filter_combination(self, king, pawns, rooks):
@@ -763,21 +764,15 @@ class BoardLocator:
         self.base_height = king_vertical_distance
         self.base_width = avg_span
         self.base_radius = mean_r
-        print(f"已保存参考距离 - 将帅垂直距离: {king_vertical_distance:.1f}, 平均跨度: {self.base_width:.1f}")
+        self.logger.debug(f"定位参考: 将帅垂直距离={king_vertical_distance:.1f}, 平均跨度={self.base_width:.1f}")
 
         # 输出调试信息
-        print(f"棋盘定位计算结果:")
-        print(f"  平均半径: {mean_r:.1f}")
-        print(f"  黑将位置: ({black_king[0]}, {black_king[1]})")
-        print(f"  红帅位置: ({red_king[0]}, {red_king[1]})")
-        print(f"  黑侧平均y: {black_y_avg:.1f}")
-        print(f"  红侧平均y: {red_y_avg:.1f}")
-        print(f"  较高侧y坐标: {higher_side_y:.1f}")
-        print(f"  将帅垂直距离: {king_vertical_distance:.1f}")
-        print(f"  最左x坐标: {leftmost_x:.1f}")
-        print(f"  平均跨度: {avg_span if spans else 8 * mean_r:.1f}")
-        print(f"  棋盘坐标: ({board_x:.1f}, {board_y:.1f})")
-        print(f"  棋盘尺寸: {board_width:.1f} x {board_height:.1f}")
+        self.logger.info(
+            f"棋盘定位: 坐标=({board_x:.1f}, {board_y:.1f}), "
+            f"尺寸={board_width:.1f}x{board_height:.1f}, 平均半径={mean_r:.1f}, "
+            f"黑将=({black_king[0]}, {black_king[1]}), "
+            f"红帅=({red_king[0]}, {red_king[1]})"
+        )
 
         # 添加可视化：在detected_circles.jpg上画出棋盘矩形和网格线
         try:
@@ -798,9 +793,9 @@ class BoardLocator:
                              (0, 0, 255), 1)
                 # 保存更新后的图片
                 cv2.imwrite(detected_circles_path, detected_img)
-                print(f"已更新检测结果图片（添加棋盘矩形）: {detected_circles_path}")
-        except Exception as e:
-            print(f"可视化过程中出错: {e}")
+                self.logger.debug(f"已更新棋盘定位图: {detected_circles_path}")
+        except Exception:
+            self.logger.exception("棋盘定位可视化失败")
 
         return (board_x, board_y, board_width, board_height)
 
@@ -863,21 +858,21 @@ class BoardLocator:
         if coords is not None:
             # 手动定位模式：使用提供的坐标
             x, y, width, height = coords
-            print(f"使用手动坐标: ({x}, {y}, {width}, {height})")
+            self.logger.info(f"使用手动坐标: ({x}, {y}, {width}, {height})")
         else:
             # 自动定位模式：检测棋盘位置
             board_pos = self._locate_board_from_combs()
             x, y, width, height = board_pos
-            print(f"自动检测到棋盘坐标: ({x}, {y}, {width}, {height})")
+            self.logger.info(f"自动检测棋盘坐标: ({x}, {y}, {width}, {height})")
         
         # 棋盘区域
         board_region = {'left': x, 'top': y, 'width': width, 'height': height}
-        print(f"棋盘区域: left={x}, top={y}, width={width}, height={height}")
+        self.logger.info(f"棋盘区域: left={x}, top={y}, width={width}, height={height}")
 
         # 截取棋盘区域的图片
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             # 棋盘
-            board_screenshot = sct.grab(board_region)
+            board_screenshot = locked_grab(sct, board_region, timeout=1.5)
             board_img = np.frombuffer(board_screenshot.bgra, np.uint8).reshape(board_screenshot.height, board_screenshot.width, 4)
             board_img = board_img[:, :, :3]
             cv2.imwrite(app_cache_path('board/board.png'), board_img)
@@ -943,9 +938,7 @@ class BoardLocator:
             upper_y = round(y + (0.03 * ref_width), 1)
             lower_x = round(x + (1.22 * ref_width), 1)
             lower_y = round(y + (0.88 * ref_width), 1)
-            print(f"TT平台 - 使用参考距离计算头像位置:")
-            print(f"  参考距离: base_width={ref_width:.1f}, base_height={ref_height:.1f}")
-            print(f"  头像尺寸: {square_size}")
+            self.logger.debug(f"TT头像定位: 参考={ref_width:.1f}x{ref_height:.1f}, 尺寸={square_size}")
                 
         
         # 计算头像区域
@@ -955,7 +948,7 @@ class BoardLocator:
             'width': square_size,
             'height': square_size
         }
-        print(f"上头像区域: left={upper_x}, top={upper_y}, width={square_size}, height={square_size}")
+        self.logger.debug(f"上头像区域: left={upper_x}, top={upper_y}, width={square_size}, height={square_size}")
         
         avatar_regions['lower'] = {
             'left': lower_x,
@@ -963,17 +956,17 @@ class BoardLocator:
             'width': square_size,
             'height': square_size
         }
-        print(f"下头像区域: left={lower_x}, top={lower_y}, width={square_size}, height={square_size}")
+        self.logger.debug(f"下头像区域: left={lower_x}, top={lower_y}, width={square_size}, height={square_size}")
         
         avatar_rects['upper'] = avatar_regions['upper']
         avatar_rects['lower'] = avatar_regions['lower']
 
         # 统一保存同心矩形区域图片
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             for pos in ["upper", "lower"]:
                 rect = avatar_rects.get(pos)
                 if rect:
-                    rect_img = sct.grab(rect)
+                    rect_img = locked_grab(sct, rect, timeout=1.0)
                     rect_img_np = np.frombuffer(rect_img.bgra, np.uint8).reshape(rect_img.height, rect_img.width, 4)
                     rect_img_np = rect_img_np[:, :, :3]
                     cv2.imwrite(app_cache_path(f'board/avatar_{pos}_rect.png'), rect_img_np)
@@ -1002,34 +995,34 @@ class BoardLocator:
         # 检查是否正在定位中
         with self._relocate_lock:
             if self._relocating:
-                print("定位正在进行中，跳过重复请求")
+                self.logger.warning("定位正在进行，跳过重复请求")
                 raise LocationError("定位正在进行中，跳过重复请求")
             self._relocating = True
 
         try:
             # 如果是作为回调函数被调用，打印消息信息
             if message_type is not None:
-                print(f"收到重新定位请求: {message_type} = {data}")
+                self.logger.info(f"收到重新定位请求: {message_type}={data}")
             
             # 优先级：自动定位 > 窗口移动坐标 > 自动检测失败后的Fallback > 保存的手动坐标
             if moved_coords is not None:
                 # 使用本次窗口移动坐标，清除手动坐标记录
                 # self.context.manual_coords = None
                 self.update_board_and_avatars_regions(coords=moved_coords)
-                print("棋盘定位成功(窗口移动)")
+                self.logger.info("棋盘定位成功（窗口移动）")
                 msg = "已重新计算棋盘位置"
             else:
                 # 优先尝试自动定位
                 try:
                     self.update_board_and_avatars_regions(coords=None)
-                    print("棋盘定位成功(自动)")
+                    self.logger.info("棋盘定位成功（自动）")
                     msg = "棋盘定位完成"
                 except LocationError:
                     # 自动定位失败
                     # 1. 尝试使用本次计算的Fallback坐标（通常是基于窗口缩放推算的）
                     if fallback_coords is not None:
                          self.update_board_and_avatars_regions(coords=fallback_coords)
-                         print("棋盘定位成功(使用推算的Fallback坐标)")
+                         self.logger.info("棋盘定位成功（推算坐标）")
                          msg = "棋盘定位成功"
                     else:
                         # 2. 检查是否有保存的手动坐标（注意：如果窗口已移动，这可能失效）
@@ -1037,7 +1030,7 @@ class BoardLocator:
                         if saved_manual_coords is not None:
                             # 使用保存的手动坐标
                             self.update_board_and_avatars_regions(coords=saved_manual_coords)
-                            print("棋盘定位成功(使用保存的手动坐标)")
+                            self.logger.info("棋盘定位成功（已保存的手动坐标）")
                             msg = "棋盘定位成功"
                         else:
                             # 没有手动坐标，重新抛出异常
@@ -1104,6 +1097,16 @@ class BoardLocator:
                     size_changed = abs(dw_seen) >= size_threshold or abs(dh_seen) >= size_threshold
 
                     if win_moved or size_changed:
+                        safety_reason = (
+                            "游戏窗口尺寸发生变化"
+                            if size_changed else "游戏窗口位置发生变化"
+                        )
+                        if self.context.stop_auto_move_for_safety(safety_reason):
+                            message_bus.publish(Message(
+                                MessageType.STATUS,
+                                f"{safety_reason}；自动走子已安全关闭，重新定位后请手动开启",
+                                safety_stop_auto=True,
+                            ))
                         pending_move = pending_move or win_moved
                         pending_resize = pending_resize or size_changed
                         last_change_time = now
@@ -1141,7 +1144,7 @@ class BoardLocator:
                                         new_t = int(last_seen_bounds['top']) + rel_y
                                         
                                         fallback = (int(new_l), int(new_t), int(new_w), int(new_h))
-                                        print(f"窗口缩放，计算Fallback坐标: {fallback}")
+                                        self.logger.info(f"窗口缩放，计算备用坐标: {fallback}")
                                     
                                     self.handle_locating_board_tasks(fallback_coords=fallback)
                                 else:
@@ -1155,8 +1158,11 @@ class BoardLocator:
                                         self.handle_locating_board_tasks(moved_coords=move_region)
 
                                 reset_border_cache(self.context.platform)
-                                # 重置检查器状态，确保重新定位后能正常分析新局面
                                 self.context.reset_checker()
+                                self.context.reset_recognizer()
+                                if getattr(self.context, 'history', None) is not None:
+                                    self.context.history.clear()
+                                self.context.base_fen = None
                                 # 成功后更新基准为当前稳定的窗口边界，并清空待处理标志
                                 baseline_bounds = last_seen_bounds
                                 # 成功后刷新基准棋盘区域
@@ -1174,13 +1180,13 @@ class BoardLocator:
                                 pending_resize = False
                                 last_change_time = None
                             except (WindowError, PieceError, CombsError, LocationError) as e:
-                                print(f"窗口移动后重新定位失败: {e}")
+                                self.logger.warning(f"窗口移动后重新定位失败: {e}")
                                 # 立即设置停止事件，避免时间差问题
                                 stop_event.set()
                                 # 重新抛出异常，让截图模块处理
                                 raise
-                            except Exception as e:
-                                print(f"窗口移动监控异常: {e}")
+                            except Exception:
+                                self.logger.exception("窗口移动监控异常")
                                 # 其他异常继续监控，不中断循环
                 # 若未找到窗口，跳过
             time.sleep(0.1)
@@ -1195,7 +1201,7 @@ class BoardLocator:
         try:
             # 检查context中是否有board_coords
             if not hasattr(self.context, 'board_coords') or not self.context.board_coords:
-                print("警告：context中没有board_coords，无法绘制网格线")
+                self.logger.warning("context中没有 board_coords，无法绘制网格线")
                 return
             
             board_coords = self.context.board_coords
@@ -1263,13 +1269,13 @@ class BoardLocator:
                             0 <= pixel_y < board_img.shape[0]):
                             cv2.circle(board_img, (pixel_x, pixel_y), 2, (0, 255, 255), -1)  # 黄色圆点
             
-            print(f"已在缩放后的棋盘图片上绘制网格线，保存为 board_with_grid.png")
-            print(f"  缩放后图片尺寸: {board_img.shape[1]} x {board_img.shape[0]}")
-            print(f"  绿色线/红点: 原始方法（基于棋子位置）")
-            print(f"  蓝色线/黄点: 等分方法（black_y_avg到red_y_avg等分）")
+            self.logger.debug(
+                f"已绘制棋盘网格: board_with_grid.png, "
+                f"尺寸={board_img.shape[1]}x{board_img.shape[0]}"
+            )
             
-        except Exception as e:
-            print(f"在棋盘图片上绘制网格线时出错: {e}")
+        except Exception:
+            self.logger.exception("绘制棋盘网格失败")
 
 if __name__ == "__main__":
     # 测试代码
@@ -1283,5 +1289,3 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"检测完成，耗时: {end_time - start_time:.2f}秒")
     print("棋盘坐标：", board_pos)
-
-

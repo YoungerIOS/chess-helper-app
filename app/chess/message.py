@@ -1,5 +1,4 @@
 from enum import Enum, auto
-import threading
 
 class MessageType(Enum):
     """消息类型枚举"""
@@ -12,6 +11,8 @@ class MessageType(Enum):
     STOP = auto()           # 停止消息
     RETRY_CAPTURE = auto()  # 重试截图消息
     NON_GAME_SCREEN = auto()  # 非棋局画面（结算画面等）
+    PARAM_UPDATE = auto()     # 引擎动态参数显示更新
+    ENGINE_INFO = auto()      # 引擎实时局势/搜索遥测
 
 
 
@@ -30,8 +31,8 @@ class TurnState(Enum):
 
 class Platform(Enum):
     """平台枚举"""
-    JJ = 1                  # 天天象棋
-    TT = 0                  # 腾讯象棋
+    JJ = 1                  # JJ象棋
+    TT = 0                  # 天天象棋
 
 class Message:
     """消息类"""

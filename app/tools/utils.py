@@ -153,6 +153,28 @@ def app_data_path(filename):
     # 确保子目录存在
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     return full_path
+
+
+def get_engine_dir():
+    """获取引擎文件夹路径，目录不存在时自动创建。
+
+    开发环境使用 app 目录下的 Pikafish/ 文件夹；打包环境没有可写的
+    资源目录，沿用用户数据目录中的 Pikafish/ 文件夹。
+    """
+    if getattr(sys, "frozen", False):
+        engine_dir = os.path.join(get_app_data_dir(), "Pikafish")
+    else:
+        engine_dir = resource_path("Pikafish")
+    os.makedirs(engine_dir, exist_ok=True)
+    return engine_dir
+
+def engine_path(*path_parts):
+    """获取引擎文件夹内文件的完整路径"""
+    return os.path.join(get_engine_dir(), *path_parts)
+
+def user_config_path():
+    """返回可写的用户配置路径，避免修改随应用分发的资源文件。"""
+    return app_data_path("game_config.json")
  
 # 筛选水平线
 def filter_horizontal_lines(lines, img_width):  
@@ -310,6 +332,8 @@ def convert_move_to_chinese(move, board_array, is_red):
         'K': '帥',  
         'P': '兵',
         'C': '炮',
+        'x': '暗',
+        'X': '暗',
         '-': '空'
     }  
 
@@ -358,7 +382,7 @@ def convert_move_to_chinese(move, board_array, is_red):
     is_my_piece = (is_red and piece_type.isupper()) or (not is_red and piece_type.islower())
     if not is_my_piece:
         return None
-    
+
     piece_name = PIECE_CODES[piece_type]  
   
     # 判断移动类型（进、退、平）和构建棋谱描述

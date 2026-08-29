@@ -1,6 +1,10 @@
 import os
 from PySide6.QtWidgets import QApplication
 from app.chess.context import context
+from app.tools.log_config import get_logger
+
+
+logger = get_logger(__name__)
 
 class ThemeManager:
     """主题管理器"""
@@ -20,14 +24,14 @@ class ThemeManager:
         """加载 QSS 样式表内容"""
         path = ThemeManager.get_theme_path(theme_name)
         if not os.path.exists(path):
-            print(f"Warning: Theme file not found: {path}")
+            logger.warning(f"未找到主题文件: {path}")
             return ""
             
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return f.read()
-        except Exception as e:
-            print(f"Error loading theme {theme_name}: {e}")
+        except Exception:
+            logger.exception(f"加载主题失败: {theme_name}")
             return ""
             
     @staticmethod
@@ -43,7 +47,7 @@ class ThemeManager:
             # 保存当前主题设置
             context.theme = theme_name
             context.save_config()
-            print(f"Applied theme: {theme_name}")
+            logger.info(f"已应用主题: {theme_name}")
 
     @staticmethod
     def toggle_theme():

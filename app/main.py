@@ -1,16 +1,35 @@
+import os
 import sys
 import traceback
-import os
-from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Qt, QLoggingCategory
+
+
+def _enable_windows_dpi_awareness():
+    """Keep Win32, MSS and mouse coordinates in physical-pixel space."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # Per-monitor v2; available on current Windows 10/11 releases.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            pass
+
+
+# 这必须在导入Qt或创建MSS捕获实例之前进行。
+_enable_windows_dpi_awareness()
+
 
 # Ensure bundled app can import packages
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     macos_dir = os.path.dirname(sys.executable)  # .../Contents/MacOS
-    resources_dir = os.path.abspath(os.path.join(macos_dir, '..', 'Resources'))
-    frameworks_dir = os.path.abspath(os.path.join(macos_dir, '..', 'Frameworks'))
-    resources_app_dir = os.path.join(resources_dir, 'app')
-    frameworks_app_dir = os.path.join(frameworks_dir, 'app')
+    resources_dir = os.path.abspath(os.path.join(macos_dir, "..", "Resources"))
+    frameworks_dir = os.path.abspath(os.path.join(macos_dir, "..", "Frameworks"))
+    resources_app_dir = os.path.join(resources_dir, "app")
+    frameworks_app_dir = os.path.join(frameworks_dir, "app")
     for p in [resources_dir, frameworks_dir, resources_app_dir, frameworks_app_dir]:
         if os.path.isdir(p) and p not in sys.path:
             sys.path.insert(0, p)
@@ -21,108 +40,129 @@ else:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+
+from PySide6.QtWidgets import QApplication, QMessageBox
+
 from app.chess.context import logger
 from app.ui.main_window import MainWindow
 
 # 禁用ICC相关的警告
-QLoggingCategory.setFilterRules("qt.gui.icc.warning=false")
+# QLoggingCategory.setFilterRules("qt.gui.icc.warning=false")
+
 
 def _ensure_engine_files():
-    """静默确保引擎文件存在于用户数据目录中"""
+    """静默确保引擎文件存在于项目引擎文件夹中"""
     try:
-        from app.tools.utils import app_data_path, resource_path
         import shutil
-        
-        # 检查用户数据目录中的引擎文件
-        user_engine_path = app_data_path("Pikafish/pikafish")
-        user_nnue_path = app_data_path("Pikafish/pikafish.nnue")
-        
-        # 如果引擎文件不存在，尝试从打包资源复制
-        if not os.path.exists(user_engine_path):
-            src_engine = resource_path("Pikafish", "src", "pikafish")
-            if os.path.exists(src_engine):
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(user_engine_path), exist_ok=True)
-                # 复制引擎文件
-                shutil.copy2(src_engine, user_engine_path)
-                logger.info("引擎文件已静默复制到用户数据目录")
-            
-            # 每次启动都确保有执行权限
-            if os.path.exists(user_engine_path):
-                os.chmod(user_engine_path, 0o755)
-        
+
+        from app.tools.utils import engine_path, get_engine_dir, resource_path
+
+        engine_dir = get_engine_dir()
+        target_engine_path = engine_path("pikafish")
+        target_nnue_path = engine_path("pikafish.nnue")
+
+        # 如果引擎文件不存在，尝试从打包资源复制；源和目标是同一文件时跳过
+        if not os.path.exists(target_engine_path):
+            for src_engine in (
+                resource_path("Pikafish", "src", "pikafish"),
+                resource_path("Pikafish", "pikafish"),
+            ):
+                if os.path.exists(src_engine) and os.path.abspath(
+                    src_engine
+                ) != os.path.abspath(target_engine_path):
+                    shutil.copy2(src_engine, target_engine_path)
+                    logger.info(f"引擎文件已静默复制到 {engine_dir}")
+                    break
+
+            # 确保有执行权限
+            if os.path.exists(target_engine_path):
+                os.chmod(target_engine_path, 0o755)
+
         # 如果NNUE文件不存在，尝试从打包资源复制
-        if not os.path.exists(user_nnue_path):
-            src_nnue = resource_path("Pikafish", "src", "pikafish.nnue")
-            if os.path.exists(src_nnue):
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(user_nnue_path), exist_ok=True)
-                # 复制NNUE文件
-                shutil.copy2(src_nnue, user_nnue_path)
-                logger.info("NNUE文件已静默复制到用户数据目录")
-                
-    except Exception as e:
+        if not os.path.exists(target_nnue_path):
+            for src_nnue in (
+                resource_path("Pikafish", "src", "pikafish.nnue"),
+                resource_path("Pikafish", "pikafish.nnue"),
+            ):
+                if os.path.exists(src_nnue) and os.path.abspath(
+                    src_nnue
+                ) != os.path.abspath(target_nnue_path):
+                    shutil.copy2(src_nnue, target_nnue_path)
+                    logger.info(f"NNUE文件已静默复制到 {engine_dir}")
+
+    except Exception as e:  # noqa: BLE001
         # 静默处理错误，不影响应用启动
         logger.debug(f"引擎文件复制失败（不影响应用启动）: {e}")
-        pass
+
 
 def check_screen_recording_permission():
     """
-    检查屏幕录制权限
-    在macOS上，只有尝试进行一次截图，系统才会询问用户是否授权。
+    检查屏幕录制权限。
+
+    使用 CoreGraphics 的权限 API，避免在应用启动阶段同步创建截图后端并
+    抓取像素；后者在显示器较多或系统截图服务繁忙时会明显拖慢启动。
     """
-    if sys.platform != 'darwin':
+    if sys.platform != "darwin":
         return
 
     try:
-        import mss
-        with mss.mss() as sct:
-            # 尝试抓取一个小区域 (1x1像素)
-            # 这会触发系统权限弹窗（如果尚未授权）
-            monitor = sct.monitors[1]
-            rect = {"top": monitor["top"], "left": monitor["left"], "width": 1, "height": 1}
-            sct.grab(rect)
-            logger.info("屏幕录制权限检查: 已触发/已授权")
-    except Exception as e:
-        logger.warning(f"屏幕录制权限检查可能失败 (通常意味着未授权或取消): {e}")
-        # 这里可以选择弹出一个提示框告知用户
-        pass
+        import Quartz
+
+        # PyObjC 会在运行时动态导出这两个 CoreGraphics API，但其类型桩
+        # 不一定声明它们。动态获取既避免 Pylance 误报，也兼容缺少该
+        # API 的旧系统；不要用整行 type: ignore 掩盖其他属性错误。
+        preflight_access = getattr(Quartz, "CGPreflightScreenCaptureAccess", None)
+        request_access = getattr(Quartz, "CGRequestScreenCaptureAccess", None)
+        if not callable(preflight_access) or not callable(request_access):
+            logger.warning("当前系统不提供屏幕录制权限检查 API")
+            return
+
+        if preflight_access():
+            logger.info("屏幕录制权限检查: 已授权")
+            return
+
+        if request_access():
+            logger.info("屏幕录制权限检查: 已授权")
+        else:
+            logger.warning("屏幕录制权限尚未授权，请在系统设置中允许本应用录制屏幕")
+    except (ImportError, AttributeError, OSError, TypeError) as e:
+        logger.warning(f"无法读取屏幕录制权限状态: {e}")
+
 
 def excepthook(exctype, value, tb):
     # 写日志
     try:
         logger.error("Uncaught exception:", exc_info=(exctype, value, tb))
-    except Exception:
-        pass
+    except (AttributeError, OSError, RuntimeError, TypeError) as exc:
+        logger.exception("显示异常消息框失败: %s", exc)
     # 弹消息框，便于双击启动时看到错误
     try:
         msg = "\n".join(traceback.format_exception(exctype, value, tb)[-3:])
         m = QMessageBox()
         m.setWindowTitle("程序异常退出")
         m.setText("发生未捕获异常，程序将退出。\n" + msg)
-        m.setIcon(QMessageBox.Critical)
+        m.setIcon(QMessageBox.Icon.Critical)
         m.exec()
-    except Exception:
-        pass
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.exception("显示异常消息框失败: %s", exc)
     # 退出
     sys.__excepthook__(exctype, value, tb)
 
 
 def main():
     sys.excepthook = excepthook
-    
+
     # 复制引擎文件到用户目录（如果不存在）
     _ensure_engine_files()
-    
+
     # 尽早触发屏幕录制权限申请
     check_screen_recording_permission()
-    
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
 
-# 这个if是判断当前脚本文件是否为独立直接运行的,如果是,则条件通过, 
-# 如果是作为模块导入到其他文件后运行到这里的,则条件不通过.  
-if __name__ == "__main__":  
+
+if __name__ == "__main__":
     main()

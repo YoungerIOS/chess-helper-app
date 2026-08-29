@@ -1,16 +1,21 @@
 from app.chess.recognizer import ChessRecognizer
-from app.chess.message import Message, MessageType, MessageContent, TurnState
+from app.chess.message import Message, MessageType, MessageContent
 from app.chess.message_bus import message_bus
 from app.chess.context import context
 from app.chess.checker import BoardStatus
 from app.tools import utils
 from app.tools.log_config import get_logger
-from pprint import pformat
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Optional, Any
 from dataclasses import dataclass
 import threading, queue, time
 
 logger = get_logger(__name__)
+
+# 识别、规则校验和可信状态提交是一条有顺序的状态机。
+# 多个消费者会让后截取的帧先更新 last_board，造成假的多步
+# 变化。合法着法快速路径已显著降低单帧开销，因此使用单一
+# 有序消费者，上游继续使用有界队列淘汰过期帧。
+PROCESS_WORKER_COUNT = 1
 
 
 @dataclass
@@ -19,8 +24,10 @@ class BoardAnalysisState:
     board_status: Optional[BoardStatus] = None
     img: Any = None
     marker_coords: Optional[list] = None
+    grid_hashes: Optional[list] = None
     timestamp: float = 0.0
     is_settlement_screen: bool = False  # 结算画面标记
+    settlement_reason: Optional[str] = None
 
 class ChessProcess:
 
@@ -65,27 +72,106 @@ class ChessProcess:
         with self.context._checker_lock:
             # 2.1 结算画面检测（包括 board=None 的情况）
             if self.checker.check_settlement(board, is_massive_change):
-                return BoardAnalysisState(timestamp=capture_time, is_settlement_screen=True)
+                settlement_reason = getattr(
+                    self.checker, 'settlement_reason', None
+                )
+                if settlement_reason == 'board_lost':
+                    self.context.stop_auto_move_for_safety(
+                        "棋盘画面完全消失"
+                    )
+                return self._record_training_analysis(BoardAnalysisState(
+                    img=img,
+                    timestamp=capture_time,
+                    is_settlement_screen=True,
+                    settlement_reason=settlement_reason,
+                ))
             
             # 识别失败且不在结算状态，直接返回
             if board is None:
-                return BoardAnalysisState(timestamp=capture_time)
+                return self._record_training_analysis(
+                    BoardAnalysisState(
+                        img=img,
+                        timestamp=capture_time,
+                    )
+                )
 
             # 2.2 检查棋盘状态
             status = self.checker.check_board(
                 board, 
                 marker_coords, 
                 base_fen=self.context.base_fen,
-                history_moves=history_moves
+                history_moves=history_moves,
+                expected_side_to_move=getattr(
+                    self.recognizer, 'trusted_side_to_move', None
+                ),
             )
+
+            # 只有通过棋规、轮次和历史一致性校验的局面，才能成为
+            # 下一次视觉跟踪的可信基准。非法帧不会污染跟踪状态。
+            should_commit_tracking = bool(
+                status
+                and not (
+                    status.is_illegal_board
+                    or status.is_illegal_change
+                    or status.is_history_mismatch
+                    or status.is_multi_step
+                )
+                and (
+                    status.is_same_board
+                    or status.is_new_game
+                    or status.is_red_start
+                    or status.is_black_start
+                    or status.is_my_step
+                    or status.is_opponent_step
+                )
+            )
+            if (
+                should_commit_tracking
+                and hasattr(self.recognizer, 'commit_tracking_state')
+            ):
+                next_side_to_move = None
+                if status.is_red_start or status.is_black_start or status.is_new_game:
+                    next_side_to_move = 'red'
+                if status.is_my_step or status.is_opponent_step:
+                    moved_side = status.step_info.get('side')
+                    if moved_side in ('red', 'black'):
+                        next_side_to_move = (
+                            'black' if moved_side == 'red' else 'red'
+                        )
+                self.recognizer.commit_tracking_state(
+                    board,
+                    grid_hashes,
+                    self.checker.is_red,
+                    next_side_to_move,
+                )
                     
-        return BoardAnalysisState(
+        return self._record_training_analysis(BoardAnalysisState(
             board_array=board, 
             board_status=status, 
             img=img, 
             marker_coords=marker_coords,
-            timestamp=capture_time
-        )
+            grid_hashes=grid_hashes,
+            timestamp=capture_time,
+        ))
+
+    def _record_training_analysis(self, state: BoardAnalysisState):
+        """把识别结果关联到采集时间；记录失败时仍返回原状态。"""
+        try:
+            get_recorder = getattr(self.context, 'get_jj_training_recorder', None)
+            if get_recorder is None:
+                return state
+            recorder = get_recorder()
+            if recorder is not None:
+                recorder.record_analysis(
+                    captured_at=state.timestamp,
+                    board=state.board_array,
+                    marker_coords=state.marker_coords,
+                    status=state.board_status,
+                    is_settlement_screen=state.is_settlement_screen,
+                )
+        except Exception:
+            logger.exception("JJ训练数据分析结果采集失败")
+        return state
     
     def _recognize_pieces(self, img) -> Optional[list]:
         # 识别棋盘和棋子
@@ -97,7 +183,6 @@ class ChessProcess:
         board_array, marker_coords, grid_hashes, details = self.recognizer.recognize_piece_from_grid(
             img, x_array, y_array
         )
-
         # 处理识别过程中的详情/警告
         is_massive_change = False
         if details:
@@ -119,17 +204,15 @@ class ChessProcess:
             # 处理其他识别错误 （排除错误中的允许情况，然后集中安排重试）
             fatal_errors = []
             for d in details:
-                # 无标记情形，允许新开局帧通过
+                # 标记只用于辅助验证，棋盘变化才是真相源。JJ 的移动
+                # 标记可能短暂消失，因此无标记不能成为丢弃整帧的理由。
                 if d.type == RecognitionErrorType.MARKER_MISSING:
-                     is_start_red = (board_array == self.checker.START_RED)
-                     is_start_black = (board_array == self.checker.START_BLACK)
-                     if is_start_red or is_start_black:
-                         logger.debug("忽视开局无标记警告")
-                         continue  
+                    logger.debug("未检测到移动标记，继续使用棋盘变化判断")
+                    continue
                 
-                # 低置信度情形，已经填充最佳猜测，允许通过，让后续的校验来判断
+                # 低置信度格已回退到上一帧（或空格），允许后续校验处理。
                 if d.type == RecognitionErrorType.LOW_CONFIDENCE:
-                    logger.debug(f"低置信度警告(已填充最佳猜测): {d.message}")
+                    logger.debug(f"低置信度警告(已使用安全回退): {d.message}")
                     continue
                 
                 # 其他所有类型错误 (如 COVERED, UNKNOWN, MARKER_MISSING) ，默认丢帧重试
@@ -153,7 +236,15 @@ class ChessProcess:
         # 1. 结算状态
         if state.is_settlement_screen:
             message_bus.publish(Message(MessageType.MOVE_TEXT, ""))  # 清空着法文本
-            message_bus.publish(Message(MessageType.NON_GAME_SCREEN, MessageContent.NON_GAME_SCREEN))
+            board_lost = state.settlement_reason == 'board_lost'
+            message_bus.publish(Message(
+                MessageType.NON_GAME_SCREEN,
+                (
+                    "棋盘画面已丢失；自动走子已安全关闭，请重新定位后手动开启"
+                    if board_lost else MessageContent.NON_GAME_SCREEN
+                ),
+                safety_stop_auto=board_lost,
+            ))
             return BoardAnalysisState()
         
         status = state.board_status
@@ -167,6 +258,7 @@ class ChessProcess:
             if self.checker.consecutive_drops > 0:
                  logger.debug("重置丢帧计数 (原因: ValidStatus)")
             self.checker.consecutive_drops = 0
+            self.checker._pending_lift_source = None
 
         # 3. 局面重复 (高频状态，优先检查)
         if status.is_same_board:
@@ -181,19 +273,45 @@ class ChessProcess:
             return self._handle_my_move(state)
         # 6. 对手走棋
         elif status.is_opponent_step:
+            if self.context.capture_depth_enabled:
+                captured_piece = status.step_info.get('captured_piece')
+                if self.checker.record_own_piece_captured(captured_piece):
+                    self._publish_capture_depth_update(captured_piece)
             return self._handle_opponent_move(state, callback)
 
         # 7. 新对局(注意: 新对局不是指初始局面)
         if status.is_new_game:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             self._handle_new_game()
         # 8. 红方开局
         if status.is_red_start:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             return self._handle_red_start(state, callback)            
         # 9. 黑方开局
         if status.is_black_start:
+            self.checker.reset_capture_depth_bonus()
+            self._publish_capture_depth_update()
             return self._handle_black_start(state)
 
         return BoardAnalysisState()
+
+    def _publish_capture_depth_update(self, captured_piece=None):
+        """通知UI刷新基础深度与本局动态加成。"""
+        engine_params = self.context.get_engine_params()
+        try:
+            base_depth = int(engine_params.get('depth', 20))
+        except (TypeError, ValueError):
+            base_depth = 20
+        bonus = self.checker.capture_depth_bonus
+        message_bus.publish(Message(
+            MessageType.PARAM_UPDATE,
+            base_depth + bonus,
+            base_depth=base_depth,
+            depth_bonus=bonus,
+            captured_piece=captured_piece,
+        ))
 
     def _handle_red_start(self, state, callback):
         # 处理红方开局
@@ -238,6 +356,30 @@ class ChessProcess:
         status = state.board_status
         if status is not None:
             message = status.message
+
+            # 棋子长时间悬空时画面只有“起点变空”，这不是完整走法。
+            # 永远保留上一可信局面，不累计强制同步计数，也不额外排队重拍；
+            # 连续截图会在棋子真正落下后自然得到完整的两个端点。
+            if status.step_info.get('transient_single_change'):
+                position = status.step_info.get('position')
+                if self.checker._pending_lift_source != position:
+                    logger.info(
+                        f"暂存悬子/不完整走子: position={position}, "
+                        f"piece={status.step_info.get('piece')}"
+                    )
+                self.checker._pending_lift_source = position
+                self.checker.consecutive_drops = 0
+                return BoardAnalysisState()
+
+            # 错误轮次永远不能通过连续异常计数进入强制同步，否则漏识别
+            # 一步后可能把同一方的下一步误当成可信局面并触发自动走子。
+            if getattr(status, 'is_turn_mismatch', False):
+                self.checker.consecutive_drops = 0
+                self.context.discard_before_timestamp = time.time()
+                message_bus.publish(Message(MessageType.RETRY_CAPTURE, message))
+                logger.warning(f"拒绝错误轮次候选并请求重拍: {message}")
+                return BoardAnalysisState()
+
             logger.warning(f"转入非法状态处理，原因: {message}")
             
             # --- 强制同步逻辑 ---
@@ -256,6 +398,21 @@ class ChessProcess:
                 # 非法移动可以强制同步
                 logger.debug("触发强制同步(非法移动)! 强制接受当前局面.")
                 self.checker.force_sync_board(state.board_array)
+                if (
+                    state.grid_hashes
+                    and hasattr(self.recognizer, 'commit_tracking_state')
+                ):
+                    own_side = 'red' if self.checker.is_red else 'black'
+                    next_side_to_move = (
+                        ('black' if own_side == 'red' else 'red')
+                        if status.is_my_step else own_side
+                    )
+                    self.recognizer.commit_tracking_state(
+                        state.board_array,
+                        state.grid_hashes,
+                        self.checker.is_red,
+                        next_side_to_move,
+                    )
                 self.checker.consecutive_drops = 0
                 message = "触发强制同步，重置Checker状态"
                 
@@ -307,8 +464,12 @@ class ChessProcess:
 
     def _handle_my_move(self, state):
         # 处理己方走棋
-        
         # print("Debug - 我方走棋")
+
+        # 一旦画面确认我方已经落子，上一轮仍在计算或尚未消费的推荐
+        # 都已经过期。立即作废令牌并清空文字，避免显示旧箭头/旧着法。
+        self.context.invalidate_analysis()
+        message_bus.publish(Message(MessageType.MOVE_TEXT, ""))
 
         message_bus.publish(Message(
             MessageType.CHANGE,
@@ -357,12 +518,25 @@ class ChessProcess:
             fen_str, all_moves, state, callback
         )
 
-    def _get_engine_move(self, fen_str, moves, state, callback, is_newgame_override=False) -> BoardAnalysisState:
+    def _get_engine_move(
+        self, fen_str, moves, state, callback, is_newgame_override=False,
+        desync_retry=0, engine_retry=0, search_override=None,
+    ) -> BoardAnalysisState:
         # 获取引擎着法 (异步多线程版)
+        analysis_token = self.context.next_analysis_token()
+
+        # 后台分析必须使用不可变快照，避免后续识别帧覆盖转换所用棋盘。
+        analysis_board = (
+            [row[:] for row in state.board_array]
+            if state.board_array else None
+        )
         
         # 2. 保存当前状态供"变招"使用
         self.checker.last_fen_str = fen_str
-        self.checker.last_board_array_for_engine = state.board_array
+        self.checker.last_board_array_for_engine = (
+            [row[:] for row in analysis_board]
+            if analysis_board else None
+        )
         
         # 3. 准备参数
         # [Engine Correction] 
@@ -385,19 +559,27 @@ class ChessProcess:
         # 局面不连续时（强制同步、历史重置等），必须发送 newgame 命令
         is_newgame = is_newgame_override or state.board_status.is_new_game
         is_red = self.checker.is_red
+        depth_bonus = (
+            self.checker.capture_depth_bonus
+            if self.context.capture_depth_enabled else 0
+        )
         
         # [DEBUG] 追踪关键状态
         logger.debug(f"Analysis Context: IsNewGame={is_newgame}, IsRed={is_red}")
         logger.debug(f"  EngineFEN: {engine_fen if engine_fen else 'startpos'}")
         logger.debug(f"  VerifyFEN: {verify_fen}")
         logger.debug(f"  Moves: {moves}")
+        logger.debug(f"  CaptureDepthBonus: {depth_bonus}")
         
         # 4. 定义后台任务
         def run_analysis():
             try:
                 # [Watchdog] 启动看门狗定时器，防止引擎计算超时卡死
-                # 设定30秒超时（比引擎内部35秒超时提前5秒panic）
-                watchdog_timer = threading.Timer(30.0, self.engine.stop_analysis)
+                # 固定深度加深时同步延长安全上限，最高允许5分钟。
+                watchdog_timeout = self.engine.get_search_timeout(
+                    depth_bonus, search_override
+                )
+                watchdog_timer = threading.Timer(watchdog_timeout, self.engine.stop_analysis)
                 watchdog_timer.start()
                 
                 try:
@@ -409,38 +591,76 @@ class ChessProcess:
                         use_startpos=use_startpos,
                         is_newgame=is_newgame, 
                         moves=moves,
-                        multipv=1 
+                        multipv=1,
+                        depth_bonus=depth_bonus,
+                        search_override=search_override,
                     )
                 finally:
                     # 无论成功或异常，必须取消定时器
                     watchdog_timer.cancel()
                 
                 # 存储备选着法
+                if not self.context.is_analysis_token_current(analysis_token):
+                    logger.debug(f"忽略过期引擎结果: token={analysis_token}, move={move}")
+                    return
+
                 self.checker.last_pvs = pvs
+
+                # 固定深度搜索可能在看门狗stop后没有来得及输出bestmove，
+                # 但此前的info pv仍是完整合法候选。优先复用最后PV首步，
+                # 避免把已经计算数十秒的结果全部丢弃。
+                move = self._best_available_engine_move(move, pvs)
                 
                 # 检查着法有效性
                 if not move or len(move) != 4:
                     logger.warning(f"Engine returned invalid move: '{move}', fen={verify_fen}, moves={moves}")
-                    message_bus.publish(Message(MessageType.ERROR, f"引擎未返回有效着法"))
+                    self._recover_from_empty_engine_move(
+                        fen_str=fen_str,
+                        moves=moves,
+                        state=state,
+                        callback=callback,
+                        engine_retry=engine_retry,
+                    )
                     return
                 
                 # 转换并推送结果
-                chinese_move = utils.convert_move_to_chinese(move, self.checker.last_board_array_for_engine, is_red)
+                chinese_move = utils.convert_move_to_chinese(move, analysis_board, is_red)
                 
-                # 如果着法无效（起点无棋子或是对方棋子），跳过推送
+                # 引擎局面与视觉局面漂移时，自动以当前FEN重新锚定并重算。
                 if chinese_move is None:
                     logger.warning(f"着法转换失败(无效/非法): {move} on board_fen={verify_fen}")
+                    self._recover_from_engine_desync(
+                        move=move,
+                        state=state,
+                        analysis_board=analysis_board,
+                        callback=callback,
+                        desync_retry=desync_retry,
+                    )
                     return
                 
                 logger.debug(f"Engine Analysis Done: {move}")
-                
+                auto_execute = bool(
+                    getattr(self.context, 'auto_move_enabled', False)
+                )
+                logger.info(
+                    "引擎推荐已生成: "
+                    f"move={move}, token={analysis_token}, "
+                    f"auto_execute={auto_execute}"
+                )
+                self.checker.consecutive_mismatches = 0
                 # 检查是否已在结算画面
                 if self.checker.in_settlement_screen:
                     logger.info(f"检测到结算画面，忽略着法推送: {move}")
                     return
 
                 message_bus.publish(Message(MessageType.MOVE_TEXT, chinese_move))
-                message_bus.publish(Message(MessageType.MOVE_CODE, move, is_red=is_red))
+                message_bus.publish(Message(
+                    MessageType.MOVE_CODE,
+                    move,
+                    is_red=is_red,
+                    analysis_token=analysis_token,
+                    auto_execute=auto_execute,
+                ))
                 message_bus.publish(Message(MessageType.STATUS, "推荐走法："))
                 
             except Exception as e:
@@ -452,6 +672,145 @@ class ChessProcess:
         analysis_thread.start()
         
         return BoardAnalysisState()
+
+    @staticmethod
+    def _best_available_engine_move(move, pvs):
+        """bestmove缺失时安全采用最后PV的首步。"""
+        if move and isinstance(move, str) and len(move) == 4:
+            return move
+        for candidate in pvs or []:
+            if not isinstance(candidate, str):
+                continue
+            candidate = candidate.split()[0][:4] if candidate.split() else ""
+            if (
+                len(candidate) == 4
+                and candidate[0].isalpha()
+                and candidate[2].isalpha()
+                and candidate[1].isdigit()
+                and candidate[3].isdigit()
+            ):
+                logger.warning(f"bestmove缺失，采用最后PV候选: {candidate}")
+                return candidate
+        return None
+
+    def _recover_from_empty_engine_move(
+        self, *, fen_str, moves, state, callback, engine_retry
+    ):
+        """无bestmove且无PV时自动快速重算，必要时重启引擎。"""
+        if engine_retry == 0:
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "引擎未及时返回着法，正在快速重算...",
+            ))
+            self._get_engine_move(
+                fen_str,
+                moves,
+                state,
+                callback,
+                is_newgame_override=True,
+                engine_retry=1,
+                search_override=("movetime", "5000"),
+            )
+            return
+
+        if engine_retry == 1:
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "引擎响应异常，正在自动重启并重算...",
+            ))
+            try:
+                self.engine.quit(fast=True)
+                if not self.engine.start():
+                    raise RuntimeError("Pikafish重新启动失败")
+            except Exception as exc:
+                logger.error(f"自动重启引擎失败: {exc}")
+                message_bus.publish(Message(
+                    MessageType.ERROR,
+                    f"引擎自动重启失败: {exc}",
+                ))
+                return
+            self._get_engine_move(
+                fen_str,
+                moves,
+                state,
+                callback,
+                is_newgame_override=True,
+                engine_retry=2,
+                search_override=("movetime", "5000"),
+            )
+            return
+
+        message_bus.publish(Message(
+            MessageType.ERROR,
+            "引擎重启后仍未返回着法，请检查引擎文件",
+        ))
+
+    def _recover_from_engine_desync(
+        self,
+        *,
+        move,
+        state,
+        analysis_board,
+        callback,
+        desync_retry,
+    ):
+        """恢复引擎历史与视觉棋盘不一致，避免相同局面永久卡住。"""
+        if not analysis_board:
+            message_bus.publish(Message(
+                MessageType.ERROR,
+                "引擎局面不同步且缺少棋盘快照，正在自动刷新",
+            ))
+            self.context.discard_before_timestamp = time.time()
+            message_bus.publish(Message(MessageType.RETRY_CAPTURE, "引擎局面不同步"))
+            return
+
+        current_fen, _ = utils.convert_array_to_fen(
+            analysis_board,
+            self.checker.is_red,
+        )
+        if desync_retry < 1:
+            logger.warning(
+                f"自动重同步引擎局面: invalid_move={move}, anchor={current_fen}"
+            )
+            self.history.clear()
+            self.context.base_fen = current_fen
+            self.checker.force_sync_board(analysis_board)
+            message_bus.publish(Message(
+                MessageType.STATUS,
+                "检测到引擎局面漂移，正在自动重新同步...",
+            ))
+            self._get_engine_move(
+                current_fen,
+                "",
+                state,
+                callback,
+                is_newgame_override=True,
+                desync_retry=desync_retry + 1,
+            )
+            return
+
+        # 当前FEN重算仍失败：执行与手动刷新等价的硬恢复，再由重试截图
+        # 流程重新建立棋盘与历史。保留本局动态深度加成。
+        logger.error(
+            f"当前FEN重算仍返回非法着法: {move}; 执行自动硬刷新"
+        )
+        preserved_depth_bonus = self.checker.capture_depth_bonus
+        self.context.invalidate_analysis()
+        self.engine.stop_analysis()
+        self.history.clear()
+        self.context.base_fen = None
+        self.context.reset_checker()
+        self.checker.capture_depth_bonus = preserved_depth_bonus
+        self.context.reset_recognizer()
+        self.context.discard_before_timestamp = time.time()
+        message_bus.publish(Message(
+            MessageType.ERROR,
+            "引擎局面同步失败，已自动刷新并重新识别",
+        ))
+        message_bus.publish(Message(
+            MessageType.RETRY_CAPTURE,
+            "引擎局面同步失败，自动硬刷新",
+        ))
 
     def request_alternative_move(self):
         """
@@ -478,7 +837,11 @@ class ChessProcess:
                 None, 
                 use_startpos=(self.context.base_fen is None), 
                 moves=all_moves,
-                multipv=2
+                multipv=2,
+                depth_bonus=(
+                    self.checker.capture_depth_bonus
+                    if self.context.capture_depth_enabled else 0
+                ),
              )
              
              # 获取第二好的着法
@@ -515,7 +878,20 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
     result_dict = {}
     result_lock = threading.Lock()
     result_ready = threading.Condition(result_lock)
-    NUM_WORKERS = 2
+
+    def put_latest_result(item):
+        """结果消费落后时淘汰最旧结果，避免实时流水线无限积压。"""
+        while not (stop_event and stop_event.is_set()):
+            try:
+                result_queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    result_queue.get_nowait()
+                    result_queue.task_done()
+                    logger.warning("结果队列已满，淘汰过期识别结果")
+                except queue.Empty:
+                    continue
 
     def process_worker():
         # 处理棋盘截图,转为局面数组, 并检查局面状态
@@ -524,6 +900,7 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 break
             item = process_queue.get()  # 阻塞等待任务
             if item == "STOP":
+                process_queue.task_done()
                 break
             capture_time, screenshot = item
             
@@ -546,13 +923,17 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 break
             with result_lock:
                 if not result_dict:
-                    result_ready.wait()
+                    # 使用短超时检查stop_event，避免关闭程序时永久睡在条件
+                    # 变量上，迫使UI逐线程等待完整join超时。
+                    result_ready.wait(timeout=0.2)
                     if stop_event and stop_event.is_set():
                         return
+                    if not result_dict:
+                        continue
                 # 按时间戳排序，最早的最先处理
                 earliest_time = min(result_dict.keys())
                 process_result = result_dict.pop(earliest_time)
-                result_queue.put(process_result)
+                put_latest_result(process_result)
 
     def result_handler_worker():
         # 对不同局面状态分发处理
@@ -566,6 +947,7 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 # 使用超时获取结果，避免无限等待
                 process_result = result_queue.get(timeout=1.0)
                 if process_result == "STOP":
+                    result_queue.task_done()
                     break
                 
                 if process_result:
@@ -602,8 +984,8 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 logger.error(f"结果处理线程出错: {e}")
 
     threads = []
-    for _ in range(NUM_WORKERS): 
-        t = threading.Thread(target=process_worker, daemon=True) # 2个线程,负责识别与检查
+    for _ in range(PROCESS_WORKER_COUNT):
+        t = threading.Thread(target=process_worker, daemon=True)
         t.start()
         threads.append(t)
     t = threading.Thread(target=result_sort_worker, daemon=True) # 1个线程,负责排序
@@ -614,4 +996,3 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
     threads.append(t)
 
     return threads
-
