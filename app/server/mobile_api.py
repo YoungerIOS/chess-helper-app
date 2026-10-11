@@ -368,7 +368,7 @@ def analyze_image():
                         use_continuous_moves = True
                         logger.info(f"Continuous move progression detected: +{mobile_session.last_best_move_code} +{opp_move}")
 
-            # 解析可能存在的 param 字段 (快捷指令/手机客户端传来的可选计算参数)
+            # 解析可能存在的 param 字段 (手机客户端传来的可选计算参数)
             go_param = 'movetime'
             go_value = '500'
             param_str = request.form.get('param')
