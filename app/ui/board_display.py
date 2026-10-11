@@ -405,3 +405,6 @@ class BoardDisplay(QWidget):
         
     def update_arrow(self, *args, **kwargs):
         self.board_canvas.update_arrow(*args, **kwargs)
+
+    def update_pieces(self, *args, **kwargs):
+        self.board_canvas.update_pieces(*args, **kwargs)

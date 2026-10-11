@@ -120,6 +120,7 @@ class ChessContext:
     analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
     discard_before_timestamp: float = 0.0  # RETRY时设置，过滤在此时间之前截图的帧
     _theme: str = "light"  # 当前主题
+    is_desktop_running: bool = False  # 桌面分析主循环是否正在运行 (用于与手机协助互斥)
     
     
     def __post_init__(self):

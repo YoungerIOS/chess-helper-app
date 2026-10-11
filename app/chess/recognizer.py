@@ -36,9 +36,14 @@ class ChessRecognizer:
         self.last_marker_coords = []  # 缓存标记位置
 
     def preprocess_image(self, img_origin):
-        # img = cv2.imread(img_path)  
-        img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
-        img_np = img_np[:, :, :3]  # 去掉 alpha 通道
+        if isinstance(img_origin, np.ndarray):
+            img_np = img_origin
+            if img_np.shape[2] == 4:
+                img_np = img_np[:, :, :3]
+        else:
+            img_np = np.frombuffer(img_origin.bgra, np.uint8).reshape(img_origin.height, img_origin.width, 4)
+            img_np = img_np[:, :, :3]  # 去掉 alpha 通道
+            
         if img_np is None:  
             logger.error("npImage is None.")
             return  None, None 

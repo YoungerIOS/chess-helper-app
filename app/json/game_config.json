@@ -74,32 +74,32 @@
         },
         "regions": {
             "board": {
-                "left": -925.2,
-                "top": 261.7,
-                "width": 408.9,
-                "height": 438.9
+                "left": 508.5,
+                "top": 226.2,
+                "width": 423.6,
+                "height": 455.9
             },
             "avatar_upper": {
-                "left": -925.2,
-                "top": 119.5,
-                "width": 90.0,
-                "height": 90.0
+                "left": 508.5,
+                "top": 78.5,
+                "width": 94.0,
+                "height": 94.0
             },
             "avatar_lower": {
-                "left": -598.0,
-                "top": 755.4,
-                "width": 90.0,
-                "height": 90.0
+                "left": 847.4,
+                "top": 739.1,
+                "width": 94.0,
+                "height": 94.0
             }
         }
     },
-    "platform": "TT",
+    "platform": "JJ",
     "analysis_mode": "continuous",
     "board_index": 2,
     "theme": "dark",
     "engine_params": {
         "movetime": "3000",
-        "depth": "23",
+        "depth": "21",
         "goParam": "depth"
     }
 }

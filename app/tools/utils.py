@@ -138,18 +138,18 @@ def get_app_data_dir():
     os.makedirs(data_dir, exist_ok=True)
     return data_dir
 
-def app_cache_path(filename):
-    """获取调试图片的完整路径"""
+def app_cache_path(*path_parts):
+    """获取缓存文件的完整路径"""
     cache_dir = get_app_cache_dir()
-    full_path = os.path.join(cache_dir, filename)
+    full_path = os.path.join(cache_dir, *path_parts)
     # 确保子目录存在
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     return full_path
 
-def app_data_path(filename):
-    """获取配置文件的完整路径"""
+def app_data_path(*path_parts):
+    """获取配置/数据文件的完整路径"""
     data_dir = get_app_data_dir()
-    full_path = os.path.join(data_dir, filename)
+    full_path = os.path.join(data_dir, *path_parts)
     # 确保子目录存在
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     return full_path
@@ -433,8 +433,6 @@ def convert_coords_to_move(from_pos, to_pos, is_red=False):
 
 def convert_to_builtin_type(obj):
     """递归转换所有numpy类型为Python内置类型"""
-    import numpy as np
-    
     if isinstance(obj, dict):
         return {k: convert_to_builtin_type(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -474,3 +472,51 @@ def compute_image_hash(image_array):
         return str(imagehash.dhash(pil_img))
     except Exception:
         return None
+
+def get_local_ip() -> str:
+    """获取真实局域网私有 IP (自动穿透代理与多物理网卡)"""
+    import subprocess
+    import re
+    import socket
+
+    # 1. 针对 macOS：优先遍历所有常见的物理网卡 (en0 到 en5)
+    if sys.platform == 'darwin':
+        for iface in ['en0', 'en1', 'en2', 'en3', 'en4', 'en5']:
+            try:
+                ip = subprocess.check_output(
+                    ['ipconfig', 'getifaddr', iface], 
+                    stderr=subprocess.DEVNULL
+                ).decode('utf-8').strip()
+                # 过滤回环、链路本地和 Clash/Surge 虚拟代理网段 (198.18.x.x)
+                if ip and not ip.startswith('127.') and not ip.startswith('169.254.') and not ip.startswith('198.18.'):
+                    return ip
+            except Exception:
+                pass
+
+    # 2. 如果指定网卡未命中，全面解析系统网络接口中的局域网私有 IP
+    try:
+        cmd = ['ifconfig'] if sys.platform != 'win32' else ['ipconfig']
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
+        lan_ips = re.findall(
+            r'(?:inet\s+|IPv4 Address[.\s]*:\s*)(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)', 
+            out
+        )
+        for ip in lan_ips:
+            if not ip.startswith('198.18.') and not ip.startswith('169.254.'):
+                return ip
+    except Exception:
+        pass
+
+    # 3. 通用 Socket UDP 探测兜底
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if not ip.startswith("198.18.") and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+

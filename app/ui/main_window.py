@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, Signal
 from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
 from pynput import mouse
-from app.tools.utils import resource_path
+from app.tools.utils import resource_path, get_local_ip
+from app.tools.log_config import get_logger
 from app.chess.screenshot import ChessCaptureManager
 from app.chess.board_locator import BoardLocator
 from app.chess.engine import ChessEngine
@@ -16,12 +17,19 @@ from app.chess.history import MoveHistory
 from app.chess.message import Message, MessageType
 from app.chess.message_bus import message_bus
 from app.chess.context import context
+from app.server.mobile_api import MobileServerThread
 from app.ui.board_display import BoardDisplay
 from app.chess.processor import ChessProcess
 from app.themes.theme_manager import ThemeManager
+from app.ui.qr_dialog import QRCodeDialog
+from app.server.tunnel_manager import TunnelManager
+
+logger = get_logger(__name__)
 
 class MainWindow(QMainWindow):
     resume_polling_signal = Signal()  # 定义信号用于在主线程恢复轮询
+    tunnel_url_ready_signal = Signal(str)  # 隧道外网URL就绪信号
+    tunnel_error_signal = Signal(str)  # 隧道错误信号
 
 
     def __init__(self):
@@ -95,6 +103,9 @@ class MainWindow(QMainWindow):
         
         # 连接信号与槽
         self.resume_polling_signal.connect(lambda: self.check_platform_change(notify_always=False, schedule_next=True))
+        self.tunnel_url_ready_signal.connect(self._on_tunnel_url_ready)
+        self.tunnel_error_signal.connect(self._on_tunnel_error)
+        self.tunnel_manager = TunnelManager(local_port=5050)
         
         # 顶部文本显示区域
         self.text_display = QLabel()
@@ -218,6 +229,23 @@ class MainWindow(QMainWindow):
         self.continuous_action.triggered.connect(self.toggle_continuous)
         self.timer_action.triggered.connect(self.toggle_timer)
         
+        self.settings_menu.addSeparator()
+        self.mobile_assist_action = self.settings_menu.addAction("手机协助")
+        self.mobile_assist_action.setCheckable(True)
+        self.mobile_assist_action.triggered.connect(self.toggle_mobile_assist)
+        self.mobile_server_thread = None
+        self.qr_dialog = None
+        
+        # 手机心跳状态机维护
+        self.mobile_has_ever_connected = False
+        self.mobile_last_heartbeat_time = None
+        self.mobile_last_heartbeat_data = None
+        self.mobile_heartbeat_timer = QTimer(self)
+        self.mobile_heartbeat_timer.timeout.connect(self._check_mobile_heartbeat_timeout)
+        
+        self.show_qr_action = self.settings_menu.addAction("连接二维码")
+        self.show_qr_action.triggered.connect(self.show_qr_dialog)
+        
         # 创建参数选择按钮
         self.param_btn = QPushButton("引擎参数")
         self.param_btn.setFixedHeight(35)
@@ -338,25 +366,41 @@ class MainWindow(QMainWindow):
                 # 更新最后检测到的平台状态
                 self.last_detected_platform = detected_platform
 
+                # 手机协助开启且桌面未运行时，顶部优先显示手机协助连接状态，避免被后台轮询覆盖
+                is_mobile_showing = (
+                    hasattr(self, 'mobile_assist_action') 
+                    and self.mobile_assist_action.isChecked() 
+                    and not self.is_running
+                )
+
                 # 如果检测到的平台与当前上下文不一致，则切换
                 if detected_platform != context.platform:
                     print(f"Auto-switch platform: {context.platform} -> {detected_platform}")
                     context.set_platform(detected_platform)
-                    self.update_text(f"自动切换到游戏: {platform_display_name}", MessageType.STATUS)
+                    if not is_mobile_showing:
+                        self.update_text(f"自动切换到游戏: {platform_display_name}", MessageType.STATUS)
                 else:
-                     # 即使未变化，也显示当前检测到的平台（因为可能是启动时的确认，或者是轮询成功的通知）
-                     self.update_text(f"检测到游戏: {platform_display_name}", MessageType.STATUS)
+                    # 即使未变化，也显示当前检测到的平台（因为可能是启动时的确认，或者是轮询成功的通知）
+                    if not is_mobile_showing:
+                        self.update_text(f"检测到游戏: {platform_display_name}", MessageType.STATUS)
             else:
+                is_mobile_showing = (
+                    hasattr(self, 'mobile_assist_action') 
+                    and self.mobile_assist_action.isChecked() 
+                    and not self.is_running
+                )
                 # 情况1: 之前检测到了游戏，现在没了 -> 游戏被关闭
                 if self.last_detected_platform is not None:
-                     self.update_text("游戏窗口已关闭，等待重新启动...", MessageType.ERROR)
-                     self.last_detected_platform = None
+                    if not is_mobile_showing:
+                        self.update_text("游戏窗口已关闭，等待重新启动...", MessageType.ERROR)
+                    self.last_detected_platform = None
                 
                 # 情况2: 强制通知（如启动时或点击开始时）
                 elif notify_always:
-                    self.update_text("未检测到象棋游戏窗口", MessageType.ERROR)
+                    if not is_mobile_showing:
+                        self.update_text("未检测到象棋游戏窗口", MessageType.ERROR)
                     if schedule_next:
-                         print("未检测到象棋游戏窗口，2秒后重试...")
+                        print("未检测到象棋游戏窗口，2秒后重试...")
                 
             # 只要不是正在运行状态，且要求调度，就继续轮询（允许用户先开一个游戏再换另一个）
             if schedule_next and not self.is_running:
@@ -413,11 +457,12 @@ class MainWindow(QMainWindow):
     def on_start(self):
         """开始/停止按钮事件"""
         if not self.is_running:
+            self.is_running = True
+            context.is_desktop_running = True
+            self.start_btn.setText("停止")
+            
             # 点击开始时，再次确认一下平台并显示结果 (不需要轮询)
             self.check_platform_change(notify_always=True, schedule_next=False)
-            
-            self.is_running = True
-            self.start_btn.setText("停止")
             self.create_queue()
         else:
             self.on_stop()
@@ -429,12 +474,18 @@ class MainWindow(QMainWindow):
         self.is_stopping = True
         # 立即更新UI状态
         self.is_running = False
+        context.is_desktop_running = False
         self.start_btn.setText("开始")
         
         # 清空界面状态
         self.board_display.clear_board()
         self.lines[2] = "" # 确保清除着法缓存
-        self.update_text("点击开始，为你推荐最佳着法~", MessageType.STATUS)
+        
+        # 如果手机协助处于开启状态，自动恢复显示手机协助的状态；否则显示默认开始提示
+        if hasattr(self, 'mobile_assist_action') and self.mobile_assist_action.isChecked():
+            self._update_mobile_status_display()
+        else:
+            self.update_text("点击开始，为你推荐最佳着法~", MessageType.STATUS)
         
         # 异步执行停止操作，避免阻塞UI
         def stop_worker():
@@ -527,18 +578,26 @@ class MainWindow(QMainWindow):
                     # 非棋局画面：清空棋盘并显示提示
                     self.board_display.clear_board()
                     self.update_text(result.content, MessageType.STATUS)
+                elif result.type == MessageType.HEARTBEAT:
+                    # 处理手机端心跳消息
+                    import time
+                    self.mobile_has_ever_connected = True
+                    self.mobile_last_heartbeat_time = time.time()
+                    self.mobile_last_heartbeat_data = result.kwargs
+                    self._update_mobile_status_display()
     
     def close_queue(self):
         """销毁截图线程"""
         if self.capture_manager is not None:
             self.capture_manager.stop_capture()  # 停止截图和工作线程
 
-    def update_text(self, text, message_type=None):
+    def update_text(self, text, message_type=None, color=None):
         """
         更新显示文本
         Args:
             text: 要显示的文本内容
             message_type: 消息类型，用于确定显示颜色和样式
+            color: 自定义文本颜色（可选）
         """
         # 定义不同消息类型的颜色和样式
         message_styles = {
@@ -572,7 +631,9 @@ class MainWindow(QMainWindow):
         }
         
         # 获取样式配置
-        style = message_styles.get(message_type, default_style)
+        style = dict(message_styles.get(message_type, default_style))
+        if color:
+            style['color'] = color
         
         # 处理多行文本
         lines = text.split('\n') if '\n' in text else [text]
@@ -735,6 +796,132 @@ class MainWindow(QMainWindow):
         context.analysis_mode = "timer"
         context.save_config()
 
+    def _get_local_ip(self) -> str:
+        """获取真实局域网私有 IP (自动穿透代理与多物理网卡)"""
+        return get_local_ip()
+
+    def show_qr_dialog(self):
+        """显示或刷新手机协助连接二维码卡片"""
+        # 如果手机协助服务未启动，先自动帮用户启动服务
+        if hasattr(self, 'mobile_assist_action') and not self.mobile_assist_action.isChecked():
+            self.mobile_assist_action.setChecked(True)
+            self.toggle_mobile_assist()
+
+        ip = self._get_local_ip()
+        tunnel_url = self.tunnel_manager.tunnel_url if self.tunnel_manager else None
+        pairing_id = self.tunnel_manager.pairing_id if self.tunnel_manager else "CHESS-DEFAULT"
+        
+        if self.qr_dialog is None:
+            self.qr_dialog = QRCodeDialog(
+                ip=ip, 
+                port=5050, 
+                pairing_id=pairing_id,
+                tunnel_url=tunnel_url, 
+                parent=self
+            )
+        else:
+            self.qr_dialog.ip = ip
+            self.qr_dialog.lan_api_url = f"http://{ip}:5050/api/analyze"
+            self.qr_dialog.pairing_id = pairing_id
+            self.qr_dialog.update_tunnel_url(tunnel_url)
+
+        # 居中对齐在主窗口正上方
+        geo = self.geometry()
+        x = geo.x() + (geo.width() - self.qr_dialog.width()) // 2
+        y = geo.y() + (geo.height() - self.qr_dialog.height()) // 2
+        self.qr_dialog.move(max(10, x), max(10, y))
+
+        self.qr_dialog.show()
+        self.qr_dialog.raise_()
+        self.qr_dialog.activateWindow()
+
+    def _on_tunnel_url_ready(self, url: str):
+        """外网隧道静默就绪，更新二维码数据"""
+        logger.info(f"Cloudflare Tunnel Ready: {url}")
+        if self.qr_dialog:
+            self.qr_dialog.update_tunnel_url(url)
+
+    def _on_tunnel_error(self, err_msg: str):
+        """外网隧道异常日志 (静默处理，不弹窗打扰用户)"""
+        logger.warning(f"Cloudflare Tunnel Notice: {err_msg}")
+
+    def _update_mobile_status_display(self):
+        """根据心跳维护的状态机更新顶部面板状态显示"""
+        # 如果桌面分析正在运行，不显示手机协助状态，保持桌面对局提示信息
+        if self.is_running:
+            return
+
+        # 如果手机协助未勾选开启，不处理
+        if not (hasattr(self, 'mobile_assist_action') and self.mobile_assist_action.isChecked()):
+            return
+
+        import time
+        now = time.time()
+        
+        # 8 秒内是否收到过心跳
+        if self.mobile_last_heartbeat_time is not None and (now - self.mobile_last_heartbeat_time <= 8.0):
+            data = self.mobile_last_heartbeat_data or {}
+            network = str(data.get("network", "wifi")).lower()
+            latency = data.get("latency", 0)
+            
+            if network == "wifi":
+                text = f"🟢 手机已连接 · Wi-Fi 直连 ({latency} ms)"
+                color = "#16A34A"  # 绿色
+            else:
+                text = f"🟡 手机已连接 · 蜂窝网络 ({latency} ms)"
+                color = "#D97706"  # 琥珀黄
+            self.update_text(text, MessageType.STATUS, color=color)
+        else:
+            if self.mobile_has_ever_connected:
+                text = "⚪ 手机已断开连接"
+                color = "#94A3B8"  # 灰色
+            else:
+                text = "⚪ 等待手机连接 (首次连接需扫码配对)"
+                color = "#64748B"  # 浅灰色
+            self.update_text(text, MessageType.STATUS, color=color)
+
+    def _check_mobile_heartbeat_timeout(self):
+        """每秒检查一次心跳是否超时"""
+        self._update_mobile_status_display()
+
+    def toggle_mobile_assist(self):
+        """切换手机协助服务 (一键开启，内网+公网全自动静默就绪)"""
+        is_checked = self.mobile_assist_action.isChecked()
+        if is_checked:
+            if self.mobile_server_thread is None:
+                self.mobile_server_thread = MobileServerThread(port=5050)
+                self.mobile_server_thread.start()
+            
+            # 初始化心跳状态机并启动 8 秒超时检测定时器
+            self.mobile_has_ever_connected = False
+            self.mobile_last_heartbeat_time = None
+            self.mobile_last_heartbeat_data = None
+            self._update_mobile_status_display()
+            self.mobile_heartbeat_timer.start(1000)
+            
+            # 后台静默启动公网隧道 (用户无需手动配置)
+            if self.tunnel_manager and not self.tunnel_manager.is_running:
+                self.tunnel_manager.start(
+                    on_url_ready=lambda url: self.tunnel_url_ready_signal.emit(url),
+                    on_error=lambda err: self.tunnel_error_signal.emit(err)
+                )
+
+        else:
+            self.mobile_heartbeat_timer.stop()
+            self.mobile_has_ever_connected = False
+            self.mobile_last_heartbeat_time = None
+            self.mobile_last_heartbeat_data = None
+            
+            if self.tunnel_manager and self.tunnel_manager.is_running:
+                self.tunnel_manager.stop()
+            if self.qr_dialog is not None:
+                self.qr_dialog.close()
+            if self.mobile_server_thread is not None:
+                self.mobile_server_thread.stop()
+                self.mobile_server_thread = None
+                if not self.is_running:
+                    self.update_text("手机协助已关闭", MessageType.STATUS)
+
     def on_reposition(self):
         """处理重新定位选项"""
         # 手动定位前先停止当前运行的任务
@@ -851,6 +1038,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
 
+        if hasattr(self, 'qr_dialog') and self.qr_dialog:
+            self.qr_dialog.close()
+        if hasattr(self, 'tunnel_manager') and self.tunnel_manager:
+            self.tunnel_manager.stop()
+        if hasattr(self, 'mobile_server_thread') and self.mobile_server_thread:
+            self.mobile_server_thread.stop()
+        if hasattr(self, 'mobile_heartbeat_timer'):
+            self.mobile_heartbeat_timer.stop()
+
         self.close_queue()
         
         # 完全退出引擎
@@ -881,6 +1077,14 @@ class MainWindow(QMainWindow):
         # 停止所有线程和监听器
         if hasattr(self, 'manual_positioner'):
             self.manual_positioner.cleanup()
+        if hasattr(self, 'qr_dialog') and self.qr_dialog:
+            self.qr_dialog.close()
+        if hasattr(self, 'tunnel_manager') and self.tunnel_manager:
+            self.tunnel_manager.stop()
+        if hasattr(self, 'mobile_server_thread') and self.mobile_server_thread:
+            self.mobile_server_thread.stop()
+        if hasattr(self, 'mobile_heartbeat_timer'):
+            self.mobile_heartbeat_timer.stop()
         self.close_queue()
         
         # 完全退出引擎

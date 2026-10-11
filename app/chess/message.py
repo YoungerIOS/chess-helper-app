@@ -12,6 +12,7 @@ class MessageType(Enum):
     STOP = auto()           # 停止消息
     RETRY_CAPTURE = auto()  # 重试截图消息
     NON_GAME_SCREEN = auto()  # 非棋局画面（结算画面等）
+    HEARTBEAT = auto()      # 手机心跳消息
 
 
 

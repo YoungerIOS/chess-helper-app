@@ -192,7 +192,7 @@ class ChessEngine:
         self._send_command(f"go {param} {value}")
         return self._read_output_with_timeout(35)
 
-    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1) -> Tuple[str, str, List[str]]:
+    def get_bestmove(self, fen: str, side: bool, display_callback: Optional[Callable] = None, *, use_startpos: bool = True, is_newgame: bool = False, moves: Optional[str] = None, multipv: int = 1, go_param: Optional[str] = None, go_value: Optional[str] = None) -> Tuple[str, str, List[str]]:
         """获取最佳走法
         Returns:
             (best_move, fen_string, pvs_list)
@@ -220,12 +220,17 @@ class ChessEngine:
             fen_string = ''
             if fen:
                 fen_string = fen + ' ' + ('w' if side else 'b')
-            engine_params = context.get_engine_params()
-            param = engine_params.get('goParam', 'depth')
-            value = engine_params.get(param, '20')
-            if not param or not value:
-                param = 'depth'
-                value = '20'
+                
+            if go_param and go_value:
+                param = go_param
+                value = go_value
+            else:
+                engine_params = context.get_engine_params()
+                param = engine_params.get('goParam', 'depth')
+                value = engine_params.get(param, '20')
+                if not param or not value:
+                    param = 'depth'
+                    value = '20'
 
             if display_callback:
                 display_callback(Message(MessageType.STATUS, MessageContent.ENGINE_THINKING))

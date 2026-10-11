@@ -511,21 +511,24 @@ class BoardLocator:
         # 记录到日志
         self.logger.info(f"棋子检测统计: 黑将={len(kings_black)}, 红帅={len(kings_red)}, 黑卒={len(black_pawns)}, 红兵={len(red_pawns)}, 黑车={len(black_rooks)}, 红车={len(red_rooks)}")
         
-        # 1.将帅组合
-        king_ok = len(kings_black) == 1 and len(kings_red) == 1
-        if not king_ok:
-            error_msg = f"将帅数量错误"
+        # 1.将帅组合过滤（过滤掉全屏截图中UI界面上的假棋子）
+        valid_king_pairs = []
+        for bk in kings_black:
+            for rk in kings_red:
+                king_x_diff = abs(bk[0] - rk[0])
+                king_y_diff = abs(bk[1] - rk[1])
+                mean_diameter = bk[2] + rk[2]
+                # 真实的将帅，X坐标应该非常接近（同一列），Y坐标距离至少5个棋子直径
+                if king_x_diff <= 2 * mean_diameter and king_y_diff >= 5 * mean_diameter:
+                    valid_king_pairs.append((bk, rk))
+                    
+        if not valid_king_pairs:
+            error_msg = f"将帅数量错误或未找到符合物理位置的将帅对"
             raise PieceError(error_msg)
-        king_x_diff = abs(kings_black[0][0] - kings_red[0][0])
-        king_y_diff = abs(kings_black[0][1] - kings_red[0][1])
-        mean_diameter = kings_black[0][2] + kings_red[0][2]
-        if king_x_diff > 3 * mean_diameter or king_y_diff < 5 * mean_diameter:
-            error_msg = f"将帅位置错误"
-            raise PieceError(error_msg)
-
-
-        black_king = kings_black[0]
-        red_king = kings_red[0]
+            
+        # 选取最符合规则的一对
+        black_king = valid_king_pairs[0][0]
+        red_king = valid_king_pairs[0][1]
         
         filtered_combinations = []
         
@@ -652,6 +655,131 @@ class BoardLocator:
             'pawns': selected_pawns
         }
     
+    def locate_board_from_image(self, img_np):
+        """
+        在静态图片中直接定位棋盘，并返回 x_array 和 y_array
+        专门为手机截屏或上传图片设计，不涉及任何系统窗口或坐标缩放
+        """
+        # 预处理
+        gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+        
+        # 统一缩小一半，以匹配桌面端的霍夫圆检测逻辑，防止高分辨率下识别出错误的边缘(内圈)
+        scale_factor = 0.5
+        base_h, base_w = img_np.shape[:2]
+        target_width = int(base_w * scale_factor)
+        target_height = int(base_h * scale_factor)
+        
+        scaled_img = cv2.resize(img_np, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        scaled_gray = cv2.resize(gray, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        
+        # 估算棋子半径（假设棋盘占满宽度）
+        estimated_diameter = target_width / 10.0
+        estimated_radius = estimated_diameter / 2.0
+        
+        minRadius = max(8, int(estimated_radius * 0.6))
+        maxRadius = int(estimated_radius * 1.4)
+        
+        blurred = cv2.GaussianBlur(scaled_gray, (5, 5), 0)
+        param1 = 50
+        param2 = 25
+        minDist = int(estimated_diameter * 0.8)
+        
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, minDist,
+                                  param1=param1, param2=param2,
+                                  minRadius=minRadius, maxRadius=maxRadius)
+                                  
+        if circles is None:
+            minRadius_retry = int(estimated_radius * 0.5)
+            maxRadius_retry = int(estimated_radius * 1.6)
+            circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, minDist,
+                                      param1=param1, param2=int(param2 * 0.8),
+                                      minRadius=minRadius_retry, maxRadius=maxRadius_retry)
+                                      
+        if circles is None:
+            raise PieceError("未检测到象棋棋子")
+            
+        circles = np.round(circles[0, :]).astype("int")
+        
+        original_circles = []
+        for x, y, r in circles:
+            orig_x = int(x / scale_factor)
+            orig_y = int(y / scale_factor)
+            orig_r = int(r / scale_factor)
+            original_circles.append((orig_x, orig_y, orig_r))
+            
+        piece_centers = self._process_circles(original_circles, img_np)
+        
+        filtered_pieces = self._filter_keypoint_pieces(piece_centers)
+        
+        # 找到将帅和兵卒组合
+        black_combination = None
+        red_combination = None
+        for combination in filtered_pieces:
+            if combination['king'][3] == 'k':
+                black_combination = combination
+            elif combination['king'][3] == 'K':
+                red_combination = combination
+                
+        if not black_combination or not red_combination:
+            raise CombsError("缺少定位棋子组合")
+            
+        black_king = black_combination.get('king', [])
+        red_king = red_combination.get('king', [])
+        black_pawns = black_combination.get('pawns', [])
+        red_pawns = red_combination.get('pawns', [])
+        black_rooks = black_combination.get('rooks', [])
+        red_rooks = red_combination.get('rooks', [])
+        
+        all_radii = [black_king[2], red_king[2]]
+        for p in black_pawns + red_pawns + black_rooks + red_rooks:
+            all_radii.append(p[2])
+        mean_r = sum(all_radii) / max(1, len(all_radii))
+        
+        black_y_candidates = [black_king[1]]
+        if black_rooks:
+            black_y_candidates.extend([r[1] for r in black_rooks])
+        black_y_avg = sum(black_y_candidates) / max(1, len(black_y_candidates))
+        
+        red_y_candidates = [red_king[1]]
+        if red_rooks:
+            red_y_candidates.extend([r[1] for r in red_rooks])
+        red_y_avg = sum(red_y_candidates) / max(1, len(red_y_candidates))
+        
+        higher_side_y = min(black_y_avg, red_y_avg)
+        king_vertical_distance = abs(black_y_avg - red_y_avg)
+        
+        board_y = round(higher_side_y - king_vertical_distance / 18, 1)
+        board_height = round(king_vertical_distance + king_vertical_distance / 9, 1)
+        
+        spans = []
+        if black_pawns and len(black_pawns) >= 2: spans.append(abs(black_pawns[1][0] - black_pawns[0][0]))
+        if red_pawns and len(red_pawns) >= 2: spans.append(abs(red_pawns[1][0] - red_pawns[0][0]))
+        if black_rooks and len(black_rooks) >= 2: spans.append(abs(black_rooks[1][0] - black_rooks[0][0]))
+        if red_rooks and len(red_rooks) >= 2: spans.append(abs(red_rooks[1][0] - red_rooks[0][0]))
+        
+        avg_span = sum(spans) / max(1, len(spans)) if spans else 8 * mean_r
+        
+        x_candidates = []
+        if black_pawns: x_candidates.append(min(p[0] for p in black_pawns))
+        if red_pawns: x_candidates.append(min(p[0] for p in red_pawns))
+        if black_rooks: x_candidates.append(min(r[0] for r in black_rooks))
+        if red_rooks: x_candidates.append(min(r[0] for r in red_rooks))
+        leftmost_x = sum(x_candidates) / max(1, len(x_candidates)) if x_candidates else (black_king[0] - avg_span/2)
+        
+        board_x = round(leftmost_x - avg_span / 16, 1)
+        board_width = round(avg_span + avg_span / 8, 1)
+        
+        # 计算网格 x_array 和 y_array (必须是棋子中心坐标)
+        # grid_width应该是平均跨度除以8（因为9根线有8个间隔）
+        # grid_height应该是将帅距离除以9（因为10根线有9个间隔）
+        real_grid_width = avg_span / 8.0
+        real_grid_height = king_vertical_distance / 9.0
+        
+        x_array = [int(leftmost_x + i * real_grid_width) for i in range(9)]
+        y_array = [int(higher_side_y + i * real_grid_height) for i in range(10)]
+        
+        return x_array, y_array, (int(board_x), int(board_y), int(board_width), int(board_height))
+
     def _locate_board_from_combs(self):
         """
         根据兵卒组合计算棋盘坐标和尺寸
@@ -823,6 +951,7 @@ class BoardLocator:
             
             # 识别棋子类型
             result = self.recognizer.recognize_piece_type(piece_img)
+            
             if result is None:
                 # 识别失败，跳过这个圆
                 self.logger.debug(f"棋子识别失败: 位置({x}, {y}), 半径{r}")
@@ -834,9 +963,8 @@ class BoardLocator:
             # 先画所有检测到的圆（用蓝色）
             cv2.circle(img_np, (x, y), r, (255, 0, 0), 2)  # 蓝色圆圈
             cv2.circle(img_np, (x, y), 2, (255, 0, 0), 3)  # 蓝色圆心
-            
-            # 如果是将帅或兵卒且置信度高，添加到结果中
-            if piece_type in ('k', 'K', 'p', 'P', 'r', 'R') and confidence > 0.9:
+            # 如果是将帅或兵卒且置信度高，添加到结果中 (阈值从0.7降到0.4，以适应选中高亮、最后一步高亮等UI特效)
+            if piece_type in ('k', 'K', 'p', 'P', 'r', 'R') and confidence > 0.4:
                 piece_centers.append((x, y, r, piece_type))
                 # 将帅用绿色重新标记，兵卒用黄色标记
                 if piece_type in ('k', 'K'):
