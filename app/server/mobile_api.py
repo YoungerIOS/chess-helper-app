@@ -13,7 +13,7 @@ from app.chess.recognizer import ChessRecognizer
 from app.chess.engine import ChessEngine
 from app.chess.message_bus import message_bus
 from app.chess.message import Message, MessageType
-from app.tools.utils import convert_array_to_fen, convert_move_to_chinese, convert_coords_to_move, app_data_path
+from app.tools.utils import convert_array_to_fen, convert_move_to_chinese, convert_coords_to_move, app_data_path, detect_board_side
 from app.tools.log_config import get_logger
 
 logger = get_logger(__name__)
@@ -293,18 +293,10 @@ def analyze_image():
                 "fen": ""
             }), 200
             
-        # 由于用户视角在棋盘下方（i >= 5），在下半区统计红黑棋子的数量判断执红还是执黑
-        red_count = 0
-        black_count = 0
-        for i in range(5, 10):
-            for j in range(9):
-                p = board_array[i][j]
-                if p in ('R', 'N', 'B', 'A', 'K', 'C', 'P'):
-                    red_count += 1
-                elif p in ('r', 'n', 'b', 'a', 'k', 'c', 'p'):
-                    black_count += 1
-                    
-        is_red = red_count >= black_count
+        # 判断执红还是执黑 (双向九宫格将帅互证 + 状态锁存)
+        with mobile_session.lock:
+            current_is_red = mobile_session.last_is_red if mobile_session.last_is_red is not None else True
+        is_red = detect_board_side(board_array, current_is_red=current_is_red)
         fen_str, _ = convert_array_to_fen(board_array, is_red=is_red)
         logger.info(f"Recognized FEN: {fen_str} (side={'red' if is_red else 'black'})")
 

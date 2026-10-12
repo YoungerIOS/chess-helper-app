@@ -74,20 +74,20 @@
         },
         "regions": {
             "board": {
-                "left": 508.5,
-                "top": 226.2,
-                "width": 423.6,
-                "height": 455.9
+                "left": 482.0,
+                "top": 229.6,
+                "width": 423.0,
+                "height": 454.1
             },
             "avatar_upper": {
-                "left": 508.5,
-                "top": 78.5,
+                "left": 482.0,
+                "top": 82.5,
                 "width": 94.0,
                 "height": 94.0
             },
             "avatar_lower": {
-                "left": 847.4,
-                "top": 739.1,
+                "left": 820.4,
+                "top": 740.4,
                 "width": 94.0,
                 "height": 94.0
             }
@@ -99,7 +99,7 @@
     "theme": "dark",
     "engine_params": {
         "movetime": "3000",
-        "depth": "21",
+        "depth": "20",
         "goParam": "depth"
     }
 }

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 from app.tools.log_config import get_logger
+from app.tools.utils import detect_board_side
 
 logger = get_logger(__name__)
 
@@ -163,29 +164,12 @@ class PositionChecker:
     def update_side_detection(self, board_array):
         """
         更新红黑方判断 (Latch Logic / 状态保持)
-        仅当明确检测到上方将帅时才更新状态，避免因检测失败导致的误判
+        使用 detect_board_side 执行上下九宫格双向互证与仕士兜底
         """
-        # 扫描上方九宫格 (前3行, 中间3列)
-        has_black_king = False
-        has_red_king = False
-        
-        for r in range(3):
-            for c in range(3, 6):
-                if board_array[r][c] == 'k':
-                    has_black_king = True
-                elif board_array[r][c] == 'K':
-                    has_red_king = True
-        
-        # 状态更新逻辑
-        if has_black_king and not has_red_king:
-            if not self.is_red:
-                logger.info("Side Detection: Detected Black King at top -> I am RED")
-            self.is_red = True
-        elif has_red_king and not has_black_king:
-            if self.is_red:
-                logger.info("Side Detection: Detected Red King at top -> I am BLACK")
-            self.is_red = False
-        # else: 如果都没检测到，或都检测到了(异常)，保持 is_red 不变
+        old_is_red = self.is_red
+        self.is_red = detect_board_side(board_array, current_is_red=self.is_red)
+        if self.is_red != old_is_red:
+            logger.info(f"Side Detection: Perspective changed -> I am {'RED' if self.is_red else 'BLACK'}")
 
     def is_position_valid(self, piece_type, x, y, is_red_at_bottom):
         """

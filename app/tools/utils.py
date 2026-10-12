@@ -520,3 +520,57 @@ def get_local_ip() -> str:
 
     return "127.0.0.1"
 
+
+def detect_board_side(board_array, current_is_red: bool = True) -> bool:
+    """
+    极轻量红黑方判定 (上下九宫格双向互证 + 仕士兜底 + 状态锁存)
+    仅扫描 18 个格点，微秒级执行，消除单侧将帅遮挡盲区
+    """
+    if not board_array or len(board_array) != 10:
+        return current_is_red
+
+    # 1. 扫描上方九宫格 (前3行 0~2, 中间3列 3~5)
+    top_has_k = False  # 黑将在上 -> 我方执红
+    top_has_K = False  # 红帅在上 -> 我方执黑
+    top_has_a = False  # 黑士在上 -> 我方执红
+    top_has_A = False  # 红仕在上 -> 我方执黑
+    for r in range(3):
+        for c in range(3, 6):
+            p = board_array[r][c]
+            if p == 'k': top_has_k = True
+            elif p == 'K': top_has_K = True
+            elif p == 'a': top_has_a = True
+            elif p == 'A': top_has_A = True
+
+    # 2. 扫描下方九宫格 (后3行 7~9, 中间3列 3~5)
+    bottom_has_K = False # 红帅在下 -> 我方执红
+    bottom_has_k = False # 黑将在下 -> 我方执黑
+    bottom_has_A = False # 红仕在下 -> 我方执红
+    bottom_has_a = False # 黑士在下 -> 我方执黑
+    for r in range(7, 10):
+        for c in range(3, 6):
+            p = board_array[r][c]
+            if p == 'K': bottom_has_K = True
+            elif p == 'k': bottom_has_k = True
+            elif p == 'A': bottom_has_A = True
+            elif p == 'a': bottom_has_a = True
+
+    # 3. 将帅判定 (任意一端看清即可定性，只要不冲突)
+    vote_red = top_has_k or bottom_has_K
+    vote_black = top_has_K or bottom_has_k
+    if vote_red and not vote_black:
+        return True
+    if vote_black and not vote_red:
+        return False
+
+    # 4. 仕士兜底 (万一两边将帅都被特效严重遮挡，九宫内的仕士也能互证)
+    guard_red = top_has_a or bottom_has_A
+    guard_black = top_has_A or bottom_has_a
+    if guard_red and not guard_black:
+        return True
+    if guard_black and not guard_red:
+        return False
+
+    # 5. 均无法判定时，原样保持上次状态不变 (Latch)
+    return current_is_red
+
