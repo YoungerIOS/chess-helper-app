@@ -120,6 +120,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# configs
+app/json/game_config.json
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -147,3 +150,4 @@ cython_debug/
 # VS Code
 .vscode/
 .DS_Store
+
