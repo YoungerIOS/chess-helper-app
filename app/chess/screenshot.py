@@ -132,20 +132,20 @@ class ChessCaptureManager:
             self.process_queue.put("STOP")
         self.result_queue.put("STOP")
         for t in self.worker_threads:
-            t.join(timeout=2)
+            t.join(timeout=0.3)
 
         # 停止重试线程
         if hasattr(self, 'retry_queue'):
             self.retry_queue.put("STOP")
-        if hasattr(self, 'retry_thread'):
-            self.retry_thread.join(timeout=2)
+        if hasattr(self, 'retry_thread') and self.retry_thread:
+            self.retry_thread.join(timeout=0.3)
 
         # 停止棋盘定位器
-        if hasattr(self, 'board_locator'):
+        if hasattr(self, 'board_locator') and self.board_locator:
             self.board_locator.stop()
         # 停止连续截图线程
         if self.continuous_thread is not None:
-            self.continuous_thread.join(timeout=2)
+            self.continuous_thread.join(timeout=0.3)
             self.continuous_thread = None
         
         # 取消消息订阅

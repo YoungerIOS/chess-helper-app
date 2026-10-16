@@ -221,18 +221,21 @@ class TunnelManager:
         except Exception as e:
             logger.warning(f"Cloud sync failed (non-critical): {e}")
 
-    def stop(self):
+    def stop(self, fast: bool = False):
         """停止隧道进程"""
         self.is_running = False
         self.tunnel_url = None
         if self.process:
             try:
                 self.process.terminate()
-                self.process.wait(timeout=2)
+                wait_time = 0.2 if fast else 1.0
+                self.process.wait(timeout=wait_time)
             except Exception:
-                try:
+                pass
+            try:
+                if self.process and self.process.poll() is None:
                     self.process.kill()
-                except Exception:
-                    pass
+            except Exception:
+                pass
             self.process = None
         logger.info("Cloudflare Tunnel stopped")

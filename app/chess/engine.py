@@ -99,28 +99,29 @@ class ChessEngine:
         self._send_command('isready')
         self._wait_for_response('readyok', timeout=1)
     
-    def quit(self):
+    def quit(self, fast: bool = False):
         """停止引擎"""
         with self.lock:
             if self.process and self.process.poll() is None:
                 try:
                     # 先尝试发送quit命令让引擎优雅退出
                     self._send_command('quit')
-                    # 等待引擎进程自然结束
-                    self.process.wait(timeout=1)
+                    timeout = 0.2 if fast else 0.5
+                    self.process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    # 如果1秒内没结束，强制终止
                     self.process.terminate()
-                    self.process.wait(timeout=2)
+                    self.process.wait(timeout=0.2 if fast else 0.8)
                 except Exception:
-                    # 如果发送命令失败，直接终止进程
                     self.process.terminate()
-                    self.process.wait(timeout=2)
+                    self.process.wait(timeout=0.2 if fast else 0.8)
                 finally:
                     # 如果进程仍然存在，强制杀死
                     if self.process and self.process.poll() is None:
-                        self.process.kill()
-                        self.process.wait(timeout=1)
+                        try:
+                            self.process.kill()
+                            self.process.wait(timeout=0.1)
+                        except Exception:
+                            pass
                     self.process = None
                     self.is_initialized = False
                     logger.info("引擎已停止")

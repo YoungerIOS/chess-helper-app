@@ -327,6 +327,7 @@ class MainWindow(QMainWindow):
         # 初始化状态
         self.is_running = False
         self.is_stopping = False  # 添加停止标志，防止手动停止与自动停止冲突
+        self._is_exiting = False   # 退出流程防重入标志
         self.lines = ["", "", ""]
         self.update_text("等待获取棋局...", MessageType.STATUS)
         
@@ -589,7 +590,9 @@ class MainWindow(QMainWindow):
     def close_queue(self):
         """销毁截图线程"""
         if self.capture_manager is not None:
-            self.capture_manager.stop_capture()  # 停止截图和工作线程
+            mgr = self.capture_manager
+            self.capture_manager = None
+            mgr.stop_capture()
 
     def update_text(self, text, message_type=None, color=None):
         """
@@ -1033,30 +1036,8 @@ class MainWindow(QMainWindow):
             self.param_btn.setIcon(arrow_icon)
     
     def on_exit(self):
-        """优雅安全规范地退出程序"""
-        # 停止所有线程和监听器
-        if hasattr(self, 'manual_positioner'):
-            self.manual_positioner.cleanup()
-
-        if hasattr(self, 'qr_dialog') and self.qr_dialog:
-            self.qr_dialog.close()
-        if hasattr(self, 'tunnel_manager') and self.tunnel_manager:
-            self.tunnel_manager.stop()
-        if hasattr(self, 'mobile_server_thread') and self.mobile_server_thread:
-            self.mobile_server_thread.stop()
-        if hasattr(self, 'mobile_heartbeat_timer'):
-            self.mobile_heartbeat_timer.stop()
-
-        self.close_queue()
-        
-        # 完全退出引擎
-        context.quit_engine()
-        
-        # 保存配置
-        context.save_config()
-        
-        # 优雅退出
-        QApplication.quit()
+        """统一触发窗口关闭流程"""
+        self.close()
     
     def show_game_menu(self):
         """显示游戏选择菜单"""
@@ -1073,24 +1054,44 @@ class MainWindow(QMainWindow):
         context.set_platform(platform)
 
     def closeEvent(self, event):
-        """窗口关闭时处理"""
-        # 停止所有线程和监听器
-        if hasattr(self, 'manual_positioner'):
-            self.manual_positioner.cleanup()
-        if hasattr(self, 'qr_dialog') and self.qr_dialog:
-            self.qr_dialog.close()
-        if hasattr(self, 'tunnel_manager') and self.tunnel_manager:
-            self.tunnel_manager.stop()
-        if hasattr(self, 'mobile_server_thread') and self.mobile_server_thread:
-            self.mobile_server_thread.stop()
-        if hasattr(self, 'mobile_heartbeat_timer'):
-            self.mobile_heartbeat_timer.stop()
-        self.close_queue()
-        
-        # 完全退出引擎
-        context.quit_engine()
-        
+        """窗口关闭时处理（统一退出生命周期）"""
+        if getattr(self, '_is_exiting', False):
+            event.accept()
+            return
+        self._is_exiting = True
+
+        # 阶段一：视觉即时关闭（0ms 响应感知）
+        self.hide()
+
+        # 阶段二：保存关键配置与停止前端定时器
+        try:
+            if hasattr(self, 'check_timer') and self.check_timer:
+                self.check_timer.stop()
+            if hasattr(self, 'mobile_heartbeat_timer') and self.mobile_heartbeat_timer:
+                self.mobile_heartbeat_timer.stop()
+            if hasattr(self, 'manual_positioner') and self.manual_positioner:
+                self.manual_positioner.cleanup()
+            if hasattr(self, 'qr_dialog') and self.qr_dialog:
+                self.qr_dialog.close()
+
+            context.save_config()
+        except Exception as e:
+            logger.warning(f"退出前置清理异常: {e}")
+
+        # 阶段三：外部资源与后台任务快速清理
+        try:
+            if hasattr(self, 'tunnel_manager') and self.tunnel_manager:
+                self.tunnel_manager.stop(fast=True)
+            if hasattr(self, 'mobile_server_thread') and self.mobile_server_thread:
+                self.mobile_server_thread.stop(fast=True)
+
+            self.close_queue()
+            context.quit_engine(fast=True)
+        except Exception as e:
+            logger.warning(f"退出后台清理异常: {e}")
+
         super().closeEvent(event)
+        QApplication.quit()
 
 def main():
     app = QApplication(sys.argv)

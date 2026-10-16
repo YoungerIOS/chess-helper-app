@@ -546,9 +546,11 @@ def start_process_worker(process_queue, result_queue, stop_event=None):
                 break
             with result_lock:
                 if not result_dict:
-                    result_ready.wait()
+                    result_ready.wait(timeout=0.1)
                     if stop_event and stop_event.is_set():
                         return
+                    if not result_dict:
+                        continue
                 # 按时间戳排序，最早的最先处理
                 earliest_time = min(result_dict.keys())
                 process_result = result_dict.pop(earliest_time)

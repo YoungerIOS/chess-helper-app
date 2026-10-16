@@ -136,11 +136,13 @@ class MobileSession:
                     return None
             return self.engine
 
-    def stop_engine(self):
+    def stop_engine(self, fast: bool = False):
         """优雅关闭常驻引擎"""
         with self.lock:
             if self.engine is not None:
                 try:
+                    self.engine.quit(fast=fast)
+                except TypeError:
                     self.engine.quit()
                 except Exception as e:
                     logger.warning(f"Error stopping mobile engine: {e}")
@@ -484,9 +486,12 @@ class MobileServerThread(threading.Thread):
         logger.info(f"Mobile API Server started on {self.host}:{self.port}")
         self.server.serve_forever()
         
-    def stop(self):
+    def stop(self, fast: bool = False):
         if self.server:
-            self.server.shutdown()
+            try:
+                self.server.shutdown()
+            except Exception as e:
+                logger.warning(f"Error stopping server: {e}")
             logger.info("Mobile API Server stopped")
         # 服务关闭时清理常驻引擎和会话
-        mobile_session.stop_engine()
+        mobile_session.stop_engine(fast=fast)

@@ -399,11 +399,15 @@ class ChessContext:
         with self._engine_lock:
             self.engine = engine
 
-    def quit_engine(self) -> None:
+    def quit_engine(self, fast: bool = False) -> None:
         """线程安全地完全退出引擎"""
         with self._engine_lock:
             if self.engine:
-                self.engine.quit()
+                if hasattr(self.engine, 'quit'):
+                    try:
+                        self.engine.quit(fast=fast)
+                    except TypeError:
+                        self.engine.quit()
                 self.engine = None
     
     @property
