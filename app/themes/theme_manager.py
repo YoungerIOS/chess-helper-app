@@ -1,54 +1,65 @@
 import os
+import re
 from PySide6.QtWidgets import QApplication
-from app.chess.context import context
+from app.tools.utils import resource_path
+from app.tools.log_config import get_logger
+
+logger = get_logger(__name__)
 
 class ThemeManager:
-    """主题管理器"""
+    """
+    UI 主题管理器
+    保持原生沉浸式拟物机甲深色风格（背景色 #212123）
+    """
     
     THEME_DARK = "dark"
-    THEME_LIGHT = "light"
-    
+    COLOR_DARK_BG = "#212123"
+
     @staticmethod
-    def get_theme_path(theme_name):
-        """获取主题文件的绝对路径"""
-        # 假设主题文件位于当前文件的同级目录
+    def load_stylesheet() -> str:
+        """加载暗色 QSS 样式表，并将图片相对路径转换为可跨目录执行的绝对路径"""
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(current_dir, f"{theme_name}.qss")
-    
-    @staticmethod
-    def load_stylesheet(theme_name):
-        """加载 QSS 样式表内容"""
-        path = ThemeManager.get_theme_path(theme_name)
-        if not os.path.exists(path):
-            print(f"Warning: Theme file not found: {path}")
+        dark_qss_path = os.path.join(current_dir, "dark.qss")
+        if not os.path.exists(dark_qss_path):
+            logger.warning(f"样式表文件未找到: {dark_qss_path}")
             return ""
             
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
+            with open(dark_qss_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            # 自动将 QSS 中的相对图片路径转换为基于 resource_path 的绝对路径
+            def replace_url(match):
+                raw = match.group(1).strip("\"'")
+                parts = raw.replace('\\', '/').split('/')
+                if parts[0] == 'app':
+                    parts = parts[1:]
+                abs_p = resource_path(*parts).replace('\\', '/')
+                return f'url("{abs_p}")'
+                
+            pattern = re.compile(r'url\((?!["\']?(?:http|file|data):)["\']?([^)"\']+)["\']?\)')
+            return pattern.sub(replace_url, content)
         except Exception as e:
-            print(f"Error loading theme {theme_name}: {e}")
+            logger.error(f"加载样式表失败: {e}")
             return ""
-            
+
     @staticmethod
-    def apply_theme(theme_name):
-        """应用主题"""
+    def apply_theme(theme_name: str = None):
+        """应用默认深色主题"""
         app = QApplication.instance()
         if not app:
             return
             
-        stylesheet = ThemeManager.load_stylesheet(theme_name)
+        stylesheet = ThemeManager.load_stylesheet()
         if stylesheet:
             app.setStyleSheet(stylesheet)
-            # 保存当前主题设置
-            context.theme = theme_name
-            context.save_config()
-            print(f"Applied theme: {theme_name}")
+            logger.info("已加载并应用深色机甲主题样式表 (#212123)")
+
+    # 兼容历史调用接口
+    @staticmethod
+    def apply_system_theme(*args, **kwargs):
+        ThemeManager.apply_theme()
 
     @staticmethod
-    def toggle_theme():
-        """切换主题"""
-        current_theme = getattr(context, 'theme', ThemeManager.THEME_LIGHT)
-        new_theme = ThemeManager.THEME_DARK if current_theme == ThemeManager.THEME_LIGHT else ThemeManager.THEME_LIGHT
-        ThemeManager.apply_theme(new_theme)
-        return new_theme
+    def setup_system_theme_listener():
+        pass

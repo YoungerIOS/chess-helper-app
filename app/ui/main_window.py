@@ -3,9 +3,9 @@ import queue
 import threading
 import sys
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QApplication, QMenu)
+                             QLabel, QPushButton, QApplication, QMenu, QGraphicsDropShadowEffect)
 from PySide6.QtCore import Qt, QSize, QPoint, QTimer, QEvent, QObject, Signal
-from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon
+from PySide6.QtGui import QFont, QKeyEvent, QCursor, QPixmap, QIcon, QColor, QPainter, QPainterPath, QPen
 from pynput import mouse
 from app.tools.utils import resource_path, get_local_ip
 from app.tools.log_config import get_logger
@@ -26,6 +26,39 @@ from app.server.tunnel_manager import TunnelManager
 
 logger = get_logger(__name__)
 
+class TextDisplay(QLabel):
+    """
+    顶部拟物机甲终端显示面板
+    支持高精切片背景与 8px 抗锯齿平滑圆角自适应裁剪
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        bg_path = resource_path('images', 'ui', 'top_text_bg.png')
+        self.bg_pixmap = QPixmap(bg_path) if os.path.exists(bg_path) else None
+        self.corner_radius = 8
+
+    def paintEvent(self, event):
+        # 1. 绘制抗锯齿圆角背景与切片
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        
+        path = QPainterPath()
+        path.addRoundedRect(0.5, 0.5, self.width() - 1.0, self.height() - 1.0, self.corner_radius, self.corner_radius)
+        painter.setClipPath(path)
+        
+        if self.bg_pixmap and not self.bg_pixmap.isNull():
+            scaled = self.bg_pixmap.scaled(self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            painter.drawPixmap(0, 0, scaled)
+            
+        # 绘制微弱的 1px 金属边框，赋予精致装配边框感
+        painter.setPen(QPen(QColor(84, 88, 97, 100), 1))
+        painter.drawPath(path)
+        painter.end()
+        
+        # 2. 绘制 QLabel 文本内容
+        super().paintEvent(event)
+
 class MainWindow(QMainWindow):
     resume_polling_signal = Signal()  # 定义信号用于在主线程恢复轮询
     tunnel_url_ready_signal = Signal(str)  # 隧道外网URL就绪信号
@@ -44,31 +77,20 @@ class MainWindow(QMainWindow):
         # 将屏幕尺寸保存到上下文对象中，供其他模块使用
         context.screen_size = (screen_width, screen_height)
         
-        # 加载棋盘图片并计算其宽高比
-        # 使用存在的图片计算比例，避免因文件缺失导致窗口比例异常
-        board_img = QPixmap(resource_path('images', 'media', 'chessboard3.png'))
-        if board_img.isNull():
-            board_ratio = 1.0
-        else:
-            board_ratio = board_img.width() / board_img.height()
-        
-        # 使用屏幕高度 x 80% x 0.56 作为窗口宽度, 看着更协调些,
+        # 使用屏幕高度 x 80% 作为基准参考
         nice_height = int(screen_height * 0.8)
-        width = int(nice_height * 0.56)
+        # 对照设计图比例，设置自适应宽度 (453px)
+        width = int(nice_height * 0.63)
         
-        # 计算棋盘图片在窗口中的实际高度
-        board_height = int(width / board_ratio)
+        # 棋盘容器宽度为 width - 24 (扣除左右外边距 12*2 = 24)
+        # 棋盘高度严格按照机甲外框 633 x 668 比例精确缩放
+        board_w = width - 24
+        board_height = int(round(board_w * 668 / 633))
         
-        # 计算其他UI元素的总高度
-        other_heights = (
-            100 +  # 顶部文本显示区域
-            35 +   # 中间按钮行
-            35 +   # 底部控制区域
-            30 -   # 布局间距
-            11     # 棋盘容器内边距
-        )
+        # 计算其他UI元素的总高度 (顶部文本64 + 中间按钮34 + 底部控制38 + 垂直间距10*3 + 上下边距22)
+        other_heights = 64 + 34 + 38 + 30 + 22
         
-        # 设置窗口高度为棋盘高度加上其他UI元素的高度
+        # 设置窗口高度为棋盘高度加上其他UI元素的高度 (精确对应 641px)
         height = board_height + other_heights
         
         print(f"Screen size: {screen_width}x{screen_height}")
@@ -90,12 +112,12 @@ class MainWindow(QMainWindow):
         # 创建主布局
         main_layout = QVBoxLayout(central_widget)
         
-        # 计算动态间距 (约为窗口宽度的 1.5%)
-        self.spacing_base = max(5, int(width * 0.015))
-        self.spacing_tight = max(2, int(self.spacing_base * 0.4))
+        # 统一规范边距与组件间距
+        self.spacing_base = 12
+        self.spacing_tight = 3
         
-        main_layout.setSpacing(self.spacing_base * 2)  # 垂直间距稍大
-        main_layout.setContentsMargins(self.spacing_base, self.spacing_base, self.spacing_base, self.spacing_base)
+        main_layout.setSpacing(10)  # 垂直间距设为 10px
+        main_layout.setContentsMargins(12, 10, 12, 12)
         
         # 初始化上下文
         context.load_config()
@@ -107,53 +129,198 @@ class MainWindow(QMainWindow):
         self.tunnel_error_signal.connect(self._on_tunnel_error)
         self.tunnel_manager = TunnelManager(local_port=5050)
         
-        # 顶部文本显示区域
-        self.text_display = QLabel()
+        # 顶部文本显示区域（高精原图机甲终端切片背景 + 8px平滑抗锯齿圆角 + 紧凑高度 64px）
+        self.text_display = TextDisplay()
         self.text_display.setAlignment(Qt.AlignCenter)
-        self.text_display.setFont(QFont("Arial", 18, QFont.Bold))
-        self.text_display.setFixedHeight(100)  # 设置固定高度
+        self.text_display.setFont(QFont("Arial", 12, QFont.Bold))
+        self.text_display.setFixedHeight(64)  # 设置紧凑高度
         self.text_display.setObjectName("textDisplay")
-        # 移除内联样式，使用主题样式表
-        self.text_display.setStyleSheet("")
+        self.text_display.setStyleSheet("""
+            QLabel#textDisplay {
+                background-color: transparent;
+                border: none;
+                padding: 4px 12px;
+                color: #E0E0E0;
+            }
+        """)
         main_layout.addWidget(self.text_display)
         
-        # 添加中间按钮行
-        middle_buttons_layout = QHBoxLayout()
-        middle_buttons_layout.setSpacing(5)
-        middle_buttons_layout.setContentsMargins(0, 0, 0, 0)  # 移除底部边距，保持与主布局间距一致
+        # 添加中间按钮栏（支持异形边缘咬合排布）
+        self.middle_buttons_bar = QWidget()
+        self.middle_buttons_bar.setFixedHeight(34)
+        usable_w = width - self.spacing_base * 2
+        self.middle_buttons_bar.setFixedWidth(usable_w)
         
-        
-        # 移除游戏选择按钮及菜单
-        
-        # 创建手动刷新按钮
-        self.manual_refresh_btn = QPushButton("刷新")
-        self.manual_refresh_btn.setFixedSize(75, 35)  # 与游戏平台按钮保持一致
-        self.manual_refresh_btn.setFont(QFont("Arial", 11))
-        self.manual_refresh_btn.setObjectName("secondary")
-        # 移除内联样式，使用主题样式表
-        self.manual_refresh_btn.setStyleSheet("")
-        self.manual_refresh_btn.clicked.connect(self.on_manual_capture)
-        middle_buttons_layout.addWidget(self.manual_refresh_btn)
+        # 按钮统一宋体字体族（兼顾 macOS / Windows / Linux 跨平台古典衬线质感，所有按钮统一字号）
+        songti_families = ["Songti SC", "SimSun", "STSong", "Songti TC", "serif"]
+        songti_font_12 = QFont()
+        songti_font_12.setFamilies(songti_families)
+        songti_font_12.setPointSize(12)
+        songti_font_12.setBold(True)
 
-        # 创建变招按钮
-        self.change_move_btn = QPushButton("变招")
-        self.change_move_btn.setFixedSize(75, 35)  # 与其他按钮保持一致
-        self.change_move_btn.setFont(QFont("Arial", 11))
-        self.change_move_btn.setObjectName("secondary")
-        # 移除内联样式，使用主题样式表
-        self.change_move_btn.setStyleSheet("")
+        # 中部 4 按钮高精度原图切片资产
+        refresh_normal = resource_path('images', 'ui', 'btn_mid_refresh_normal.png').replace('\\', '/')
+        refresh_hover = resource_path('images', 'ui', 'btn_mid_refresh_hover.png').replace('\\', '/')
+        refresh_pressed = resource_path('images', 'ui', 'btn_mid_refresh_pressed.png').replace('\\', '/')
+
+        change_normal = resource_path('images', 'ui', 'btn_mid_change_normal.png').replace('\\', '/')
+        change_hover = resource_path('images', 'ui', 'btn_mid_change_hover.png').replace('\\', '/')
+        change_pressed = resource_path('images', 'ui', 'btn_mid_change_pressed.png').replace('\\', '/')
+
+        mobile_normal = resource_path('images', 'ui', 'btn_mid_mobile_normal.png').replace('\\', '/')
+        mobile_hover = resource_path('images', 'ui', 'btn_mid_mobile_hover.png').replace('\\', '/')
+        mobile_pressed = resource_path('images', 'ui', 'btn_mid_mobile_pressed.png').replace('\\', '/')
+
+        start_normal = resource_path('images', 'ui', 'btn_mid_start_normal.png').replace('\\', '/')
+        start_hover = resource_path('images', 'ui', 'btn_mid_start_hover.png').replace('\\', '/')
+        start_pressed = resource_path('images', 'ui', 'btn_mid_start_pressed.png').replace('\\', '/')
+
+        # 计算异形斜切咬合排布坐标
+        scale = usable_w / 633.0
+        x1 = 0
+        w1 = int(round(140 * scale))
+        x2 = int(round(128 * scale))
+        w2 = int(round(122 * scale))
+        x3 = int(round(255 * scale))
+        w3 = int(round(129 * scale))
+        x4 = int(round(390 * scale))
+        w4 = usable_w - x4
+
+        # 创建刷新按钮（按钮1，右侧斜切异形边缘）
+        self.manual_refresh_btn = QPushButton("刷新", self.middle_buttons_bar)
+        self.manual_refresh_btn.setGeometry(x1, 0, w1, 34)
+        self.manual_refresh_btn.setFont(songti_font_12)
+        self.manual_refresh_btn.setCursor(Qt.PointingHandCursor)
+        self.manual_refresh_btn.setObjectName("refreshBtn")
+        self.manual_refresh_btn.setStyleSheet(f"""
+            QPushButton#refreshBtn {{
+                border-image: url("{refresh_normal}") 0 0 0 0 stretch stretch;
+                background-color: transparent;
+                border: none;
+                color: #E0E1E6;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding-bottom: 6px;
+                padding-right: 6px;
+            }}
+            QPushButton#refreshBtn:hover {{
+                border-image: url("{refresh_hover}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+                padding-bottom: 6px;
+                padding-right: 6px;
+            }}
+            QPushButton#refreshBtn:pressed {{
+                border-image: url("{refresh_pressed}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 4px;
+                padding-right: 6px;
+            }}
+        """)
+        pix_r = QPixmap(refresh_normal).scaled(w1, 34, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        self.manual_refresh_btn.setMask(pix_r.mask())
+        self.manual_refresh_btn.clicked.connect(self.on_manual_capture)
+
+        # 创建变招/支招按钮（按钮2，左侧与刷新右侧斜切咬合）
+        self.change_move_btn = QPushButton("变招", self.middle_buttons_bar)
+        self.change_move_btn.setGeometry(x2, 0, w2, 34)
+        self.change_move_btn.setFont(songti_font_12)
+        self.change_move_btn.setCursor(Qt.PointingHandCursor)
+        self.change_move_btn.setObjectName("changeMoveBtn")
+        self.change_move_btn.setStyleSheet(f"""
+            QPushButton#changeMoveBtn {{
+                border-image: url("{change_normal}") 0 0 0 0 stretch stretch;
+                background-color: transparent;
+                border: none;
+                color: #E0E1E6;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding-bottom: 6px;
+                padding-left: 6px;
+            }}
+            QPushButton#changeMoveBtn:hover {{
+                border-image: url("{change_hover}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+                padding-bottom: 6px;
+                padding-left: 6px;
+            }}
+            QPushButton#changeMoveBtn:pressed {{
+                border-image: url("{change_pressed}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 4px;
+                padding-left: 6px;
+            }}
+        """)
+        pix_c = QPixmap(change_normal).scaled(w2, 34, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        self.change_move_btn.setMask(pix_c.mask())
         self.change_move_btn.clicked.connect(self.on_change_move)
-        middle_buttons_layout.addWidget(self.change_move_btn)
+
+        # 创建手机按钮（按钮3，功能暂时搁置）
+        self.mobile_btn = QPushButton("手机", self.middle_buttons_bar)
+        self.mobile_btn.setGeometry(x3, 0, w3, 34)
+        self.mobile_btn.setFont(songti_font_12)
+        self.mobile_btn.setCursor(Qt.PointingHandCursor)
+        self.mobile_btn.setObjectName("mobileBtn")
+        self.mobile_btn.setStyleSheet(f"""
+            QPushButton#mobileBtn {{
+                border-image: url("{mobile_normal}") 0 0 0 0 stretch stretch;
+                background-color: transparent;
+                border: none;
+                color: #E0E1E6;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding-bottom: 6px;
+            }}
+            QPushButton#mobileBtn:hover {{
+                border-image: url("{mobile_hover}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+                padding-bottom: 6px;
+            }}
+            QPushButton#mobileBtn:pressed {{
+                border-image: url("{mobile_pressed}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 4px;
+            }}
+        """)
+        self.mobile_btn.clicked.connect(self.on_mobile_clicked)
         
-        # 添加其他按钮
-        self.start_btn = QPushButton("开始")
-        self.start_btn.setFixedHeight(35)
-        self.start_btn.setFont(QFont("Arial", 13))
-        self.start_btn.setObjectName("primary")
+        # 添加开始按钮（按钮4，主操作按钮）
+        self.start_btn = QPushButton("开始", self.middle_buttons_bar)
+        self.start_btn.setGeometry(x4, 0, w4, 34)
+        self.start_btn.setFont(songti_font_12)
+        self.start_btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.setObjectName("startBtn")
+        self.start_btn.setStyleSheet(f"""
+            QPushButton#startBtn {{
+                border-image: url("{start_normal}") 0 0 0 0 stretch stretch;
+                background-color: transparent;
+                border: none;
+                color: #E0E1E6;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding-bottom: 6px;
+            }}
+            QPushButton#startBtn:hover {{
+                border-image: url("{start_hover}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+                padding-bottom: 6px;
+            }}
+            QPushButton#startBtn:pressed {{
+                border-image: url("{start_pressed}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 4px;
+            }}
+        """)
         self.start_btn.clicked.connect(self.on_start)
-        middle_buttons_layout.addWidget(self.start_btn)
         
-        main_layout.addLayout(middle_buttons_layout)
+        main_layout.addWidget(self.middle_buttons_bar)
         
         # 中间棋盘区域
         self.board_display = BoardDisplay()
@@ -162,70 +329,152 @@ class MainWindow(QMainWindow):
         
         # 底部控制区域
         control_layout = QHBoxLayout()
-        control_layout.setSpacing(self.spacing_base)
-        control_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
+        control_layout.setSpacing(6)
+        control_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 创建退出按钮
+        # 创建退出按钮（高精拟物底图切片 + 动态文字渲染，统一高度 38px）
         self.exit_btn = QPushButton("退出")
-        self.exit_btn.setFixedHeight(35)
-        self.exit_btn.setFont(QFont("Arial", 11))
+        self.exit_btn.setFixedSize(84, 38)
+        self.exit_btn.setCursor(Qt.PointingHandCursor)
+        self.exit_btn.setFont(songti_font_12)
         self.exit_btn.setObjectName("exitBtn")
-        # 移除内联样式，使用主题样式表
-        self.exit_btn.setStyleSheet("")
-        self.exit_btn.clicked.connect(self.on_exit)
-        control_layout.addWidget(self.exit_btn, 1)  # Stretch factor 1
         
-        # 创建棋盘定位按钮 - 改为下拉菜单样式
-        self.board_btn = QPushButton("设置")
-        self.board_btn.setFixedHeight(35)
-        self.board_btn.setFont(QFont("Arial", 11))
-        self.board_btn.setObjectName("tertiary")
-        # 加载并设置箭头图标
-        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        # self.board_btn.setIcon(arrow_icon)
-        self.board_btn.setIconSize(QSize(12, 12))
-        # 移除内联样式，使用主题样式表
-        self.board_btn.setStyleSheet("")
+        # 兼容打包环境与自定义路径的动态绝对路径样式绑定
+        normal_path = resource_path('images', 'ui', 'btn_exit_normal.png').replace('\\', '/')
+        hover_path = resource_path('images', 'ui', 'btn_exit_hover.png').replace('\\', '/')
+        pressed_path = resource_path('images', 'ui', 'btn_exit_pressed.png').replace('\\', '/')
+        
+        self.exit_btn.setStyleSheet(f"""
+            QPushButton#exitBtn {{
+                border-image: url("{normal_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #D88D88;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+            QPushButton#exitBtn:hover {{
+                border-image: url("{hover_path}") 0 0 0 0 stretch stretch;
+                color: #FFA49E;
+            }}
+            QPushButton#exitBtn:pressed {{
+                border-image: url("{pressed_path}") 0 0 0 0 stretch stretch;
+                color: #B86E6A;
+                padding-top: 2px;
+                padding-bottom: 5px;
+            }}
+        """)
+        self.exit_btn.clicked.connect(self.on_exit)
+        control_layout.addWidget(self.exit_btn)
+        
+        # 兼容次级拟物切片按钮样式绑定
+        board_normal_path = resource_path('images', 'ui', 'btn_board_normal.png').replace('\\', '/')
+        board_hover_path = resource_path('images', 'ui', 'btn_board_hover.png').replace('\\', '/')
+        board_pressed_path = resource_path('images', 'ui', 'btn_board_pressed.png').replace('\\', '/')
+        
+        param_normal_path = resource_path('images', 'ui', 'btn_param_normal.png').replace('\\', '/')
+        param_hover_path = resource_path('images', 'ui', 'btn_param_hover.png').replace('\\', '/')
+        param_pressed_path = resource_path('images', 'ui', 'btn_param_pressed.png').replace('\\', '/')
+
+        # “外观”与“其他”（2字，使用 96px 优雅比例切片）
+        two_char_style = f"""
+            QPushButton#boardBtn, QPushButton#settingsBtn {{
+                border-image: url("{param_normal_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #C5C6CB;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+            QPushButton#boardBtn:hover, QPushButton#settingsBtn:hover {{
+                border-image: url("{param_hover_path}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+            }}
+            QPushButton#boardBtn:pressed, QPushButton#settingsBtn:pressed {{
+                border-image: url("{param_pressed_path}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 5px;
+            }}
+        """
+
+        # “参数”按钮样式（更名为“参数”后与“外观”、“其他”同为2字，统一 12pt 宋体与拟物切片）
+        param_style = f"""
+            QPushButton#paramBtnSelect {{
+                border-image: url("{param_normal_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #C5C6CB;
+                font-family: "Songti SC", "SimSun", "STSong", "Songti TC", serif;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+            QPushButton#paramBtnSelect:hover {{
+                border-image: url("{param_hover_path}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+            }}
+            QPushButton#paramBtnSelect:pressed {{
+                border-image: url("{param_pressed_path}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 5px;
+            }}
+        """
+
+        # 创建“外观”按钮（增加宽度与“退出”按钮等宽 84px，统一高度 38px）
+        self.board_btn = QPushButton("外观")
+        self.board_btn.setFixedSize(84, 38)
+        self.board_btn.setCursor(Qt.PointingHandCursor)
+        self.board_btn.setFont(songti_font_12)
+        self.board_btn.setObjectName("boardBtn")
+        self.board_btn.setIconSize(QSize(13, 13))
+        self.board_btn.setStyleSheet(two_char_style)
         self.board_btn.clicked.connect(self.show_board_menu)
-        control_layout.addWidget(self.board_btn, 2)  # Stretch factor 2 (Wider)
+        control_layout.addWidget(self.board_btn)
         
         # 创建棋盘设置菜单
         self.board_menu = QMenu(self)
         self.board_menu.setStyleSheet("")
+        self.board_menu.aboutToShow.connect(lambda: self._set_arrow_state(self.board_btn, True))
+        self.board_menu.aboutToHide.connect(lambda: self._set_arrow_state(self.board_btn, False))
         self.manual_position_action = self.board_menu.addAction("手动定位")
         self.change_board_action = self.board_menu.addAction("更换棋盘")
         self.manual_position_action.triggered.connect(self.on_reposition)
         self.change_board_action.triggered.connect(self.on_change_board_bg)
         
-        self.change_theme_action = self.board_menu.addAction("更换主题")
-        self.change_theme_action.triggered.connect(self.on_change_theme)
+        self.change_pieces_action = self.board_menu.addAction("更换棋子")
+        self.change_pieces_action.triggered.connect(self.on_change_pieces)
         
-        # 创建"其他设置"按钮
+        # 创建"其他"按钮（增加宽度与“退出”按钮等宽 84px，统一高度 38px）
         self.settings_btn = QPushButton("其他") 
-        self.settings_btn.setFixedHeight(35)
-        self.settings_btn.setFont(QFont("Arial", 11))
-        self.settings_btn.setObjectName("tertiary")
-        # 加载并设置箭头图标
-        # arrow_icon = QIcon(resource_path('images', 'pulldown_arrow.png'))
-        # self.settings_btn.setIcon(arrow_icon)
-        self.settings_btn.setIconSize(QSize(12, 12))
-        # 移除内联样式，使用主题样式表
-        self.settings_btn.setStyleSheet("")
-        # 不再使用checkable属性
+        self.settings_btn.setFixedSize(84, 38)
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setFont(songti_font_12)
+        self.settings_btn.setObjectName("settingsBtn")
+        self.settings_btn.setIconSize(QSize(13, 13))
+        self.settings_btn.setStyleSheet(two_char_style)
         self.settings_btn.clicked.connect(self.show_settings_menu)
-        control_layout.addWidget(self.settings_btn, 2)  # Stretch factor 2 (Wider)
+        control_layout.addWidget(self.settings_btn)
         
         # 创建设置菜单
         self.settings_menu = QMenu(self)
         self.settings_menu.setStyleSheet("")
+        self.settings_menu.aboutToShow.connect(lambda: self._set_arrow_state(self.settings_btn, True))
+        self.settings_menu.aboutToHide.connect(lambda: self._set_arrow_state(self.settings_btn, False))
         self.continuous_action = self.settings_menu.addAction("连续识别")
         self.timer_action = self.settings_menu.addAction("计时识别")
-        # 设置菜单项可选中
         self.continuous_action.setCheckable(True)
         self.timer_action.setCheckable(True)
-        # 设置初始选中状态
-        self.continuous_action.setChecked(context.analysis_mode == "continuous")  # 根据配置设置初始状态
-        self.timer_action.setChecked(context.analysis_mode == "timer")  # 根据配置设置初始状态
+        self.continuous_action.setChecked(context.analysis_mode == "continuous")
+        self.timer_action.setChecked(context.analysis_mode == "timer")
         self.continuous_action.triggered.connect(self.toggle_continuous)
         self.timer_action.triggered.connect(self.toggle_timer)
         
@@ -246,23 +495,22 @@ class MainWindow(QMainWindow):
         self.show_qr_action = self.settings_menu.addAction("连接二维码")
         self.show_qr_action.triggered.connect(self.show_qr_dialog)
         
-        # 创建参数选择按钮
-        self.param_btn = QPushButton("引擎参数")
-        self.param_btn.setFixedHeight(35)
-        self.param_btn.setFont(QFont("Arial", 11))
-        self.param_btn.setObjectName("tertiary")
-        # 加载并设置箭头图标
-        # arrow_icon = QIcon('app/images/pulldown_arrow.png')
-        # self.param_btn.setIcon(arrow_icon)
-        self.param_btn.setIconSize(QSize(12, 12))
-        # 移除内联样式，使用主题样式表
-        self.param_btn.setStyleSheet("")
+        # 创建“参数”按钮（统一高度 38px，字体统一 11pt 宋体粗体）
+        self.param_btn = QPushButton("参数")
+        self.param_btn.setFixedHeight(38)
+        self.param_btn.setCursor(Qt.PointingHandCursor)
+        self.param_btn.setFont(songti_font_12)
+        self.param_btn.setObjectName("paramBtnSelect")
+        self.param_btn.setIconSize(QSize(13, 13))
+        self.param_btn.setStyleSheet(param_style)
         self.param_btn.clicked.connect(self.show_param_menu)
-        control_layout.addWidget(self.param_btn, 2)  # Stretch factor 2 (Wider, same as others)
+        control_layout.addWidget(self.param_btn, 1)
         
         # 创建参数菜单
         self.param_menu = QMenu(self)
         self.param_menu.setStyleSheet("")
+        self.param_menu.aboutToShow.connect(lambda: self._set_arrow_state(self.param_btn, True))
+        self.param_menu.aboutToHide.connect(lambda: self._set_arrow_state(self.param_btn, False))
         self.depth_action = self.param_menu.addAction("depth")
         self.movetime_action = self.param_menu.addAction("movetime")
         self.depth_action.setCheckable(True)
@@ -276,37 +524,111 @@ class MainWindow(QMainWindow):
         else:
             self.movetime_action.setChecked(True)
         
-        # 创建参数调整按钮
+        # 创建参数调整按钮（三段式无缝拟物胶囊步进器）
         param_layout = QHBoxLayout()
-        param_layout.setSpacing(self.spacing_tight)
+        param_layout.setSpacing(0)
+        param_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 兼容打包环境与自定义路径的动态绝对路径样式绑定
+        minus_normal_path = resource_path('images', 'ui', 'stepper_minus_normal.png').replace('\\', '/')
+        minus_hover_path = resource_path('images', 'ui', 'stepper_minus_hover.png').replace('\\', '/')
+        minus_pressed_path = resource_path('images', 'ui', 'stepper_minus_pressed.png').replace('\\', '/')
+        
+        disp_path = resource_path('images', 'ui', 'stepper_display.png').replace('\\', '/')
+        
+        plus_normal_path = resource_path('images', 'ui', 'stepper_plus_normal.png').replace('\\', '/')
+        plus_hover_path = resource_path('images', 'ui', 'stepper_plus_hover.png').replace('\\', '/')
+        plus_pressed_path = resource_path('images', 'ui', 'stepper_plus_pressed.png').replace('\\', '/')
+        
+        dec_style = f"""
+            QPushButton#paramDecBtn {{
+                border-image: url("{minus_normal_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #C5C6CB;
+                font-size: 15pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+            QPushButton#paramDecBtn:hover {{
+                border-image: url("{minus_hover_path}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+            }}
+            QPushButton#paramDecBtn:pressed {{
+                border-image: url("{minus_pressed_path}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 5px;
+            }}
+        """
+        
+        disp_style = f"""
+            QLabel#paramLabel {{
+                border-image: url("{disp_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #D4D5DA;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+        """
+        
+        inc_style = f"""
+            QPushButton#paramIncBtn {{
+                border-image: url("{plus_normal_path}") 0 0 0 0 stretch stretch;
+                background: transparent;
+                border: none;
+                color: #C5C6CB;
+                font-size: 15pt;
+                font-weight: bold;
+                padding: 0px 0px 7px 0px;
+                margin: 0px;
+            }}
+            QPushButton#paramIncBtn:hover {{
+                border-image: url("{plus_hover_path}") 0 0 0 0 stretch stretch;
+                color: #FFFFFF;
+            }}
+            QPushButton#paramIncBtn:pressed {{
+                border-image: url("{plus_pressed_path}") 0 0 0 0 stretch stretch;
+                color: #9DA0A8;
+                padding-top: 2px;
+                padding-bottom: 5px;
+            }}
+        """
         
         self.decrease_btn = QPushButton("−")
-        self.decrease_btn.setFixedSize(20, 35) 
-        self.decrease_btn.setFont(QFont("Arial", 16))
-        self.decrease_btn.setObjectName("paramBtn")
-        # 移除内联样式，使用主题样式表
-        self.decrease_btn.setStyleSheet("")
+        self.decrease_btn.setFixedHeight(38)
+        self.decrease_btn.setFixedWidth(24)
+        self.decrease_btn.setCursor(Qt.PointingHandCursor)
+        self.decrease_btn.setFont(QFont("Arial", 15, QFont.Bold))
+        self.decrease_btn.setObjectName("paramDecBtn")
+        self.decrease_btn.setStyleSheet(dec_style)
         self.decrease_btn.clicked.connect(self.on_decrease_param)
         param_layout.addWidget(self.decrease_btn)
         
         self.param_label = QLabel(self.engine_params[self.engine_params["goParam"]])
         self.param_label.setAlignment(Qt.AlignCenter)
-        self.param_label.setFixedHeight(35)
+        self.param_label.setFixedHeight(38)
+        self.param_label.setFixedWidth(36)
+        self.param_label.setFont(QFont("Arial", 12, QFont.Bold))
         self.param_label.setObjectName("paramLabel")
-        # 移除内联样式，使用主题样式表
-        self.param_label.setStyleSheet("")
+        self.param_label.setStyleSheet(disp_style)
         param_layout.addWidget(self.param_label)
         
         self.increase_btn = QPushButton("+")
-        self.increase_btn.setFixedSize(20, 35) 
-        self.increase_btn.setFont(QFont("Arial", 16))
-        self.increase_btn.setObjectName("paramBtn")
-        # 移除内联样式，使用主题样式表
-        self.increase_btn.setStyleSheet("")
+        self.increase_btn.setFixedHeight(38)
+        self.increase_btn.setFixedWidth(24)
+        self.increase_btn.setCursor(Qt.PointingHandCursor)
+        self.increase_btn.setFont(QFont("Arial", 15, QFont.Bold))
+        self.increase_btn.setObjectName("paramIncBtn")
+        self.increase_btn.setStyleSheet(inc_style)
         self.increase_btn.clicked.connect(self.on_increase_param)
         param_layout.addWidget(self.increase_btn)
         
-        control_layout.addLayout(param_layout, 3)  # Stretch factor 3 (Most space for value)
+        control_layout.addLayout(param_layout)  # 步进器尺寸固定，不参与拉伸分流
         main_layout.addLayout(control_layout)
         
         # 初始化UI消息队列和定时器（保持一直运行）
@@ -331,8 +653,8 @@ class MainWindow(QMainWindow):
         self.lines = ["", "", ""]
         self.update_text("等待获取棋局...", MessageType.STATUS)
         
-        # 应用当前主题
-        ThemeManager.apply_theme(context.theme)
+        # 应用固定深色机甲主题（#212123）
+        ThemeManager.apply_theme()
         
         # 初始化图标
         self.update_icons()
@@ -606,22 +928,22 @@ class MainWindow(QMainWindow):
         message_styles = {
             MessageType.MOVE_TEXT: {
                 'color': '#2C3E50',  # 深蓝灰色，更易读
-                'font_size': '45pt',
+                'font_size': '34pt',
                 'is_move': True
             },
             MessageType.STATUS: {
                 'color': '#3498DB',  # 明亮蓝色
-                'font_size': '18pt',
+                'font_size': '13pt',
                 'is_move': False
             },
             MessageType.ERROR: {
-                'color': '#E74C3C',  # 明亮红色
-                'font_size': '18pt',
+                'color': '#FFFFFF',  # 白色
+                'font_size': '13pt',
                 'is_move': False
             },
             MessageType.CHANGE: {
                 'color': '#27AE60',  # 明亮绿色
-                'font_size': '18pt',
+                'font_size': '13pt',
                 'is_move': False
             }
         }
@@ -629,7 +951,7 @@ class MainWindow(QMainWindow):
         # 默认样式
         default_style = {
             'color': '#3498DB',  # 明亮蓝色
-            'font_size': '18pt',
+            'font_size': '13pt',
             'is_move': False
         }
         
@@ -651,20 +973,38 @@ class MainWindow(QMainWindow):
             self.lines = ["", "", lines[0]]
         else:
             # 状态消息：显示在第1行和第2行
-            if len(lines) == 1:
+            if message_type in (MessageType.ERROR, MessageType.NON_GAME_SCREEN) or any(k in text for k in ("等待", "重置", "未检测到", "已关闭", "点击开始")):
+                self.lines = [lines[0], lines[1] if len(lines) > 1 else "", ""]
+            elif len(lines) == 1:
                 self.lines = [lines[0], "", self.lines[2]]  # 保留第3行的着法
             else:
                 self.lines = [lines[0], lines[1], ""] 
         
-        # 生成HTML显示文本
+        # 生成HTML显示文本（适配 64px 紧凑高度，彻底消除溢出）
+        has_status0 = bool(self.lines[0])
+        has_status1 = bool(self.lines[1])
+        has_move = bool(self.lines[2])
+        
         display_text = ""
-        for i, line in enumerate(self.lines):
-            if i == 0 and line:  # 第1行
-                display_text += f'<span style="color: {style["color"]}; font-size: {style["font_size"]}; line-height: 1;">{line}</span><br>'
-            elif i == 1 and line:  # 第2行
-                display_text += f'<span style="color: {style["color"]}; font-size: {style["font_size"]}; line-height: 1;">{line}</span><br>'
-            elif i == 2 and line:  # 第3行（着法）
-                display_text += f'<span style="font-family: \'Songti SC\', \'SimSun\', \'STSong\', serif; font-weight: bold; font-size: 45pt; line-height: 1;">{line}</span>'
+        if has_move:
+            if has_status0:
+                # 状态 + 着法 双行布局（招法文本上移约 3 像素，提升至 34pt，底部保留舒适间距）
+                status_html = f'<div style="color: {style["color"]}; font-size: 10pt; font-weight: normal; margin-top: 1px; margin-bottom: 0px; line-height: 85%;">{self.lines[0]}</div>'
+                move_html = f'<div style="font-family: \'Songti SC\', \'SimSun\', \'STSong\', serif; font-weight: bold; font-size: 34pt; margin-top: 0px; line-height: 100%;">{self.lines[2]}</div>'
+                display_text = f'<div style="text-align: center; margin: 0; padding: 0;">{status_html}{move_html}</div>'
+            else:
+                # 单独显示着法（上移约 3 像素，34pt）
+                move_html = f'<span style="font-family: \'Songti SC\', \'SimSun\', \'STSong\', serif; font-weight: bold; font-size: 34pt; line-height: 1;">{self.lines[2]}</span><div style="font-size: 4pt; line-height: 1;">&nbsp;</div>'
+                display_text = f'<div style="text-align: center; margin: 0; padding: 0;">{move_html}</div>'
+        else:
+            if has_status0 and has_status1:
+                line0_html = f'<span style="color: {style["color"]}; font-size: 11pt;">{self.lines[0]}</span>'
+                line1_html = f'<span style="color: {style["color"]}; font-size: 11pt;">{self.lines[1]}</span>'
+                display_text = f'<div style="text-align: center; margin: 0; padding: 0; line-height: 120%;">{line0_html}<br>{line1_html}</div>'
+            elif has_status0:
+                display_text = f'<div style="text-align: center; margin: 0; padding: 0;"><span style="color: {style["color"]}; font-size: 13pt;">{self.lines[0]}</span></div>'
+            elif has_status1:
+                display_text = f'<div style="text-align: center; margin: 0; padding: 0;"><span style="color: {style["color"]}; font-size: 13pt;">{self.lines[1]}</span></div>'
         
         self.text_display.setText(display_text)
 
@@ -984,6 +1324,11 @@ class MainWindow(QMainWindow):
              print(f"变招请求失败: {e}")
              self.update_text(f"变招失败: {e}", MessageType.ERROR)
 
+    def on_mobile_clicked(self):
+        """手机按钮点击（功能暂时搁置）"""
+        logger.info("手机协助功能暂时搁置")
+        self.update_text("手机功能暂未开放，敬请期待~", MessageType.STATUS)
+
     def show_param_menu(self):
         """显示参数菜单"""
         self.param_menu.exec_(self.param_btn.mapToGlobal(self.param_btn.rect().bottomLeft()))
@@ -1005,29 +1350,24 @@ class MainWindow(QMainWindow):
     def on_change_board_bg(self):
         """更换棋盘底图"""
         self.board_display.next_board()
-    
-    def on_change_theme(self):
-        """更换主题"""
-        new_theme = ThemeManager.toggle_theme()
-        self.update_icons()
-        print(f"Theme switched to: {new_theme}")
+        
+    def on_change_pieces(self):
+        """更换棋子样式版本"""
+        new_style = self.board_display.next_pieces()
+        logger.info(f"已切换棋子样式为: {new_style}")
+
+    def _set_arrow_state(self, button, is_open):
+        """动态更新按钮小三角状态（菜单展开时逆时针旋转90°，收起时复位）"""
+        icon_name = 'arrow_rotated.png' if is_open else 'arrow_down.png'
+        icon_path = resource_path('images', 'ui', icon_name)
+        if os.path.exists(icon_path):
+            button.setIcon(QIcon(icon_path))
 
     def update_icons(self):
-        """根据当前主题更新图标"""
-        # Determine icon name based on theme
-        # Light theme -> black arrow, Dark theme -> white arrow
-        icon_name = 'pulldown_arrow_black.png' if context.theme == 'light' else 'pulldown_arrow.png'
-        icon_path = resource_path('images', icon_name)
-        
-        # Check if file exists to avoid crash if generation failed
-        if not os.path.exists(icon_path):
-            icon_path = resource_path('images', 'pulldown_arrow.png')
-            
+        """更新下拉菜单小三角图标"""
+        icon_path = resource_path('images', 'ui', 'arrow_down.png')
         arrow_icon = QIcon(icon_path)
         
-        # Update buttons if they exist
-        if hasattr(self, 'game_btn'):
-            self.game_btn.setIcon(arrow_icon)
         if hasattr(self, 'board_btn'):
             self.board_btn.setIcon(arrow_icon)
         if hasattr(self, 'settings_btn'):
@@ -1171,7 +1511,7 @@ class ManualPositioner(QObject):
         self.start_cursor_tracking()
         
         # 显示第一步提示
-        self.main_window.text_display.setText('<span style="color: red;">第1步：点击棋盘左上角顶点<br>右键点击可取消定位</span>')
+        self.main_window.text_display.setText('<span style="color: #FFFFFF;">第1步：点击棋盘左上角顶点<br>右键点击可取消定位</span>')
         
         # 初始化图标
         self.main_window.update_icons()
@@ -1445,7 +1785,7 @@ class ManualPositioner(QObject):
                 self.main_window.text_display.setText('<span style="color: green;">2角定位完成!</span>')
             else:
                 # 定位失败，显示错误信息
-                self.main_window.text_display.setText('<span style="color: red;">2角定位失败，请重试</span>')
+                self.main_window.text_display.setText('<span style="color: #FFFFFF;">2角定位失败，请重试</span>')
                 # 重置定位状态，允许重新开始
                 self.positioning_step = 0
                 self.positioning_coords = []

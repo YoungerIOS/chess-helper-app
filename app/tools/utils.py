@@ -10,7 +10,7 @@ def resource_path(*path_parts):
     """获取资源文件的绝对路径
     
     Args:
-        *path_parts: 路径组件，如 'images', 'media', 'chessboard1.png'
+        *path_parts: 路径组件，如 'images', 'board', 'chessboard_design.png'
                    或者单个字符串如 'json/game_config.json'
         
     Returns:
@@ -18,7 +18,7 @@ def resource_path(*path_parts):
         
     Examples:
         resource_path('json', 'game_config.json')
-        resource_path('images', 'media', 'chessboard1.png')
+        resource_path('images', 'board', 'chessboard_design.png')
         resource_path('json/game_config.json')  # 向后兼容
     """
     # 如果只有一个参数且包含路径分隔符，保持向后兼容

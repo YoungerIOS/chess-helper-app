@@ -115,6 +115,7 @@ class ChessContext:
     history: MoveHistory = field(default_factory=MoveHistory)
     screen_size: Optional[tuple] = None  # 屏幕尺寸
     _board_index: int = 0  # 棋盘皮肤索引（私有存储）
+    _piece_style_index: int = 0  # 棋子样式版本索引（私有存储）
     _manual_coords: Optional[tuple] = None  # 手动定位坐标 (x, y, width, height)
     base_fen: Optional[str] = None # 用于历史中断时的锚点FEN (持久化存储)
     analysis_token: int = 0  # 引擎分析令牌，用于废弃过期的回调
@@ -175,13 +176,11 @@ class ChessContext:
             
             # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
             self._board_index = config.get('board_index', 0)
-            # 读取棋盘底图索引（直接设置私有字段，避免加载时触发保存）
-            self._board_index = config.get('board_index', 0)
             logger.info(f"棋盘皮肤索引设置为: {self._board_index}")
             
-            # 读取主题
-            self._theme = config.get('theme', 'light')
-            logger.info(f"主题设置为: {self._theme}")
+            # 读取棋子样式版本索引
+            self._piece_style_index = config.get('piece_style_index', 0)
+            logger.info(f"棋子样式版本索引设置为: {self._piece_style_index}")
             
             # 预加载当前平台的模型
             _ = self.piece_recognizer
@@ -235,8 +234,8 @@ class ChessContext:
     
             # 保存棋盘底图索引
             config['board_index'] = self.board_index
-            # 保存主题
-            config['theme'] = self._theme
+            # 保存棋子样式版本索引
+            config['piece_style_index'] = self.piece_style_index
             
             # 获取引擎参数的副本
             with self._engine_params_lock:
@@ -348,6 +347,17 @@ class ChessContext:
         self.save_config()
 
     @property
+    def piece_style_index(self) -> int:
+        """获取棋子样式版本索引"""
+        return self._piece_style_index
+
+    @piece_style_index.setter
+    def piece_style_index(self, value: int) -> None:
+        """设置棋子样式版本索引并持久化"""
+        self._piece_style_index = int(value)
+        self.save_config()
+
+    @property
     def manual_coords(self) -> Optional[tuple]:
         """获取手动定位坐标"""
         return self._manual_coords
@@ -412,14 +422,12 @@ class ChessContext:
     
     @property
     def theme(self) -> str:
-        """获取当前主题"""
-        return self._theme
+        """获取当前主题（固定为深色机甲主题）"""
+        return "dark"
 
     @theme.setter
     def theme(self, value: str) -> None:
-        """设置当前主题"""
-        self._theme = value
-        self.save_config()
+        pass
 
 
 # 创建全局上下文实例

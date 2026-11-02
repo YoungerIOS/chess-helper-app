@@ -5,6 +5,10 @@ from app.tools.utils import resource_path
 from app.chess.context import context
 import os
 import math
+import re
+from app.tools.log_config import get_logger
+
+logger = get_logger(__name__)
 
 class BoardCanvas(QLabel):
     """
@@ -18,16 +22,12 @@ class BoardCanvas(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_Hover)
         
-        # 移除之前的 inset_padding，改为四向边距控制
-        # 这些边距是为了适配 boardShell 的 padding (QSS) + boardInset 的 visual gap
-        # Shell QSS: border 1.5px, padding: 3px 8px 8px 8px
-        # Total Shell Offset: Top ~4.5px, Others ~9.5px
-        # + Visual Gap (4px)
-        # + User requested shrink (5px per side)
-        self.margin_top = 11   # 9 + 5
-        self.margin_left = 24  # 14 + 5
-        self.margin_right = 24 # 14 + 5
-        self.margin_bottom = 21 # 32 -> 26
+        # 四向边距控制（精准适配机甲外框 board_frame.png 切片凹槽）
+        # 外框切片 board_frame.png 尺寸 633 x 668，在 429 x 453 的窗口尺寸下映射比例对应：
+        self.margin_top = 18
+        self.margin_bottom = 24
+        self.margin_left = 21
+        self.margin_right = 21
         
         self.pieces = []  # 存储当前棋盘上的棋子
         self.board_size = (9, 10)  # 象棋棋盘大小
@@ -36,15 +36,15 @@ class BoardCanvas(QLabel):
         self.is_black_bottom = True  
         self.move_arrow = None  
         
-        # 边框比例
-        self.border_ratio_x = 0.2  # 0.2
-        self.border_ratio_y = 0.2  # 0.2
+        # 边框比例（适配高精设计图暗白大理石精确网格）
+        self.border_ratio_x = 0.168
+        self.border_ratio_y = 0.186
         
-        # 棋盘底图选项
+        # 棋盘底图选项（精简为 3 套与新版机甲外框 100% 贴合的高精拟物底图）
         self.board_options = [
-            resource_path('images', 'media', 'chessboard3.png'),
-            resource_path('images', 'media', 'chessboard4.png'),
-            resource_path('images', 'media', 'chessboard5.png')
+            resource_path('images', 'board', 'chessboard_design.png'),     # 1:1 设计图暗白大理石（默认）
+            resource_path('images', 'board', 'chessboard_wood.png'),       # 古朴实木温润纹理（保留皮肤）
+            resource_path('images', 'board', 'chessboard_marble_ai.png')   # AI新生成暗白大理石
         ]
         self.current_board_index = getattr(context, 'board_index', 0)
         # 防止索引越界 (如果配置文件存的是旧索引)
@@ -53,10 +53,17 @@ class BoardCanvas(QLabel):
             
         self.board_bg = QPixmap(self.board_options[self.current_board_index])
         
+        # 扫描并加载棋子样式版本
+        self.piece_styles = self._scan_piece_styles()
+        self.current_piece_style_index = getattr(context, 'piece_style_index', 0)
+        if self.current_piece_style_index >= len(self.piece_styles):
+            self.current_piece_style_index = 0
+            
         self.piece_images = {}
         self._load_piece_images()
-        self.border_image = QPixmap(resource_path('images', 'media', 'piece_border.png'))
-        self.bullseye_image = QPixmap(resource_path('images', 'media', 'bullseye.png'))
+        self.border_image = QPixmap(resource_path('images', 'board', 'piece_border.png'))
+        self.bullseye_image = QPixmap(resource_path('images', 'board', 'bullseye.png'))
+        self.shadow_image = QPixmap(resource_path('images', 'board', 'piece_shadow.png'))
         
         self.move_from = None  
         self.move_to = None    
@@ -66,8 +73,34 @@ class BoardCanvas(QLabel):
         self.animation_timer.timeout.connect(self.update_rotation)
         self.animation_timer.start(50)  
         
+    def _scan_piece_styles(self):
+        """动态扫描 app/images/board 目录下的所有 pieces* 样式子目录"""
+        base_dir = resource_path('images', 'board')
+        styles = []
+        if os.path.exists(base_dir):
+            for name in os.listdir(base_dir):
+                full_path = os.path.join(base_dir, name)
+                if os.path.isdir(full_path) and name.startswith('pieces'):
+                    styles.append(name)
+        
+        # 按数字自然升序排序，支持 pieces1, pieces2, pieces3...
+        def natural_sort_key(s):
+            m = re.search(r'\d+', s)
+            return int(m.group()) if m else 0
+            
+        styles.sort(key=natural_sort_key)
+        if not styles:
+            styles = ['pieces1']
+        return styles
+
     def _load_piece_images(self):
-        """加载所有棋子图片"""
+        """加载当前指定版本的棋子图片"""
+        if not self.piece_styles:
+            self.piece_styles = self._scan_piece_styles()
+            
+        style_dir = self.piece_styles[self.current_piece_style_index % len(self.piece_styles)]
+        logger.info(f"正在加载棋子样式: {style_dir}")
+        
         piece_types = {
             'K': 'red_K.png', 'k': 'black_k.png',
             'A': 'red_A.png', 'a': 'black_a.png',
@@ -78,9 +111,17 @@ class BoardCanvas(QLabel):
             'P': 'red_P.png', 'p': 'black_p.png'
         }
         
+        self.piece_images.clear()
         for piece, filename in piece_types.items():
-            path = resource_path('images', 'media', filename)
-            self.piece_images[piece] = QPixmap(path)
+            path = resource_path('images', 'board', style_dir, filename)
+            if os.path.exists(path):
+                self.piece_images[piece] = QPixmap(path)
+            else:
+                fallback_path = resource_path('images', 'board', filename)
+                if os.path.exists(fallback_path):
+                    self.piece_images[piece] = QPixmap(fallback_path)
+                else:
+                    logger.warning(f"棋子素材未找到: {path}")
     
     def resizeEvent(self, event):
         """处理窗口大小改变事件"""
@@ -108,36 +149,37 @@ class BoardCanvas(QLabel):
         """绘制棋盘和棋子"""
         super().paintEvent(event)
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         
-        # 计算绘制区域
+        # 计算绘制区域 (扣除外框边距即为内槽有效尺寸)
         target_w = max(1, self.width() - self.margin_left - self.margin_right)
         target_h = max(1, self.height() - self.margin_top - self.margin_bottom)
         
+        # 严丝合缝绘制底图至外框内槽中，杜绝任何黑条、空隙与上下错位
         scaled_board = self.board_bg.scaled(
             target_w, target_h,
-            Qt.KeepAspectRatio,
+            Qt.IgnoreAspectRatio,
             Qt.SmoothTransformation
         )
         
-        # 居中逻辑：基于边距偏移 + 剩余空间居中
-        # 1. 在有效区域内居中
-        content_x = (target_w - scaled_board.width()) // 2
-        content_y = (target_h - scaled_board.height()) // 2
+        x = self.margin_left
+        y = self.margin_top
         
-        # 2. 加上起始偏移
-        x = self.margin_left + content_x
-        y = self.margin_top + content_y
-        
-        # 根据需求绘制底图
         painter.drawPixmap(x, y, scaled_board)
         
-        # 计算内棋盘区域（四周边框为可配置比例的半格）
-        width_units = 8.0 + 2.0 * self.border_ratio_x
-        height_units = 9.0 + 2.0 * self.border_ratio_y
+        # 计算内棋盘网格区域（支持非对称上下边距，实现棋子与石刻线条的零误差对齐）
+        border_top = 9.0 / 64.555
+        border_bottom = 15.0 / 64.555
+        border_left = 11.0 / 68.5
+        border_right = 12.0 / 68.5
+        
+        width_units = 8.0 + border_left + border_right
+        height_units = 9.0 + border_top + border_bottom
         cell_width = scaled_board.width() / width_units
         cell_height = scaled_board.height() / height_units
-        inner_left = x + self.border_ratio_x * cell_width
-        inner_top = y + self.border_ratio_y * cell_height
+        inner_left = x + border_left * cell_width
+        inner_top = y + border_top * cell_height
         
         # ... (后续绘制棋子、标记的逻辑保持不变)
         
@@ -195,6 +237,19 @@ class BoardCanvas(QLabel):
                 draw_x = int(round(piece_cx - scaled_piece.width() / 2))
                 draw_y = int(round(piece_cy - scaled_piece.height() / 2))
                 
+                # 1. 绘制 3D 悬浮软投影 (投向右下方，带来真实物理厚度与景深)
+                if hasattr(self, 'shadow_image') and not self.shadow_image.isNull():
+                    shadow_size = int(round(scaled_piece.width() * 1.08))
+                    scaled_shadow = self.shadow_image.scaled(
+                        shadow_size, shadow_size,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    shadow_x = int(round(piece_cx - scaled_shadow.width() / 2 + 1.5))
+                    shadow_y = int(round(piece_cy - scaled_shadow.height() / 2 + 2.5))
+                    painter.drawPixmap(shadow_x, shadow_y, scaled_shadow)
+                
+                # 2. 绘制棋子本体
                 painter.drawPixmap(draw_x, draw_y, scaled_piece)
         
         # 绘制箭头
@@ -340,6 +395,20 @@ class BoardCanvas(QLabel):
         context.save_config()
         self.update()
     
+    def next_pieces(self):
+        """切换下一套棋子样式版本并持久化"""
+        self.piece_styles = self._scan_piece_styles()
+        if not self.piece_styles:
+            return None
+        self.current_piece_style_index = (self.current_piece_style_index + 1) % len(self.piece_styles)
+        self._load_piece_images()
+        context.piece_style_index = self.current_piece_style_index
+        context.save_config()
+        self.update()
+        current_style = self.piece_styles[self.current_piece_style_index]
+        logger.info(f"已切换棋子样式为: {current_style} (索引: {self.current_piece_style_index})")
+        return current_style
+    
     def clear_board(self):
         self.pieces = []
         self.move_arrow = None
@@ -364,11 +433,32 @@ class BoardDisplay(QWidget):
         self.layout.setStackingMode(QStackedLayout.StackAll)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
+        # 锁定棋盘区域严格匹配机甲原图比例 (633 x 668)，在 429 宽度下精确对应高度 453px
+        self.setFixedHeight(453)
+        
         # 1. 外壳层 (Wood/Frame)
         self.board_shell = QFrame()
         self.shell_layout = QVBoxLayout(self.board_shell)
         self.shell_layout.setContentsMargins(0, 0, 0, 0)
         self.board_shell.setObjectName("boardShell")
+        
+        # 注入高精原图 CNC 金属机甲外框切片（使用绝对路径，双重保障任何运行路径下均能稳定呈现外框）
+        frame_path = resource_path('images', 'ui', 'board_frame.png').replace('\\', '/')
+        self.board_shell.setStyleSheet(f"""
+            QFrame#boardShell {{
+                border-image: url("{frame_path}") 27 31 36 31 stretch stretch;
+                border-width: 18px 21px 24px 21px;
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }}
+            QFrame#boardInset {{
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }}
+        """)
         
         # 2. 内嵌层 (Shadow/Depth) - 作为 Shell 的子元素
         self.board_inset = QFrame()
@@ -399,6 +489,9 @@ class BoardDisplay(QWidget):
         
     def next_board(self):
         self.board_canvas.next_board()
+        
+    def next_pieces(self):
+        return self.board_canvas.next_pieces()
         
     def clear_board(self):
         self.board_canvas.clear_board()
